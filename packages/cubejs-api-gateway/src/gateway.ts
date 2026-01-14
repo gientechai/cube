@@ -27,6 +27,7 @@ import type {
   Request as ExpressRequest,
   Response as ExpressResponse,
 } from 'express';
+import path from 'path';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 
 import { QueryBody } from '@cubejs-backend/query-orchestrator';
@@ -571,6 +572,11 @@ class ApiGateway {
         });
       }));
     }
+
+    // 写入schema js类型文件，post接口，接受一个文件名，一个路径数组，以及文件内容字符串
+    app.post('/cubejs-system/v1/schema/create', jsonParser, userMiddlewares, userAsyncHandler(async (req, res) => {
+      await this.writeDataSchemaFile({ query: req.body, context: req.context, res: this.resToResultFn(res) });
+    }));
 
     if (getEnv('nativeApiGateway')) {
       this.enableNativeApiGateway(app);
@@ -2755,6 +2761,23 @@ class ApiGateway {
   public release() {
     for (const releaseListener of this.releaseListeners) {
       releaseListener();
+    }
+  }
+
+  private writeDataSchemaFile({ query, context, res }: { query: any, context: RequestContext, res: ResponseResultFn }) {
+    const requestStarted = new Date();
+    try {
+      const { fileName, paths = [], content } = query;
+      const relativePathName = path.join(...paths, fileName);
+      if (!this.options.repository) {
+        throw new Error('Repository is not set');
+      }
+      this.options.repository.writeDataSchemaFile(relativePathName, content);
+      res({ success: true });
+    } catch (e: any) {
+      this.handleError({
+        e, context, res, requestStarted
+      });
     }
   }
 }

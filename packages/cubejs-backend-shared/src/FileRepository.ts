@@ -69,7 +69,11 @@ export class FileRepository implements SchemaFileRepository {
   }
 
   public writeDataSchemaFile(fileName: string, source: string) {
-    fs.writeFileSync(path.join(this.localPath(), fileName), source, {
+    const filePath = path.join(this.localPath(), fileName);
+    const dirPath = path.dirname(filePath);
+    // 确保目录存在
+    fs.ensureDirSync(dirPath);
+    fs.writeFileSync(filePath, source, {
       encoding: 'utf-8'
     });
   }

@@ -11,7 +11,8 @@ description = "Cube Rocks Store"
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 # jemalloc is supported only for gnu linux
 # TODO: Fix issue with cross building for linux musl & jemalloc
-rocksdb = { git = "https://github.com/cube-js/rust-rocksdb", branch = "cubestore", default-features = false, features = ["zstd", "snappy", "jemalloc"] }
+# remove jemalloc for kylin system support
+rocksdb = { git = "https://github.com/cube-js/rust-rocksdb", branch = "cubestore", default-features = false, features = ["zstd", "snappy"] }
 
 [target.'cfg(all(target_os = "linux", not(target_env = "gnu")))'.dependencies]
 rocksdb = { git = "https://github.com/cube-js/rust-rocksdb", branch = "cubestore", default-features = false, features = ["zstd", "snappy"] }
