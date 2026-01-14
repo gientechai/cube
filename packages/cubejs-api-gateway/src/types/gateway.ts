@@ -5,6 +5,7 @@
  * Gateway server data types definition.
  */
 
+import { FileRepository } from '@cubejs-backend/shared';
 import {
   QueryRewriteFn,
   ExtendContextFn,
@@ -76,6 +77,7 @@ interface ApiGatewayOptions {
   checkAuth?: CheckAuthFn;
   contextToApiScopes?: ContextToApiScopesFn;
   event?: (name: string, props?: object) => void;
+  repository?: FileRepository;
 }
 
 export {

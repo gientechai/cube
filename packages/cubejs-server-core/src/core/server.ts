@@ -489,6 +489,7 @@ export class CubejsServerCore {
         contextToApiScopes: this.options.contextToApiScopes,
         gatewayPort: this.options.gatewayPort,
         event: this.event,
+        repository: this.repository,
       }
     ));
   }
