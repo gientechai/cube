@@ -724,13 +724,13 @@ const multiStageMeasureType = Joi.string().valid(
 
 const timeShiftItemRequired = Joi.object({
   timeDimension: Joi.func().required(),
-  interval: regexTimeInterval.required(),
+  interval: Joi.func().required(),
   type: Joi.string().valid('next', 'prior').required(),
 });
 
 const timeShiftItemOptional = Joi.object({
   timeDimension: Joi.func(), // not required
-  interval: regexTimeInterval,
+  interval: Joi.string(),
   name: identifier,
   type: Joi.string().valid('next', 'prior'),
 })
