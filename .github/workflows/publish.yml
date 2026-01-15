@@ -770,36 +770,6 @@ jobs:
           tag: ${{ github.ref }}
           overwrite: true
 
-  trigger-test-suites:
-    name: Trigger test suites run
-    runs-on: ubuntu-24.04
-    needs: [docker-default]
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Dispatch event
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GH_TRIGGER_TOKEN }}
-          script: |
-            const prUrl = context.payload.pull_request ? context.payload.pull_request.html_url : '';
-            const commitUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/commit/${context.sha}`;
-
-            await github.rest.actions.createWorkflowDispatch({
-              owner: 'cubedevinc',
-              repo: 'sql-api-test-suite',
-              workflow_id: 'test_and_run_test_suites.yml',
-              ref: 'main',
-              inputs: {
-                'cube-image': '0fpy/cube:latest',
-                'source-repo': context.repo.repo,
-                'source-pr-url': prUrl,
-                'source-commit-url': commitUrl,
-                'initiator': '${{ github.actor }}'
-              }
-            })
-
   detect_branch:
     runs-on: ubuntu-24.04
     outputs:
@@ -814,30 +784,3 @@ jobs:
           # Git & GitHub (for now) doesn't provide an easy/stable way to detect branch name from tag.
           echo "branch=master" >> "$GITHUB_OUTPUT"
           echo "is_master=true" >> "$GITHUB_OUTPUT"
-
-  trigger-repo-sync:
-    name: Trigger runtime repo
-    runs-on: ubuntu-24.04
-    needs: [docker-default, detect_branch]
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Trigger runtime
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GH_TRIGGER_TOKEN }}
-          script: |
-            const tagName = process.env.GITHUB_REF.replace('refs/tags/', '');
-            const branchName = '${{ needs['detect_branch'].outputs.branch }}';
-
-            await github.rest.actions.createWorkflowDispatch({
-              owner: 'cubedevinc',
-              repo: 'cube-runtime',
-              workflow_id: 'sync.yml',
-              ref: 'master',
-              inputs: {
-                'tag': tagName,
-                'branch': branchName,
-              }
-            })
