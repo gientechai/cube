@@ -229,7 +229,7 @@ jobs:
       - name: Download npm packages
         if: steps.prep.outputs.version != 'noop'
         run: |
-          curl -L -o npm-packages.tar.gz "https://github.com/cube-js/cube/releases/download/${{ steps.prep.outputs.version }}/npm-packages-${{ steps.prep.outputs.version }}.tar.gz" || echo "npm-packages.tar.gz not found, will use local packages if available"
+          curl -L -o npm-packages.tar.gz "https://github.com/peace0phmind/cube/releases/download/${{ steps.prep.outputs.version }}/npm-packages-${{ steps.prep.outputs.version }}.tar.gz" || echo "npm-packages.tar.gz not found, will use local packages if available"
           if [ -f npm-packages.tar.gz ]; then
             mkdir -p npm-packages
             tar xzf npm-packages.tar.gz -C npm-packages
@@ -318,7 +318,7 @@ jobs:
       - name: Download npm packages
         if: steps.prep.outputs.version != 'noop'
         run: |
-          curl -L -o npm-packages.tar.gz "https://github.com/cube-js/cube/releases/download/${{ steps.prep.outputs.version }}/npm-packages-${{ steps.prep.outputs.version }}.tar.gz" || echo "npm-packages.tar.gz not found, will use local packages if available"
+          curl -L -o npm-packages.tar.gz "https://github.com/peace0phmind/cube/releases/download/${{ steps.prep.outputs.version }}/npm-packages-${{ steps.prep.outputs.version }}.tar.gz" || echo "npm-packages.tar.gz not found, will use local packages if available"
           if [ -f npm-packages.tar.gz ]; then
             mkdir -p npm-packages
             tar xzf npm-packages.tar.gz -C npm-packages
