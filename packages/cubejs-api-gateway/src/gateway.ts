@@ -582,7 +582,7 @@ class ApiGateway {
     }
 
     // 写入schema js类型文件，post接口，接受一个文件名，一个路径数组，以及文件内容字符串
-    app.post('/cubejs-system/v1/schema/create', jsonParser, userMiddlewares, userAsyncHandler(async (req, res) => {
+    app.post(`${this.basePath}/v1/schema/create`, jsonParser, userMiddlewares, userAsyncHandler(async (req, res) => {
       await this.writeDataSchemaFile({ query: req.body, context: req.context, res: this.resToResultFn(res) });
     }));
 
