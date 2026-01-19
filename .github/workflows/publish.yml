@@ -11,7 +11,7 @@ env:
   RUSTUP_MAX_RETRIES: 10
 
 jobs:
-  build_npm_packages:
+  npm:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -59,24 +59,28 @@ jobs:
         run: yarn lerna run --concurrency 1 build
         env:
           NODE_OPTIONS: --max_old_space_size=4096
-      - name: Package npm packages
+      - name: Get version from tag
+        id: version
         run: |
-          # Create npm-packages directory structure
-          mkdir -p npm-packages/packages
-          # Copy all packages with their built artifacts
-          cp -r packages/* npm-packages/packages/ 2>/dev/null || true
-          # Copy root level files needed for installation
-          cp package.json npm-packages/ 2>/dev/null || true
-          cp yarn.lock npm-packages/ 2>/dev/null || true
-          cp lerna.json npm-packages/ 2>/dev/null || true
-          # Create a tarball of all packages
-          tar czf npm-packages.tar.gz npm-packages/
-      - name: Upload npm packages artifact
-        uses: actions/upload-artifact@v4
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+      - name: Pack npm packages
+        run: |
+          mkdir -p npm-packages
+          # Get all publishable packages and pack them
+          yarn lerna exec -- npm pack --pack-destination ../../npm-packages || true
+      - name: Create npm packages archive
+        run: |
+          cd npm-packages
+          tar czf ../npm-packages.tar.gz *.tgz
+      - name: Upload npm packages to Release
+        uses: svenstaro/upload-release-action@v2
         with:
-          name: npm-packages
-          path: npm-packages.tar.gz
-          retention-days: 30
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: npm-packages.tar.gz
+          asset_name: npm-packages-${{ steps.version.outputs.version }}.tar.gz
+          tag: ${{ github.ref }}
+          overwrite: true
 
   native_linux:
     # Please use minimal possible version of ubuntu, because it produces constraint on glibc
@@ -86,7 +90,7 @@ jobs:
     strategy:
       matrix:
         node-version: [22]
-        python-version: ["3.9", "3.10", "3.11", "3.12", "fallback"]
+        python-version: ["3.11", "fallback"]
         target: ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
         include:
           - target: x86_64-unknown-linux-gnu
@@ -157,187 +161,9 @@ jobs:
           asset_name: native-${{ matrix.package_target_platform }}-${{ matrix.package_target_arch }}-${{ matrix.package_target_libc }}-${{ matrix.python-version }}.tar.gz
           tag: ${{ github.ref }}
           overwrite: true
-      - name: Upload native artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: native-${{ matrix.package_target_platform }}-${{ matrix.package_target_arch }}-${{ matrix.package_target_libc }}-${{ matrix.python-version }}
-          path: packages/cubejs-backend-native/native.tar.gz
-          retention-days: 30
-
-  native_macos:
-    runs-on: ${{ matrix.os-version }}
-    timeout-minutes: 90
-    name: Build ${{ matrix.os-version }} ${{ matrix.target }} ${{ matrix.node-version }} Python ${{ matrix.python-version }}
-    strategy:
-      matrix:
-        node-version: [22.x]
-        target: ["x86_64-apple-darwin", "aarch64-apple-darwin"]
-        python-version: ["3.9", "3.10", "3.11", "3.12", "fallback"]
-        include:
-          - target: x86_64-apple-darwin
-            os-version: macos-15-intel
-            package_target_arch: x64
-            package_target_platform: darwin
-            package_target_libc: unknown
-            tar_executable: gtar
-          - target: aarch64-apple-darwin
-            os-version: macos-14
-            package_target_arch: arm64
-            package_target_platform: darwin
-            package_target_libc: unknown
-            tar_executable: gtar
-        exclude:
-          # Disable python builds for aarch64 (not ready)
-          - target: "aarch64-apple-darwin"
-            python-version: "3.9"
-          - target: "aarch64-apple-darwin"
-            python-version: "3.10"
-          - target: "aarch64-apple-darwin"
-            python-version: "3.11"
-          - target: "aarch64-apple-darwin"
-            python-version: "3.12"
-      fail-fast: false
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: 1.90.0
-          # override: true # this is by default on
-          rustflags: ""
-          components: rustfmt
-          target: ${{ matrix.target }}
-      - name: Install Python
-        uses: actions/setup-python@v5
-        if: (matrix.python-version != 'fallback')
-        with:
-          python-version: ${{ matrix.python-version }}
-      - name: Install Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node-version }}
-      - name: Set Yarn version
-        run: yarn policies set-version v1.22.22
-        # We don't need to install all yarn deps to build native
-      - name: Install cargo-cp-artifact
-        run: npm install -g cargo-cp-artifact@0.1
-      - name: Build native (fallback)
-        if: (matrix.python-version == 'fallback')
-        run: cd packages/cubejs-backend-native && npm run native:build-release
-        env:
-          CARGO_BUILD_TARGET: ${{ matrix.target }}
-      - name: Build native (with Python)
-        if: (matrix.python-version != 'fallback')
-        env:
-          PYO3_PYTHON: python${{ matrix.python-version }}
-          CARGO_BUILD_TARGET: ${{ matrix.target }}
-        run: cd packages/cubejs-backend-native && npm run native:build-release-python
-      - name: Archive release asset
-        shell: bash
-        run: |
-          cd packages/cubejs-backend-native
-          rm -rf native
-          mkdir native
-          cp index.node native/index.node
-          ${{ matrix.tar_executable }} -czvf native.tar.gz native
-      - name: Upload to Release
-        uses: svenstaro/upload-release-action@v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: packages/cubejs-backend-native/native.tar.gz
-          # Example: native-linux-arm64-glibc.tar.gz
-          asset_name: native-${{ matrix.package_target_platform }}-${{ matrix.package_target_arch }}-${{ matrix.package_target_libc }}-${{ matrix.python-version }}.tar.gz
-          tag: ${{ github.ref }}
-          overwrite: true
-      - name: Upload native artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: native-${{ matrix.package_target_platform }}-${{ matrix.package_target_arch }}-${{ matrix.package_target_libc }}-${{ matrix.python-version }}
-          path: packages/cubejs-backend-native/native.tar.gz
-          retention-days: 30
-
-  native_windows:
-    runs-on: ${{ matrix.os-version }}
-    timeout-minutes: 90
-    name: Build ${{ matrix.os-version }} ${{ matrix.node-version }} Python ${{ matrix.python-version }}
-    strategy:
-      matrix:
-        node-version: [22.x]
-        python-version: ["fallback"]
-        os-version: [windows-2022]
-        include:
-          - os-version: windows-2022
-            package_target_arch: x64
-            package_target_platform: win32
-            package_target_libc: unknown
-            tar_executable: tar
-      fail-fast: false
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Disable rustup update (issue workaround for Windows)
-        run: rustup set auto-self-update disable
-        shell: bash
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: 1.90.0
-          # override: true # this is by default on
-          rustflags: ""
-          components: rustfmt
-      - name: Install Python
-        uses: actions/setup-python@v5
-        if: (matrix.python-version != 'fallback')
-        with:
-          python-version: ${{ matrix.python-version }}
-      - name: Install Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node-version }}
-      - name: Set Yarn version
-        run: yarn policies set-version v1.22.22
-        # We don't need to install all yarn deps to build native
-      - name: Install cargo-cp-artifact
-        run: npm install -g cargo-cp-artifact@0.1
-      - name: Build native (fallback)
-        if: (matrix.python-version == 'fallback')
-        run: cd packages/cubejs-backend-native && npm run native:build-release
-      - name: Build native (with Python)
-        if: (matrix.python-version != 'fallback')
-        env:
-          PYO3_PYTHON: python${{ matrix.python-version }}
-        run: cd packages/cubejs-backend-native && npm run native:build-release-python
-      - name: Archive release asset
-        shell: bash
-        run: |
-          cd packages/cubejs-backend-native
-          rm -rf native
-          mkdir native
-          cp index.node native/index.node
-          ${{ matrix.tar_executable }} -czvf native.tar.gz native
-      - name: Upload to Release
-        uses: svenstaro/upload-release-action@v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: packages/cubejs-backend-native/native.tar.gz
-          # Example: native-linux-arm64-glibc.tar.gz
-          asset_name: native-${{ matrix.package_target_platform }}-${{ matrix.package_target_arch }}-${{ matrix.package_target_libc }}-${{ matrix.python-version }}.tar.gz
-          tag: ${{ github.ref }}
-          overwrite: true
-      - name: Upload native artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: native-${{ matrix.package_target_platform }}-${{ matrix.package_target_arch }}-${{ matrix.package_target_libc }}-${{ matrix.python-version }}
-          path: packages/cubejs-backend-native/native.tar.gz
-          retention-days: 30
 
   docker-default:
-    needs: [build_npm_packages, cubestore_linux, native_linux, detect_branch]
+    needs: [npm, cubestore_linux, native_linux, detect_branch]
     name: Debian docker image
     runs-on: ${{ matrix.os }}
     strategy:
@@ -347,38 +173,10 @@ jobs:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             platforms: linux/amd64,linux/arm64
-            native_arch: x64
-            native_platform: linux
-            native_libc: glibc
-            native_python: fallback
     timeout-minutes: 90
     steps:
       - name: Check out the repo
         uses: actions/checkout@v4
-      - name: Download npm packages artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: npm-packages
-          path: ./artifacts/
-      - name: Download native artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: native-${{ matrix.native_platform }}-${{ matrix.native_arch }}-${{ matrix.native_libc }}-*
-          path: ./artifacts/native/
-          merge-multiple: true
-      - name: Extract npm packages
-        run: |
-          cd artifacts
-          tar xzf npm-packages.tar.gz
-          cd ..
-      - name: Extract native binaries
-        run: |
-          mkdir -p artifacts/native-extracted
-          for native_tar in artifacts/native/*.tar.gz; do
-            if [ -f "$native_tar" ]; then
-              tar xzf "$native_tar" -C artifacts/native-extracted
-            fi
-          done
       - name: Repo metadata
         id: repo
         uses: actions/github-script@v7
@@ -428,10 +226,15 @@ jobs:
         uses: docker/setup-buildx-action@v3
       - name: Copy yarn.lock file
         run: cp yarn.lock packages/cubejs-docker
-      - name: Copy artifacts to docker context
+      - name: Download npm packages
+        if: steps.prep.outputs.version != 'noop'
         run: |
-          cp -r artifacts/npm-packages packages/cubejs-docker/
-          cp -r artifacts/native-extracted packages/cubejs-docker/
+          curl -L -o npm-packages.tar.gz "https://github.com/cube-js/cube/releases/download/${{ steps.prep.outputs.version }}/npm-packages-${{ steps.prep.outputs.version }}.tar.gz" || echo "npm-packages.tar.gz not found, will use local packages if available"
+          if [ -f npm-packages.tar.gz ]; then
+            mkdir -p npm-packages
+            tar xzf npm-packages.tar.gz -C npm-packages
+            cp -r npm-packages packages/cubejs-docker/
+          fi
       - name: Push to Docker Hub
         uses: docker/build-push-action@v6
         with:
@@ -451,10 +254,10 @@ jobs:
             org.opencontainers.image.licenses=${{ fromJson(steps.repo.outputs.result).license.spdx_id }}
           build-args: |
             IMAGE_VERSION=${{ steps.prep.outputs.version }}
-            USE_LOCAL_PACKAGES=true
+            NPM_PACKAGES_VERSION=${{ steps.prep.outputs.version }}
 
   docker-debian-jdk:
-    needs: [build_npm_packages, cubestore_linux, native_linux, detect_branch]
+    needs: [npm, cubestore_linux, native_linux, detect_branch]
     name: Debian with jdk docker image
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -463,30 +266,6 @@ jobs:
     steps:
       - name: Check out the repo
         uses: actions/checkout@v4
-      - name: Download npm packages artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: npm-packages
-          path: ./artifacts/
-      - name: Download native artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: native-linux-x64-glibc-*
-          path: ./artifacts/native/
-          merge-multiple: true
-      - name: Extract npm packages
-        run: |
-          cd artifacts
-          tar xzf npm-packages.tar.gz
-          cd ..
-      - name: Extract native binaries
-        run: |
-          mkdir -p artifacts/native-extracted
-          for native_tar in artifacts/native/*.tar.gz; do
-            if [ -f "$native_tar" ]; then
-              tar xzf "$native_tar" -C artifacts/native-extracted
-            fi
-          done
       - name: Repo metadata
         id: repo
         uses: actions/github-script@v7
@@ -536,10 +315,15 @@ jobs:
         uses: docker/setup-qemu-action@v3
       - name: Copy yarn.lock file
         run: cp yarn.lock packages/cubejs-docker
-      - name: Copy artifacts to docker context
+      - name: Download npm packages
+        if: steps.prep.outputs.version != 'noop'
         run: |
-          cp -r artifacts/npm-packages packages/cubejs-docker/
-          cp -r artifacts/native-extracted packages/cubejs-docker/
+          curl -L -o npm-packages.tar.gz "https://github.com/cube-js/cube/releases/download/${{ steps.prep.outputs.version }}/npm-packages-${{ steps.prep.outputs.version }}.tar.gz" || echo "npm-packages.tar.gz not found, will use local packages if available"
+          if [ -f npm-packages.tar.gz ]; then
+            mkdir -p npm-packages
+            tar xzf npm-packages.tar.gz -C npm-packages
+            cp -r npm-packages packages/cubejs-docker/
+          fi
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Push to Docker Hub
@@ -561,12 +345,12 @@ jobs:
             org.opencontainers.image.licenses=${{ fromJson(steps.repo.outputs.result).license.spdx_id }}
           build-args: |
             IMAGE_VERSION=${{ steps.prep.outputs.version }}
-            USE_LOCAL_PACKAGES=true
+            NPM_PACKAGES_VERSION=${{ steps.prep.outputs.version }}
 
   docker-cubestore:
     name: Cube Store Docker
     runs-on: ${{ matrix.os }}
-    needs: [cubestore_linux, detect_branch]
+    needs: [detect_branch]
     strategy:
       fail-fast: false
       matrix:
@@ -596,19 +380,6 @@ jobs:
     steps:
       - name: Check out the repo
         uses: actions/checkout@v4
-      - name: Download cubestore artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: cubestored-${{ matrix.target }}
-          path: ./artifacts/cubestore/
-      - name: Extract cubestore binary
-        run: |
-          mkdir -p artifacts/cubestore-extracted
-          for cubestore_tar in artifacts/cubestore/*.tar.gz; do
-            if [ -f "$cubestore_tar" ]; then
-              tar xzf "$cubestore_tar" -C artifacts/cubestore-extracted
-            fi
-          done
       - name: Repo metadata
         id: repo
         uses: actions/github-script@v7
@@ -649,12 +420,6 @@ jobs:
             echo "tags=${TAGS}"
             echo "created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           } >> "$GITHUB_OUTPUT"
-      - name: Copy cubestore binary to docker context
-        run: |
-          mkdir -p rust/cubestore/prebuilt-bin
-          cp artifacts/cubestore-extracted/bin/cubestored rust/cubestore/prebuilt-bin/ || true
-          # Fallback: try to find the binary in extracted directory
-          find artifacts/cubestore-extracted -name "cubestored" -type f -exec cp {} rust/cubestore/prebuilt-bin/ \;
       - name: Login to DockerHub
         uses: docker/login-action@v3
         with:
@@ -668,9 +433,7 @@ jobs:
           context: ./rust/
           file: ./rust/cubestore/Dockerfile
           platforms: ${{ matrix.platforms }}
-          build-args: |
-            ${{ matrix.build-args }}
-            USE_PREBUILT_BINARY=true
+          build-args: ${{ matrix.build-args }}
           push: true
           tags: ${{ steps.prep.outputs.tags }}
           cache-from: type=gha
@@ -689,7 +452,7 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-          repository: 0fpy/cubestore
+          repository: cubejs/cubestore
           readme-filepath: ./rust/cubestore/README.md
 
   cubestore_linux:
@@ -773,125 +536,6 @@ jobs:
           asset_name: cubestored-${{ matrix.target }}.tar.gz
           tag: ${{ github.ref }}
           overwrite: true
-      - name: Upload cubestore artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: cubestored-${{ matrix.target }}
-          path: cubestore-archive/cubestored-${{ matrix.target }}.tar.gz
-          retention-days: 30
-
-  cubestore:
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
-    env:
-      RUSTFLAGS: '-Ctarget-feature=+crt-static'
-      OPENSSL_STATIC: 1
-    strategy:
-      matrix:
-        target:
-          - x86_64-pc-windows-msvc
-          - x86_64-apple-darwin
-          - aarch64-apple-darwin
-        include:
-          - target: x86_64-pc-windows-msvc
-            os: windows-2022
-            executable_name: cubestored.exe
-            strip: true
-            # cubestored.exe: CantPackException: superfluous data between sections
-            compress: false
-            tar_executable: tar
-            # Please use minimal possible version of macOS, because it produces constraint on libstdc++
-          - target: x86_64-apple-darwin
-            os: macos-15-intel
-            executable_name: cubestored
-            # upx has been disabled because it is crashing for macOS Ventura or above! It was disabled on 2024-09-05.
-            strip: false
-            compress: false
-            # bsd tar has a different format with Sparse files which breaks download script
-            tar_executable: gtar
-          - os: macos-14
-            target: aarch64-apple-darwin
-            executable_name: cubestored
-            # upx has been disabled because it is crashing for macOS Ventura or above! It was disabled on 2024-09-05.
-            strip: false
-            compress: false
-            # bsd tar has a different format with Sparse files which breaks download script
-            tar_executable: gtar
-      fail-fast: false
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      - name: Disable rustup update (issue workaround for Windows)
-        run: rustup set auto-self-update disable
-        if: contains(runner.os, 'windows')
-        shell: bash
-      - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: nightly-2025-08-01
-          target: ${{ matrix.target }}
-          # override: true # this is by default on
-          rustflags: ""
-          components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ./rust/cubestore -> target
-          prefix-key: v0-rust-cubestore-cross
-          key: target-${{ matrix.target }}
-      - uses: ilammy/msvc-dev-cmd@v1
-        if: ${{ startsWith(matrix.os, 'windows') }}
-      - name: Install OpenSSL for Windows
-        if: ${{ startsWith(matrix.os, 'windows') }}
-        run: vcpkg integrate install; vcpkg install openssl:x64-windows
-      - name: Instal LLVM for Windows
-        if: ${{ startsWith(matrix.os, 'windows') }}
-        run: choco install -y --force llvm --version 18.1.6
-      - name: Set Env Variables for Windows
-        uses: allenevans/set-env@v4.0.0
-        if: ${{ startsWith(matrix.os, 'windows') }}
-        with:
-          OPENSSL_DIR: 'C:/vcpkg/packages/openssl_x64-windows'
-          # This paths are required to work with static linking
-          OPENSSL_LIB_DIR: 'C:/vcpkg/packages/openssl_x64-windows/lib'
-          OPENSSL_INCLUDE_DIR: 'C:/vcpkg/packages/openssl_x64-windows/include'
-          LIBCLANG_PATH: 'C:\Program Files\LLVM\bin'
-      - name: Build with Cargo
-        run: |
-          cd rust/cubestore && cargo build --release --target=${{ matrix.target }} -p cubestore
-      - name: Compress binaries
-        uses: svenstaro/upx-action@v2
-        if: ${{ matrix.compress }}
-        with:
-          file: rust/cubestore/target/${{ matrix.target }}/release/${{ matrix.executable_name }}
-          args: --lzma
-          strip: ${{ matrix.strip }}
-      - name: Create folder for archive
-        run: |
-          mkdir cubestore-archive
-          mkdir cubestore-archive/bin
-      - name: Copy/paste OpenSSL to Archive (hotfix for Windows)
-        if: ${{ startsWith(matrix.os, 'windows') }}
-        run: cp C:/vcpkg/packages/openssl_x64-windows/bin/*.dll cubestore-archive/bin
-      - name: Create archive for release
-        run: |
-          mv rust/cubestore/target/${{ matrix.target }}/release/${{ matrix.executable_name }} cubestore-archive/bin/${{ matrix.executable_name }}
-          cd cubestore-archive
-          ${{ matrix.tar_executable }} -cvzf cubestored-${{ matrix.target }}.tar.gz ./*
-      - name: Upload Binary to Release
-        uses: svenstaro/upload-release-action@v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: cubestore-archive/cubestored-${{ matrix.target }}.tar.gz
-          asset_name: cubestored-${{ matrix.target }}.tar.gz
-          tag: ${{ github.ref }}
-          overwrite: true
-      - name: Upload cubestore artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: cubestored-${{ matrix.target }}
-          path: cubestore-archive/cubestored-${{ matrix.target }}.tar.gz
-          retention-days: 30
 
   detect_branch:
     runs-on: ubuntu-24.04
