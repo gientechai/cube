@@ -26,7 +26,7 @@ RUN if [ -d "npm-packages" ] && [ "$(ls -A npm-packages/*.tgz 2>/dev/null)" ]; t
       done; \
     elif [ -n "$NPM_PACKAGES_VERSION" ] && [ "$NPM_PACKAGES_VERSION" != "noop" ]; then \
       echo "Downloading npm packages from GitHub Releases..." && \
-      curl -L -o npm-packages.tar.gz "https://github.com/cube-js/cube/releases/download/v${NPM_PACKAGES_VERSION}/npm-packages-${NPM_PACKAGES_VERSION}.tar.gz" && \
+      curl -L -o npm-packages.tar.gz "https://github.com/peace0phmind/cube/releases/download/v${NPM_PACKAGES_VERSION}/npm-packages-${NPM_PACKAGES_VERSION}.tar.gz" && \
       mkdir -p npm-packages && \
       tar xzf npm-packages.tar.gz -C npm-packages && \
       for pkg in npm-packages/*.tgz; do \
