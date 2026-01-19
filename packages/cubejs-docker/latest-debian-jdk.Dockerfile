@@ -1,10 +1,11 @@
 # syntax=docker/dockerfile-upstream:master-experimental
 FROM node:22.20.0-bookworm-slim AS builder
 
-ARG USE_LOCAL_PACKAGES=false
-
 WORKDIR /cube
 COPY . .
+
+# Add build-arg for npm packages version
+ARG NPM_PACKAGES_VERSION
 
 RUN yarn policies set-version v1.22.22
 # Yarn v1 uses aggressive timeouts with summing time spending on fs, https://github.com/yarnpkg/yarn/issues/4890
@@ -14,32 +15,32 @@ RUN yarn config set network-timeout 120000 -g
 RUN apt-get update \
     # python3 package is necessary to install `python3` executable for node-gyp
     # libpython3-dev is needed to trigger post-installer to download native with python
-    && apt-get install -y python3 python3.11 libpython3.11-dev gcc g++ make cmake openjdk-17-jdk-headless \
+    && apt-get install -y python3 python3.11 libpython3.11-dev gcc g++ make cmake openjdk-17-jdk-headless curl \
     && rm -rf /var/lib/apt/lists/*
+
+# Install npm packages from local tarballs or download from GitHub Releases
+RUN if [ -d "npm-packages" ] && [ "$(ls -A npm-packages/*.tgz 2>/dev/null)" ]; then \
+      echo "Installing npm packages from local tarballs..." && \
+      for pkg in npm-packages/*.tgz; do \
+        yarn add file:"$pkg" --ignore-scripts || true; \
+      done; \
+    elif [ -n "$NPM_PACKAGES_VERSION" ] && [ "$NPM_PACKAGES_VERSION" != "noop" ]; then \
+      echo "Downloading npm packages from GitHub Releases..." && \
+      curl -L -o npm-packages.tar.gz "https://github.com/cube-js/cube/releases/download/v${NPM_PACKAGES_VERSION}/npm-packages-${NPM_PACKAGES_VERSION}.tar.gz" && \
+      mkdir -p npm-packages && \
+      tar xzf npm-packages.tar.gz -C npm-packages && \
+      for pkg in npm-packages/*.tgz; do \
+        yarn add file:"$pkg" --ignore-scripts || true; \
+      done && \
+      rm -f npm-packages.tar.gz; \
+    fi
 
 # We are copying root yarn.lock file to the context folder during the Publish GH
 # action. So, a process will use the root lock file here.
-RUN if [ "$USE_LOCAL_PACKAGES" = "true" ] && [ -d "npm-packages" ]; then \
-      # Install from local packages - copy packages to workspace structure
-      cp -r npm-packages/packages/* packages/ 2>/dev/null || true \
-      && cp npm-packages/package.json . 2>/dev/null || true \
-      && cp npm-packages/yarn.lock . 2>/dev/null || true \
-      && cp npm-packages/lerna.json . 2>/dev/null || true \
-      # Install dependencies using local packages
-      && yarn install --prod --ignore-scripts \
-      # Copy native binaries if available
-      && if [ -d "native-extracted" ]; then \
-           mkdir -p node_modules/@cubejs-backend/native/lib 2>/dev/null || true; \
-           find native-extracted -name "*.node" -exec cp {} node_modules/@cubejs-backend/native/lib/ \; 2>/dev/null || true; \
-         fi \
-      && rm -rf /cube/node_modules/duckdb/src \
-      && yarn cache clean; \
-    else \
-      # Install from npm registry (original behavior)
-      yarn install --prod \
-      && rm -rf /cube/node_modules/duckdb/src \
-      && yarn cache clean; \
-    fi
+RUN yarn install --prod \
+    # Remove DuckDB sources to reduce image size
+    && rm -rf /cube/node_modules/duckdb/src \
+    && yarn cache clean
 
 FROM node:22.20.0-bookworm-slim
 
