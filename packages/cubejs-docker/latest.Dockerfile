@@ -1,5 +1,7 @@
 FROM node:22.22.0-bookworm-slim AS builder
 
+ARG USE_LOCAL_PACKAGES=false
+
 WORKDIR /cube
 COPY . .
 
@@ -16,10 +18,27 @@ RUN apt-get update \
 
 # We are copying root yarn.lock file to the context folder during the Publish GH
 # action. So, a process will use the root lock file here.
-RUN yarn install --prod \
-    # Remove DuckDB sources to reduce image size
-    && rm -rf /cube/node_modules/duckdb/src \
-    && yarn cache clean
+RUN if [ "$USE_LOCAL_PACKAGES" = "true" ] && [ -d "npm-packages" ]; then \
+      # Install from local packages - copy packages to workspace structure
+      cp -r npm-packages/packages/* packages/ 2>/dev/null || true \
+      && cp npm-packages/package.json . 2>/dev/null || true \
+      && cp npm-packages/yarn.lock . 2>/dev/null || true \
+      && cp npm-packages/lerna.json . 2>/dev/null || true \
+      # Install dependencies using local packages
+      && yarn install --prod --ignore-scripts \
+      # Copy native binaries if available
+      && if [ -d "native-extracted" ]; then \
+           mkdir -p node_modules/@cubejs-backend/native/lib 2>/dev/null || true; \
+           find native-extracted -name "*.node" -exec cp {} node_modules/@cubejs-backend/native/lib/ \; 2>/dev/null || true; \
+         fi \
+      && rm -rf /cube/node_modules/duckdb/src \
+      && yarn cache clean; \
+    else \
+      # Install from npm registry (original behavior)
+      yarn install --prod \
+      && rm -rf /cube/node_modules/duckdb/src \
+      && yarn cache clean; \
+    fi
 
 FROM node:22.22.0-bookworm-slim
 
