@@ -464,7 +464,6 @@ jobs:
       matrix:
         target:
           - x86_64-unknown-linux-gnu
-          - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-gnu
         include:
           # Please use minimal possible version of ubuntu, because it produces constraint on glibc
@@ -473,13 +472,6 @@ jobs:
             image: cubejs/rust-cross:x86_64-unknown-linux-gnu-15082024
             executable_name: cubestored
             strip: true
-            compress: false
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-musl
-            image: cubejs/rust-cross:x86_64-unknown-linux-musl-15082024
-            executable_name: cubestored
-            strip: true
-            # cubestored: CantPackException: bad DT_HASH nbucket=0x344  len=0x1890
             compress: false
           - os: ubuntu-24.04-arm
             image: cubejs/rust-builder:bullseye-llvm-18
