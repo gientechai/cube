@@ -11,12 +11,11 @@ env:
   RUSTUP_MAX_RETRIES: 10
 
 jobs:
-  npm:
+  build_npm_packages:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: write
-      id-token: write  # Required for OIDC trusted publishing
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,9 +30,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22.x
-          registry-url: 'https://registry.npmjs.org/'
-      - name: Upgrade npm for OIDC support
-        run: npm install -g npm@11.7.0
       - name: Get yarn cache directory path
         id: yarn-cache-dir-path
         run: echo "dir=$(yarn cache dir)" >> "$GITHUB_OUTPUT"
@@ -63,10 +59,24 @@ jobs:
         run: yarn lerna run --concurrency 1 build
         env:
           NODE_OPTIONS: --max_old_space_size=4096
-      - name: NPM publish
-        run: ./node_modules/.bin/lerna publish from-package --yes
-        env:
-          NPM_CONFIG_PROVENANCE: true
+      - name: Package npm packages
+        run: |
+          # Create npm-packages directory structure
+          mkdir -p npm-packages/packages
+          # Copy all packages with their built artifacts
+          cp -r packages/* npm-packages/packages/ 2>/dev/null || true
+          # Copy root level files needed for installation
+          cp package.json npm-packages/ 2>/dev/null || true
+          cp yarn.lock npm-packages/ 2>/dev/null || true
+          cp lerna.json npm-packages/ 2>/dev/null || true
+          # Create a tarball of all packages
+          tar czf npm-packages.tar.gz npm-packages/
+      - name: Upload npm packages artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-packages
+          path: npm-packages.tar.gz
+          retention-days: 30
 
   native_linux:
     # Please use minimal possible version of ubuntu, because it produces constraint on glibc
@@ -147,6 +157,12 @@ jobs:
           asset_name: native-${{ matrix.package_target_platform }}-${{ matrix.package_target_arch }}-${{ matrix.package_target_libc }}-${{ matrix.python-version }}.tar.gz
           tag: ${{ github.ref }}
           overwrite: true
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.package_target_platform }}-${{ matrix.package_target_arch }}-${{ matrix.package_target_libc }}-${{ matrix.python-version }}
+          path: packages/cubejs-backend-native/native.tar.gz
+          retention-days: 30
 
   native_macos:
     runs-on: ${{ matrix.os-version }}
@@ -236,6 +252,12 @@ jobs:
           asset_name: native-${{ matrix.package_target_platform }}-${{ matrix.package_target_arch }}-${{ matrix.package_target_libc }}-${{ matrix.python-version }}.tar.gz
           tag: ${{ github.ref }}
           overwrite: true
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.package_target_platform }}-${{ matrix.package_target_arch }}-${{ matrix.package_target_libc }}-${{ matrix.python-version }}
+          path: packages/cubejs-backend-native/native.tar.gz
+          retention-days: 30
 
   native_windows:
     runs-on: ${{ matrix.os-version }}
@@ -307,9 +329,15 @@ jobs:
           asset_name: native-${{ matrix.package_target_platform }}-${{ matrix.package_target_arch }}-${{ matrix.package_target_libc }}-${{ matrix.python-version }}.tar.gz
           tag: ${{ github.ref }}
           overwrite: true
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.package_target_platform }}-${{ matrix.package_target_arch }}-${{ matrix.package_target_libc }}-${{ matrix.python-version }}
+          path: packages/cubejs-backend-native/native.tar.gz
+          retention-days: 30
 
   docker-default:
-    needs: [npm, cubestore_linux, native_linux, detect_branch]
+    needs: [build_npm_packages, cubestore_linux, native_linux, detect_branch]
     name: Debian docker image
     runs-on: ${{ matrix.os }}
     strategy:
@@ -319,10 +347,38 @@ jobs:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             platforms: linux/amd64,linux/arm64
+            native_arch: x64
+            native_platform: linux
+            native_libc: glibc
+            native_python: fallback
     timeout-minutes: 90
     steps:
       - name: Check out the repo
         uses: actions/checkout@v4
+      - name: Download npm packages artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-packages
+          path: ./artifacts/
+      - name: Download native artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: native-${{ matrix.native_platform }}-${{ matrix.native_arch }}-${{ matrix.native_libc }}-*
+          path: ./artifacts/native/
+          merge-multiple: true
+      - name: Extract npm packages
+        run: |
+          cd artifacts
+          tar xzf npm-packages.tar.gz
+          cd ..
+      - name: Extract native binaries
+        run: |
+          mkdir -p artifacts/native-extracted
+          for native_tar in artifacts/native/*.tar.gz; do
+            if [ -f "$native_tar" ]; then
+              tar xzf "$native_tar" -C artifacts/native-extracted
+            fi
+          done
       - name: Repo metadata
         id: repo
         uses: actions/github-script@v7
@@ -372,6 +428,10 @@ jobs:
         uses: docker/setup-buildx-action@v3
       - name: Copy yarn.lock file
         run: cp yarn.lock packages/cubejs-docker
+      - name: Copy artifacts to docker context
+        run: |
+          cp -r artifacts/npm-packages packages/cubejs-docker/
+          cp -r artifacts/native-extracted packages/cubejs-docker/
       - name: Push to Docker Hub
         uses: docker/build-push-action@v6
         with:
@@ -391,9 +451,10 @@ jobs:
             org.opencontainers.image.licenses=${{ fromJson(steps.repo.outputs.result).license.spdx_id }}
           build-args: |
             IMAGE_VERSION=${{ steps.prep.outputs.version }}
+            USE_LOCAL_PACKAGES=true
 
   docker-debian-jdk:
-    needs: [npm, cubestore_linux, native_linux, detect_branch]
+    needs: [build_npm_packages, cubestore_linux, native_linux, detect_branch]
     name: Debian with jdk docker image
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -402,6 +463,30 @@ jobs:
     steps:
       - name: Check out the repo
         uses: actions/checkout@v4
+      - name: Download npm packages artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-packages
+          path: ./artifacts/
+      - name: Download native artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: native-linux-x64-glibc-*
+          path: ./artifacts/native/
+          merge-multiple: true
+      - name: Extract npm packages
+        run: |
+          cd artifacts
+          tar xzf npm-packages.tar.gz
+          cd ..
+      - name: Extract native binaries
+        run: |
+          mkdir -p artifacts/native-extracted
+          for native_tar in artifacts/native/*.tar.gz; do
+            if [ -f "$native_tar" ]; then
+              tar xzf "$native_tar" -C artifacts/native-extracted
+            fi
+          done
       - name: Repo metadata
         id: repo
         uses: actions/github-script@v7
@@ -451,6 +536,10 @@ jobs:
         uses: docker/setup-qemu-action@v3
       - name: Copy yarn.lock file
         run: cp yarn.lock packages/cubejs-docker
+      - name: Copy artifacts to docker context
+        run: |
+          cp -r artifacts/npm-packages packages/cubejs-docker/
+          cp -r artifacts/native-extracted packages/cubejs-docker/
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Push to Docker Hub
@@ -472,11 +561,12 @@ jobs:
             org.opencontainers.image.licenses=${{ fromJson(steps.repo.outputs.result).license.spdx_id }}
           build-args: |
             IMAGE_VERSION=${{ steps.prep.outputs.version }}
+            USE_LOCAL_PACKAGES=true
 
   docker-cubestore:
     name: Cube Store Docker
     runs-on: ${{ matrix.os }}
-    needs: [detect_branch]
+    needs: [cubestore_linux, detect_branch]
     strategy:
       fail-fast: false
       matrix:
@@ -506,6 +596,19 @@ jobs:
     steps:
       - name: Check out the repo
         uses: actions/checkout@v4
+      - name: Download cubestore artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cubestored-${{ matrix.target }}
+          path: ./artifacts/cubestore/
+      - name: Extract cubestore binary
+        run: |
+          mkdir -p artifacts/cubestore-extracted
+          for cubestore_tar in artifacts/cubestore/*.tar.gz; do
+            if [ -f "$cubestore_tar" ]; then
+              tar xzf "$cubestore_tar" -C artifacts/cubestore-extracted
+            fi
+          done
       - name: Repo metadata
         id: repo
         uses: actions/github-script@v7
@@ -546,6 +649,12 @@ jobs:
             echo "tags=${TAGS}"
             echo "created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           } >> "$GITHUB_OUTPUT"
+      - name: Copy cubestore binary to docker context
+        run: |
+          mkdir -p rust/cubestore/prebuilt-bin
+          cp artifacts/cubestore-extracted/bin/cubestored rust/cubestore/prebuilt-bin/ || true
+          # Fallback: try to find the binary in extracted directory
+          find artifacts/cubestore-extracted -name "cubestored" -type f -exec cp {} rust/cubestore/prebuilt-bin/ \;
       - name: Login to DockerHub
         uses: docker/login-action@v3
         with:
@@ -559,7 +668,9 @@ jobs:
           context: ./rust/
           file: ./rust/cubestore/Dockerfile
           platforms: ${{ matrix.platforms }}
-          build-args: ${{ matrix.build-args }}
+          build-args: |
+            ${{ matrix.build-args }}
+            USE_PREBUILT_BINARY=true
           push: true
           tags: ${{ steps.prep.outputs.tags }}
           cache-from: type=gha
@@ -662,6 +773,12 @@ jobs:
           asset_name: cubestored-${{ matrix.target }}.tar.gz
           tag: ${{ github.ref }}
           overwrite: true
+      - name: Upload cubestore artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cubestored-${{ matrix.target }}
+          path: cubestore-archive/cubestored-${{ matrix.target }}.tar.gz
+          retention-days: 30
 
   cubestore:
     runs-on: ${{ matrix.os }}
@@ -769,6 +886,12 @@ jobs:
           asset_name: cubestored-${{ matrix.target }}.tar.gz
           tag: ${{ github.ref }}
           overwrite: true
+      - name: Upload cubestore artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cubestored-${{ matrix.target }}
+          path: cubestore-archive/cubestored-${{ matrix.target }}.tar.gz
+          retention-days: 30
 
   detect_branch:
     runs-on: ubuntu-24.04
