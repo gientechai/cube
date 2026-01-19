@@ -68,7 +68,7 @@ jobs:
         run: |
           mkdir -p npm-packages
           # Get all publishable packages and pack them
-          yarn lerna exec -- npm pack --pack-destination ../../npm-packages || true
+          yarn lerna exec -- "npm pack --pack-destination ../../npm-packages" || true
       - name: Create npm packages archive
         run: |
           cd npm-packages
