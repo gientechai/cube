@@ -452,7 +452,7 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-          repository: cubejs/cubestore
+          repository: 0fpy/cubestore
           readme-filepath: ./rust/cubestore/README.md
 
   cubestore_linux:
