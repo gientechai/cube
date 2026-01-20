@@ -56,6 +56,11 @@ RUN if [ -d "/tmp/npm-packages-backup" ]; then \
       rm -rf /tmp/npm-packages-backup; \
     fi
 
+# Fix file permissions for executables and clean up npm-packages directory
+RUN chmod +x /cube/node_modules/cubejs-cli/dist/src/index.js \
+    && chmod +x /cube/node_modules/.bin/cubejs \
+    && rm -rf /cube/npm-packages
+
 # Copy native binaries if available
 RUN if [ -d "native" ] && [ -f "native/native/index.node" ]; then \
       mkdir -p /cube/node_modules/@cubejs-backend/native/native && \
