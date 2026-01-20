@@ -235,6 +235,15 @@ jobs:
             tar xzf npm-packages.tar.gz -C npm-packages
             cp -r npm-packages packages/cubejs-docker/
           fi
+      - name: Download native binaries
+        run: |
+          mkdir -p packages/cubejs-docker/native
+          # Download fallback native binary for x64-linux from peace0phmind/cube
+          curl -fL -o packages/cubejs-docker/native.tar.gz "https://github.com/peace0phmind/cube/releases/download/${{ steps.prep.outputs.version }}/native-linux-x64-glibc-fallback.tar.gz" || echo "Native binary not available in releases"
+          if [ -f packages/cubejs-docker/native.tar.gz ]; then
+            tar xzf packages/cubejs-docker/native.tar.gz -C packages/cubejs-docker/native
+            rm -f packages/cubejs-docker/native.tar.gz
+          fi
       - name: Push to Docker Hub
         uses: docker/build-push-action@v6
         with:
@@ -323,6 +332,15 @@ jobs:
             mkdir -p npm-packages
             tar xzf npm-packages.tar.gz -C npm-packages
             cp -r npm-packages packages/cubejs-docker/
+          fi
+      - name: Download native binaries
+        run: |
+          mkdir -p packages/cubejs-docker/native
+          # Download fallback native binary for x64-linux from peace0phmind/cube
+          curl -fL -o packages/cubejs-docker/native.tar.gz "https://github.com/peace0phmind/cube/releases/download/${{ steps.prep.outputs.version }}/native-linux-x64-glibc-fallback.tar.gz" || echo "Native binary not available in releases"
+          if [ -f packages/cubejs-docker/native.tar.gz ]; then
+            tar xzf packages/cubejs-docker/native.tar.gz -C packages/cubejs-docker/native
+            rm -f packages/cubejs-docker/native.tar.gz
           fi
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
