@@ -22,8 +22,26 @@ build_packages() {
     # Building typescript packages first from root (it's referenced project)
     yarn tsc
 
+    # Build client packages using rollup (required for playground)
+    echo "Building client packages (rollup)..."
+    yarn build
+
+    # Build playground frontend (requires client packages to be built first)
+    echo "Building playground frontend..."
+    cd "$SCRIPT_DIR/packages/cubejs-playground"
+    yarn build 2>/dev/null || {
+        echo "Warning: Playground build failed, but continuing..."
+    }
+    cd "$SCRIPT_DIR"
+
+    # Build other packages
     for package in packages/*; do
         if [ -d "$package" ]; then
+            package_name=$(basename "$package")
+            # Skip playground as it's already built above
+            if [[ "$package_name" == "cubejs-playground" ]]; then
+                continue
+            fi
             echo "Building $package..."
             cd "$package"
             yarn build 2>/dev/null || true
@@ -55,6 +73,8 @@ link_packages() {
 
             echo "Linking $package..."
             cd "$package"
+            # Unlink first to ensure we're linking from the correct directory
+            yarn unlink 2>/dev/null || true
             yarn link
             cd "$SCRIPT_DIR"
         fi
