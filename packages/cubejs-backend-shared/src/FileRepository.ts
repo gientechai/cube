@@ -78,6 +78,14 @@ export class FileRepository implements SchemaFileRepository {
     });
   }
 
+  public deleteDataSchemaFile(fileName: string) {
+    const filePath = path.join(this.localPath(), fileName);
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File ${fileName} not found`);
+    }
+    fs.removeSync(filePath);
+  }
+
   protected async readModules() {
     const packageJson = JSON.parse(await fs.readFile('package.json', 'utf-8'));
 

@@ -578,6 +578,11 @@ class ApiGateway {
       await this.writeDataSchemaFile({ query: req.body, context: req.context, res: this.resToResultFn(res) });
     }));
 
+    // 删除schema类型文件，delete接口，接受一个相对路径数组
+    app.post(`${this.basePath}/v1/schema/delete`, jsonParser, userMiddlewares, userAsyncHandler(async (req, res) => {
+      await this.deleteDataSchemaFile({ query: req.body, context: req.context, res: this.resToResultFn(res) });
+    }));
+
     if (getEnv('nativeApiGateway')) {
       this.enableNativeApiGateway(app);
     }
@@ -2773,6 +2778,25 @@ class ApiGateway {
         throw new Error('Repository is not set');
       }
       this.options.repository.writeDataSchemaFile(relativePathName, content);
+      res({ success: true });
+    } catch (e: any) {
+      this.handleError({
+        e, context, res, requestStarted
+      });
+    }
+  }
+
+  private deleteDataSchemaFile({ query, context, res }: { query: any, context: RequestContext, res: ResponseResultFn }) {
+    const requestStarted = new Date();
+    try {
+      const { paths = [] } = query;
+      // paths为待删除路径数组，每个都是要删除的文件的相对路径
+      if (!this.options.repository) {
+        throw new Error('Repository is not set');
+      }
+      paths.forEach((p) => {
+        this.options.repository!.deleteDataSchemaFile(p);
+      });
       res({ success: true });
     } catch (e: any) {
       this.handleError({
