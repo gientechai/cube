@@ -111,6 +111,7 @@ export type DatabaseType =
   | 'firebolt'
   | 'hive'
   | 'mongobi'
+  | 'dm'
   | 'mssql'
   | 'mysql'
   | 'mysqlauroraserverless'
