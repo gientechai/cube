@@ -1,0 +1,46 @@
+{
+  "name": "@cubejs-backend/dm-driver",
+  "description": "Cube.js DM (Dameng) database driver",
+  "author": "Cube Dev, Inc.",
+  "version": "1.6.2",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cube-js/cube.git",
+    "directory": "packages/cubejs-dm-driver"
+  },
+  "engines": {
+    "node": "^14.0.0 || ^16.0.0 || >=17.0.0"
+  },
+  "files": [
+    "dist/src",
+    "index.js"
+  ],
+  "main": "index.js",
+  "typings": "dist/src/index.d.ts",
+  "scripts": {
+    "build": "rm -rf dist && npm run tsc",
+    "tsc": "tsc",
+    "watch": "tsc -w",
+    "lint": "eslint src/* --ext .ts,.js",
+    "lint:fix": "eslint --fix src/* --ext .ts,.js"
+  },
+  "dependencies": {
+    "@cubejs-backend/base-driver": "1.6.2",
+    "@cubejs-backend/shared": "1.6.2",
+    "dmdb": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20"
+  },
+  "jest": {
+    "testEnvironment": "node"
+  },
+  "eslintConfig": {
+    "extends": "../cubejs-linter"
+  },
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  }
+}
+
