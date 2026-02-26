@@ -191,7 +191,6 @@ export class DmDriver extends BaseDriver implements DriverInterface {
       // dmdb.createPool returns a Promise<Pool>
       this.poolPromise = (dmdb as any).createPool(poolAttrs);
     }
-
     return this.poolPromise!;
   }
 
