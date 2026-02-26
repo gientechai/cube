@@ -91,8 +91,6 @@ const driver = new JDBCDriver({
 });
 ```
 
-For detailed GBase setup instructions, see [GBASE.md](./GBASE.md).
-
 ## Java installation
 
 ### macOS
