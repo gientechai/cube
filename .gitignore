@@ -27,3 +27,4 @@ rust/cubesql/profile.json
 .claude/settings.local.json
 gen
 /cubejs
+.npmrc
