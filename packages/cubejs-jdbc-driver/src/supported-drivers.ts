@@ -63,5 +63,19 @@ export const SupportedDrivers: Record<string, DriverOptionsInterface> = {
       user: process.env.CUBEJS_DB_USER,
       password: process.env.CUBEJS_DB_PASS,
     }
+  },
+  gbase: {
+    driverClass: 'com.gbase.jdbc.Driver',
+    prepareConnectionQueries: ['SET time_zone = \'+00:00\''],
+    mavenDependency: {
+      groupId: 'com.gbase',
+      artifactId: 'gbase-connector-java',
+      version: '9.5.0.8-build1'
+    },
+    properties: {
+      user: process.env.CUBEJS_DB_USER,
+      password: process.env.CUBEJS_DB_PASS,
+    },
+    jdbcUrl: () => `jdbc:gbase://${process.env.CUBEJS_DB_HOST}:${process.env.CUBEJS_DB_PORT || '5050'}/${process.env.CUBEJS_DB_NAME}`
   }
 };
