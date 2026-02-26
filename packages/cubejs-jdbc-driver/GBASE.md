@@ -19,6 +19,8 @@ GBase 8a is a Massively Parallel Processing (MPP) analytical database designed f
 Deploy the driver JAR to your Maven repository:
 
 ```bash
+# WARNING: Avoid passing passwords directly in CLI as they will be saved in shell history.
+# Consider using Maven settings.xml for credentials instead.
 mvn deploy:deploy-file \
   -Dfile=gbase-connector-java-9.5.0.8-build1-bin.jar \
   -DgroupId=com.gbase \
@@ -38,11 +40,11 @@ Create a `.env` file or set environment variables:
 
 ```bash
 # Database Connection
-CUBEJS_DB_HOST=192.168.3.147
+CUBEJS_DB_HOST=your-gbase-host.example.com
 CUBEJS_DB_PORT=5050
-CUBEJS_DB_NAME=cube_test
-CUBEJS_DB_USER=root
-CUBEJS_DB_PASS=gbase123
+CUBEJS_DB_NAME=your_database_name
+CUBEJS_DB_USER=your_username
+CUBEJS_DB_PASS=your_secure_password
 
 # Maven Repository (if using private repository)
 MAVEN_REPO_URL=https://your-maven-repo.com/repository/maven-public/
@@ -82,7 +84,7 @@ const driver = new JDBCDriver({
 
 With environment variables:
 ```bash
-CUBEJS_DB_HOST=192.168.3.147
+CUBEJS_DB_HOST=your-gbase-host.example.com
 CUBEJS_DB_PORT=5050
 ```
 
