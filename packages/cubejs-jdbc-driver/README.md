@@ -9,6 +9,16 @@
 
 JDBC driver.
 
+## Supported Databases
+
+This JDBC driver supports the following databases:
+
+- **MySQL** - Production-ready
+- **Amazon Athena** - Production-ready
+- **Apache Spark SQL** - Production-ready
+- **Apache Hive** - Production-ready
+- **GBase 8a** - Community supported
+
 ## Support
 
 This package is **community supported** and should be used at your own risk.
@@ -16,6 +26,84 @@ This package is **community supported** and should be used at your own risk.
 While the Cube Dev team is happy to review and accept future community contributions, we don't have active plans for
 further development. This includes bug fixes unless they affect different parts of Cube.js. **We're looking for
 maintainers for this package.** If you'd like to become a maintainer, please contact us in Cube.js Slack.
+
+## GBase 8a Configuration
+
+GBase 8a is an MPP analytical database. To use GBase 8a with Cube.js:
+
+### Environment Variables
+
+Set the following environment variables:
+
+```bash
+CUBEJS_DB_HOST=your_gbase_host      # GBase server host
+CUBEJS_DB_PORT=5050                 # GBase default port
+CUBEJS_DB_NAME=your_database_name   # Database name
+CUBEJS_DB_USER=your_username        # Username
+CUBEJS_DB_PASS=your_password        # Password
+```
+
+### Basic Usage
+
+```javascript
+const { JDBCDriver } = require('@cubejs-backend/jdbc-driver');
+
+const driver = new JDBCDriver({
+  dataSource: 'gbase',
+  dbType: 'gbase'
+});
+
+// Execute queries
+const results = await driver.query('SELECT * FROM users LIMIT 10', []);
+```
+
+**Note:** When using GBase with Cube.js server, you should also set `externalDbType: 'mysql'` in your cube.js configuration since GBase 8a uses MySQL-compatible SQL syntax:
+
+```javascript
+module.exports = {
+  dialectFactory: () => {
+    return new JDBCDriver({
+      dataSource: 'gbase',
+      dbType: 'gbase'
+    });
+  },
+  externalDbType: 'mysql' // Use MySQL dialect for SQL generation
+};
+```
+
+### Installing the GBase JDBC Driver
+
+Before using GBase, you need to install the JDBC driver to your Maven repository or use the local JAR file.
+
+#### Option 1: Maven Repository (Recommended)
+
+Deploy the driver to your Maven repository:
+
+```bash
+mvn deploy:deploy-file \
+  -Dfile=gbase-connector-java-9.5.0.8-build1-bin.jar \
+  -DgroupId=com.gbase \
+  -DartifactId=gbase-connector-java \
+  -Dversion=9.5.0.8-build1 \
+  -Dpackaging=jar \
+  -DgeneratePom=true \
+  -DrepositoryId=my-repo \
+  -Durl=https://your-maven-repo.com/repository/maven-public/ \
+  -Dusername=your_username \
+  -Dpassword='your_password'
+```
+
+#### Option 2: Local JAR File
+
+Use the JAR file directly without Maven:
+
+```javascript
+const driver = new JDBCDriver({
+  dataSource: 'gbase',
+  dbType: 'gbase',
+  customClassPath: '/path/to/gbase-connector-java-9.5.0.8-build1-bin.jar'
+});
+```
 
 ## Java installation
 
