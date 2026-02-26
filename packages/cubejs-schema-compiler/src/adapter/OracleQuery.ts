@@ -30,6 +30,7 @@ class OracleFilter extends BaseFilter {
 }
 
 export class OracleQuery extends BaseQuery {
+
   /**
    * "LIMIT" on Oracle is illegal
    * TODO replace with limitOffsetClause override
