@@ -30,6 +30,12 @@ class OracleFilter extends BaseFilter {
 }
 
 export class OracleQuery extends BaseQuery {
+  constructor(compilers, options) {
+    super(compilers, options);
+    // Native SQL planner generates GROUP BY 1,2,3; Oracle (and DM) require column expressions.
+    this.useNativeSqlPlanner = false;
+  }
+
   /**
    * "LIMIT" on Oracle is illegal
    * TODO replace with limitOffsetClause override
