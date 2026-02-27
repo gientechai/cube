@@ -65,7 +65,10 @@ module.exports = {
       dataSource: 'gbase',
       dbType: 'gbase'
     });
-  }
+  },
+
+  // Use MySQL dialect for SQL generation since GBase 8a is MySQL-compatible
+  externalDbType: 'mysql'
 };
 ```
 
@@ -121,6 +124,28 @@ GBase 8a is mostly compatible with MySQL. The driver:
 - Sets timezone to UTC on connection (`SET time_zone = '+00:00'`)
 - Supports standard SQL SELECT, INSERT, UPDATE, DELETE operations
 - Compatible with most MySQL functions
+
+### Important: Cube.js Server Configuration
+
+When using GBase with Cube.js server, you **must** specify `externalDbType: 'mysql'` in your cube.js configuration:
+
+```javascript
+module.exports = {
+  dialectFactory: () => {
+    return new JDBCDriver({
+      dataSource: 'gbase',
+      dbType: 'gbase'
+    });
+  },
+  externalDbType: 'mysql' // Required: Use MySQL dialect for SQL generation
+};
+```
+
+**Why?** Cube.js has two layers:
+1. **JDBCDriver** (`dbType: 'gbase'`) - Manages JDBC connections and executes queries
+2. **SQL Generator** (`externalDbType: 'mysql'`) - Generates SQL using MySQL-compatible syntax
+
+Since GBase 8a uses MySQL-compatible SQL, we tell Cube.js to use the MySQL SQL dialect for query generation.
 
 ### Known Differences
 

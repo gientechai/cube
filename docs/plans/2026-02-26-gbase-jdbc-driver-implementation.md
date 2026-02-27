@@ -232,7 +232,11 @@ module.exports = {
       dataSource: 'gbase',
       dbType: 'gbase'
     });
-  }
+  },
+
+  // Important: Use MySQL dialect for SQL generation
+  // GBase 8a is MySQL-compatible, so we use MySQL SQL syntax
+  externalDbType: 'mysql'
 };
 ```
 

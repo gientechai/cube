@@ -57,6 +57,20 @@ const driver = new JDBCDriver({
 const results = await driver.query('SELECT * FROM users LIMIT 10', []);
 ```
 
+**Note:** When using GBase with Cube.js server, you should also set `externalDbType: 'mysql'` in your cube.js configuration since GBase 8a uses MySQL-compatible SQL syntax:
+
+```javascript
+module.exports = {
+  dialectFactory: () => {
+    return new JDBCDriver({
+      dataSource: 'gbase',
+      dbType: 'gbase'
+    });
+  },
+  externalDbType: 'mysql' // Use MySQL dialect for SQL generation
+};
+```
+
 ### Installing the GBase JDBC Driver
 
 Before using GBase, you need to install the JDBC driver to your Maven repository or use the local JAR file.
