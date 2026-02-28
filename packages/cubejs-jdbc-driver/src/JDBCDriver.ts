@@ -291,9 +291,11 @@ export class JDBCDriver extends BaseDriver {
 
     // GBase: Replace @@session.time_zone with actual session timezone
     // GBase JDBC driver incorrectly converts @@session.time_zone to get_system_var()
-    if (this.config.dbType === 'gbase' || (this.config.url && this.config.url.startsWith('jdbc:gbase:'))) {
+    const gbaseTimezonePattern = /@@session\.time_zone/gi;
+    if ((this.config.dbType === 'gbase' || (this.config.url && this.config.url.startsWith('jdbc:gbase:')))
+        && gbaseTimezonePattern.test(queryWithParams)) {
       const gbaseTimezone = await this.getGBaseTimezone();
-      queryWithParams = queryWithParams.replace(/@@session\.time_zone/gi, `'${gbaseTimezone || '+00:00'}'`);
+      queryWithParams = queryWithParams.replace(gbaseTimezonePattern, `'${gbaseTimezone || '+00:00'}'`);
     }
 
     const cancelObj: {cancel?: Function} = {};
@@ -343,9 +345,11 @@ export class JDBCDriver extends BaseDriver {
 
     // GBase: Replace @@session.time_zone with actual session timezone
     // GBase JDBC driver incorrectly converts @@session.time_zone to get_system_var()
-    if (this.config.dbType === 'gbase' || (this.config.url && this.config.url.startsWith('jdbc:gbase:'))) {
+    const gbaseTimezonePattern = /@@session\.time_zone/gi;
+    if ((this.config.dbType === 'gbase' || (this.config.url && this.config.url.startsWith('jdbc:gbase:')))
+        && gbaseTimezonePattern.test(query)) {
       const gbaseTimezone = await this.getGBaseTimezone();
-      query = query.replace(/@@session\.time_zone/gi, `'${gbaseTimezone || '+00:00'}'`);
+      query = query.replace(gbaseTimezonePattern, `'${gbaseTimezone || '+00:00'}'`);
     }
 
     const cancelObj: {cancel?: Function} = {};
