@@ -83,6 +83,9 @@ export class JDBCDriver extends BaseDriver {
 
   protected jdbcProps: any;
 
+  // GBase timezone cache to avoid repeated SHOW VARIABLES queries
+  private gbaseTimezoneCache: string = '+00:00';
+
   public constructor(
     config: Partial<JDBCDriverConfiguration> & {
       /**
@@ -231,8 +234,68 @@ export class JDBCDriver extends BaseDriver {
       [];
   }
 
+  /**
+   * Get GBase session timezone dynamically
+   * Caches the result to avoid repeated queries
+   * Uses raw connection to avoid circular dependency
+   */
+  protected async getGBaseTimezone(): Promise<string> {
+    // Return cached value if available
+    if (this.gbaseTimezoneCache) {
+      return this.gbaseTimezoneCache;
+    }
+
+    try {
+      // Get a connection from the pool
+      const conn = await this.pool.acquire();
+
+      try {
+        // Create statement and execute query
+        const createStatementAsync = promisify(conn.createStatement.bind(conn));
+        const statement = await createStatementAsync();
+
+        // Use SHOW VARIABLES LIKE 'time_zone' (not SHOW VARIABLE)
+        // This returns time_zone only, not system_time_zone
+        const executeQueryAsync = promisify(statement.execute.bind(statement));
+        const resultSet = await executeQueryAsync("SHOW VARIABLES LIKE 'time_zone'");
+
+        // Get result
+        const toObjArrayAsync = promisify(resultSet.toObjArray.bind(resultSet));
+        const result: any[] = await toObjArrayAsync();
+
+        // Close result
+        const closeAsync = promisify(resultSet.close.bind(resultSet));
+        await closeAsync();
+
+        // Extract timezone value (result array format: [{Variable_name: 'time_zone', Value: '+08:00'}])
+        if (result && result.length > 0 && result[0].Value) {
+          this.gbaseTimezoneCache = result[0].Value;
+          return this.gbaseTimezoneCache;
+        }
+      } finally {
+        // Release connection back to pool
+        await this.pool.release(conn);
+      }
+    } catch (error: any) {
+      // If query fails, log warning and fallback to UTC
+      console.warn('[JDBCDriver] Failed to query GBase timezone, using UTC fallback:', error.message);
+    }
+
+    // Fallback to UTC if query fails
+    this.gbaseTimezoneCache = '+00:00';
+    return this.gbaseTimezoneCache;
+  }
+
   public async query<R = unknown>(query: string, values: unknown[]): Promise<R[]> {
-    const queryWithParams = applyParams(query, values);
+    let queryWithParams = applyParams(query, values);
+
+    // GBase: Replace @@session.time_zone with actual session timezone
+    // GBase JDBC driver incorrectly converts @@session.time_zone to get_system_var()
+    if (this.config.dbType === 'gbase' || (this.config.url && this.config.url.startsWith('jdbc:gbase:'))) {
+      const gbaseTimezone = await this.getGBaseTimezone();
+      queryWithParams = queryWithParams.replace(/@@session\.time_zone/gi, `'${gbaseTimezone || '+00:00'}'`);
+    }
+
     const cancelObj: {cancel?: Function} = {};
     const promise = this.queryPromised(queryWithParams, cancelObj, this.prepareConnectionQueries());
     (promise as CancelablePromise<any>).cancel =
@@ -276,7 +339,15 @@ export class JDBCDriver extends BaseDriver {
 
   public async stream(sql: string, values: unknown[], { highWaterMark }: StreamOptions): Promise<DownloadQueryResultsResult> {
     const conn = await this.pool.acquire();
-    const query = applyParams(sql, values);
+    let query = applyParams(sql, values);
+
+    // GBase: Replace @@session.time_zone with actual session timezone
+    // GBase JDBC driver incorrectly converts @@session.time_zone to get_system_var()
+    if (this.config.dbType === 'gbase' || (this.config.url && this.config.url.startsWith('jdbc:gbase:'))) {
+      const gbaseTimezone = await this.getGBaseTimezone();
+      query = query.replace(/@@session\.time_zone/gi, `'${gbaseTimezone || '+00:00'}'`);
+    }
+
     const cancelObj: {cancel?: Function} = {};
     try {
       const createStatement = promisify(conn.createStatement.bind(conn));
