@@ -11,6 +11,7 @@ import { ClickHouseQuery } from './ClickHouseQuery';
 import { CrateQuery } from './CrateQuery';
 import { HiveQuery } from './HiveQuery';
 import { OracleQuery } from './OracleQuery';
+import { DmQuery } from './DmQuery';
 import { SqliteQuery } from './SqliteQuery';
 import { AWSElasticSearchQuery } from './AWSElasticSearchQuery';
 import { ElasticSearchQuery } from './ElasticSearchQuery';
@@ -41,7 +42,7 @@ const ADAPTERS = {
   elasticsearch: ElasticSearchQuery,
   materialize: PostgresQuery,
   cubestore: CubeStoreQuery,
-  dm: OracleQuery,
+  dm: DmQuery,
 };
 
 export const queryClass = (dbType: string, dialectClass) => dialectClass || ADAPTERS[dbType];

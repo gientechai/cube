@@ -16,6 +16,54 @@ import {
 } from "@cubejs-backend/base-driver";
 import type { TableQueryResult } from "@cubejs-backend/base-driver/dist/src/driver.interface";
 import dmdb from "dmdb";
+import { Transform } from "stream";
+
+/**
+ * 将单行中的日期/类日期对象转为可 JSON 序列化的字符串，避免 API 返回 [object Object] 或 {}。
+ * dmdb 可能返回：1) 全局 fetchAsString 未生效时的 Date/Timestamp；2) 内部数组 [y,m,d,...]；3) 其它不可序列化对象。
+ */
+function normalizeRow<T extends Record<string, unknown>>(row: T): T {
+  const out = { ...row } as T;
+  for (const key of Object.keys(out)) {
+    const v = out[key];
+    if (v === null || v === undefined) continue;
+    const normalized = normalizeValue(v);
+    if (normalized !== undefined) (out as Record<string, unknown>)[key] = normalized;
+  }
+  return out;
+}
+
+function normalizeValue(v: unknown): string | undefined {
+  if (v === null || v === undefined) return undefined;
+  // Date、Timestamp（继承 Date）或任何带 getTime 的类日期对象
+  if (typeof v === "object" && v !== null && typeof (v as { getTime?: () => number }).getTime === "function") {
+    try {
+      return new Date((v as Date).getTime()).toISOString();
+    } catch {
+      return String(v);
+    }
+  }
+  // dmdb 内部日期数组：[year, month(1-based), day, hour, min, sec, nano?, tz?]
+  if (Array.isArray(v) && v.length >= 3 && v.every((x) => typeof x === "number")) {
+    try {
+      const [y, m, d, h = 0, min = 0, sec = 0] = v;
+      const date = new Date(Date.UTC(y, (m as number) - 1, d, h, min, sec));
+      if (!Number.isNaN(date.getTime())) return date.toISOString();
+    } catch {
+      // ignore
+    }
+  }
+  // 普通对象：JSON 序列化为 {} 或不可序列化时转为字符串
+  if (typeof v === "object" && !Array.isArray(v) && !Buffer.isBuffer(v)) {
+    try {
+      const s = JSON.stringify(v);
+      if (s === "{}") return String(v);
+    } catch {
+      return String(v);
+    }
+  }
+  return undefined;
+}
 
 export type DmDriverConfiguration = {
   /**
@@ -173,6 +221,20 @@ export class DmDriver extends BaseDriver implements DriverInterface {
     // Use objects for rows by default to match other drivers.
     // eslint-disable-next-line no-param-reassign
     (dmdb as any).outFormat = (dmdb as any).OUT_FORMAT_OBJECT;
+    // DATE/TIMESTAMP 以字符串返回，避免 JSON 序列化时变成 {}（达梦文档：fetchAsString 将日期类型转为字符串）
+    const dmDb = dmdb as any;
+    if (typeof dmDb.DATE !== 'undefined') {
+      dmDb.fetchAsString = dmDb.fetchAsString || [];
+      if (!Array.isArray(dmDb.fetchAsString)) {
+        dmDb.fetchAsString = [dmDb.fetchAsString];
+      }
+      if (!dmDb.fetchAsString.includes(dmDb.DATE)) {
+        dmDb.fetchAsString = [...dmDb.fetchAsString, dmDb.DATE];
+      }
+      if (typeof dmDb.TIMESTAMP !== 'undefined' && !dmDb.fetchAsString.includes(dmDb.TIMESTAMP)) {
+        dmDb.fetchAsString = [...dmDb.fetchAsString, dmDb.TIMESTAMP];
+      }
+    }
   }
 
   private async getPool(): Promise<DmPool> {
@@ -222,8 +284,8 @@ export class DmDriver extends BaseDriver implements DriverInterface {
     try {
       const bindParams = (values || []).map((v) => ({ val: v }));
       const result = await conn.execute(query, bindParams);
-
-      return (result && result.rows) || [];
+      const rows = (result && result.rows) || [];
+      return rows.map((r: Record<string, unknown>) => normalizeRow(r)) as R[];
     } finally {
       await conn.close();
     }
@@ -240,9 +302,21 @@ export class DmDriver extends BaseDriver implements DriverInterface {
       const bindParams = (values || []).map((v) => ({ val: v }));
       const stream = conn.queryStream(query, bindParams, {
         outFormat: (dmdb as any).OUT_FORMAT_OBJECT,
-        // highWaterMark applies to Node stream; dmdb will pass it through.
         highWaterMark,
       });
+
+      // 规范化每行中的日期等对象，避免 API 返回 [object Object] 或 {}
+      const normalizeStream = new Transform({
+        objectMode: true,
+        transform(chunk: Record<string, unknown>, _enc, cb) {
+          try {
+            cb(null, normalizeRow(chunk));
+          } catch (e) {
+            cb(e as Error, undefined);
+          }
+        },
+      });
+      stream.pipe(normalizeStream);
 
       const fields: TableStructure = await new Promise((resolve, reject) => {
         stream.on("metadata", (metadata: any[]) => {
@@ -254,9 +328,10 @@ export class DmDriver extends BaseDriver implements DriverInterface {
       });
 
       return {
-        rowStream: stream,
+        rowStream: normalizeStream,
         types: fields,
         release: async () => {
+          normalizeStream.destroy();
           stream.destroy();
           await conn.close();
         },
