@@ -188,13 +188,12 @@ export class DmDriver extends BaseDriver implements DriverInterface {
       testConnectionTimeout: config.testConnectionTimeout,
     });
 
-    const dataSource = config.dataSource || assertDataSource("default");
-
-    const host = (getEnv as any)("dbHost", { dataSource });
-    const port = (getEnv as any)("dbPort", { dataSource });
-    const user = (getEnv as any)("dbUser", { dataSource });
-    const password = (getEnv as any)("dbPass", { dataSource });
-    const dbName = (getEnv as any)("dbName", { dataSource });
+    const dataSource = config.dataSource ?? 'default';
+    const host = config.host ?? (getEnv as any)('dbHost', { dataSource });
+    const port = config.port ?? (getEnv as any)('dbPort', { dataSource });
+    const user = config.user ?? (getEnv as any)('dbUser', { dataSource });
+    const password = config.password ?? (getEnv as any)('dbPass', { dataSource });
+    const dbName = config.database ?? (getEnv as any)('dbName', { dataSource });
 
     // Default schema: prefer dbName, fall back to user.
     const schema = dbName || user;
@@ -211,7 +210,7 @@ export class DmDriver extends BaseDriver implements DriverInterface {
       poolMin: 0,
       poolMax:
         config.maxPoolSize ||
-        (getEnv as any)("dbMaxPoolSize", { dataSource }) ||
+        (getEnv as any)("dbMaxPoolSize") || config.maxPoolSize ||
         8,
       connectString: config.connectString || defaultConnectString,
       ...config,
