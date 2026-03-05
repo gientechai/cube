@@ -3,6 +3,16 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+## [1.6.3] - 2026-02-26
+
+### Added
+- GBase 8a database support (@claude)
+  - New driver configuration for GBase 8a MPP cluster
+  - Support for GBase JDBC driver via Maven or local JAR
+  - Comprehensive GBase setup documentation
+  - Automatic timezone configuration (UTC)
+  - Connection pooling support
+
 ## [1.6.2](https://github.com/cube-js/cube/compare/v1.6.1...v1.6.2) (2026-01-10)
 
 **Note:** Version bump only for package @cubejs-backend/jdbc-driver
