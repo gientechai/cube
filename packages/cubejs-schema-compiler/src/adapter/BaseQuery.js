@@ -1248,7 +1248,10 @@ export class BaseQuery {
       multiStageMembers,
     } = this.fullKeyQueryAggregateMeasures();
 
-    if (!multipliedMeasures.length && !cumulativeMeasures.length && !multiStageMembers.length) {
+    // 检查是否有半累加指标
+    const hasSemiAdditiveMeasures = this.hasSemiAdditiveMeasures(regularMeasures);
+
+    if (!multipliedMeasures.length && !cumulativeMeasures.length && !multiStageMembers.length && !hasSemiAdditiveMeasures) {
       return this.simpleQuery();
     }
 
@@ -2406,9 +2409,12 @@ export class BaseQuery {
   regularMeasuresSubQuery(measures, filters) {
     filters = filters || this.allFilters;
 
+    // 检查是否有半累加指标
+    const hasSemiAdditive = this.hasSemiAdditiveMeasures(measures);
+
     const inlineWhereConditions = [];
 
-    const query = this.rewriteInlineWhere(() => this.joinQuery(
+    const baseQuery = this.rewriteInlineWhere(() => this.joinQuery(
       this.join,
       this.collectFrom(
         this.dimensionsForSelect().concat(measures).concat(this.allFilters),
@@ -2417,9 +2423,71 @@ export class BaseQuery {
       )
     ), inlineWhereConditions);
 
-    return `SELECT ${this.selectAllDimensionsAndMeasures(measures)} FROM ${query
-    } ${this.baseWhere(filters.concat(inlineWhereConditions))}` +
-      (!this.safeEvaluateSymbolContext().ungrouped && this.groupByClause() || '');
+    // 如果有半累加指标，构建未聚合的内部查询
+    if (hasSemiAdditive) {
+      // 选择所有维度和原始数据列（不聚合）
+      // 注意：selectColumns() 返回 string[] | null，需要展平
+      const unaggregatedColumns = [];
+      this.dimensionsForSelect().forEach(d => {
+        const cols = d.selectColumns();
+        if (cols) {
+          cols.forEach(col => unaggregatedColumns.push(col));
+        }
+      });
+
+      const semiAdditiveMeasures = measures.filter(m => m.isSemiAdditive && m.isSemiAdditive());
+
+      // 添加半累加指标的原始列（使用下划线前缀避免命名冲突）
+      semiAdditiveMeasures.forEach(measure => {
+        const baseSql = measure.measureDefinition().sql();
+        // 不使用双引号，让 PostgreSQL 自动处理为小写
+        const rawColumnName = `_${measure.unescapedAliasName()}_raw`;
+        unaggregatedColumns.push(`${baseSql} as ${rawColumnName}`);
+      });
+
+      // 添加原始时间维度列（用于 ORDER BY）
+      // 收集所有半累加指标使用的非可加时间维度名称
+      const timeDimensionsForOrdering = new Set();
+
+      semiAdditiveMeasures.forEach(measure => {
+        const config = measure.nonAdditiveConfig;
+        if (config && config.name) {
+          timeDimensionsForOrdering.add(config.name);
+        }
+      });
+
+      // 为每个时间维度添加原始列（用于 ORDER BY）
+      // 使用第一个半累加指标的 cube 作为上下文
+      if (semiAdditiveMeasures.length > 0) {
+        const contextMeasure = semiAdditiveMeasures[0];
+        timeDimensionsForOrdering.forEach(dimensionName => {
+          const cubeName = contextMeasure.cube().name;
+          const dimensionPath = dimensionName.includes('.') ? dimensionName : `${cubeName}.${dimensionName}`;
+          const dimension = this.newDimension(dimensionPath);
+          // 使用 dimensionSql() 获取维度 SQL
+          const dimensionSql = this.dimensionSql(dimension);
+          // 获取不带引号的别名
+          const unescapedAlias = dimension.unescapedAliasName();
+          const columnAlias = `_${unescapedAlias}_for_ordering`;
+          // 添加原始时间列，带特殊后缀以避免冲突
+          unaggregatedColumns.push(`${dimensionSql} as ${columnAlias}`);
+        });
+      }
+
+      const innerSelect = unaggregatedColumns.join(', ');
+      const innerQuery = `SELECT ${innerSelect} FROM ${baseQuery} ${this.baseWhere(filters.concat(inlineWhereConditions))}`;
+
+      // 使用 CTE 包装，传递列名列表和完整的时间维度信息（包含粒度）
+      return this.buildSemiAdditiveCTEQuery(innerQuery, measures, unaggregatedColumns, timeDimensionsForOrdering);
+    }
+
+    // 原来的逻辑
+    const selectClause = `SELECT ${this.selectAllDimensionsAndMeasures(measures)}`;
+    const fromClause = `FROM ${baseQuery}`;
+    const whereClause = this.baseWhere(filters.concat(inlineWhereConditions));
+    const groupByClause = !this.safeEvaluateSymbolContext().ungrouped && this.groupByClause() || '';
+
+    return `${selectClause} ${fromClause} ${whereClause}${groupByClause}`;
   }
 
   /**
@@ -5240,5 +5308,316 @@ export class BaseQuery {
       const path = buildJoinPath(cube);
       return path ? `${path}.${field}` : member;
     };
+  }
+
+  /**
+   * 生成半累加指标的条件聚合 SQL
+   * 默认实现使用 FILTER 语法（PostgreSQL 风格）
+   *
+   * 子类可以重写此方法以支持不支持 FILTER 的数据库（如 MSSQL, Oracle）
+   *
+   * @param {string} aggregateExpr - 聚合表达式，如 'SUM(balance)'
+   * @param {string} condition - 过滤条件，如 'balance = max_balance_window'
+   * @returns {string} 条件聚合 SQL
+   */
+  semiAdditiveAggregateFilter(aggregateExpr, condition) {
+    return `${aggregateExpr} FILTER (WHERE ${condition})`;
+  }
+
+  /**
+   * 生成窗口函数 SQL
+   *
+   * @param {string} funcName - 窗口函数名，如 'MAX', 'MIN'
+   * @param {string} expr - 表达式，如 'balance'
+   * @param {string} partitionBy - PARTITION BY 子句
+   * @param {string} [orderBy=''] - ORDER BY 子句（可选）
+   * @returns {string} 窗口函数 SQL
+   */
+  semiAdditiveWindowFunction(funcName, expr, partitionBy, orderBy = '') {
+    const orderByClause = orderBy ? ` ORDER BY ${orderBy}` : '';
+    return `${funcName}(${expr}) OVER (${partitionBy}${orderByClause})`;
+  }
+
+  /**
+   * 检查数据库是否支持 FILTER 语法
+   * 默认为 true，子类可以重写
+   *
+   * @returns {boolean}
+   */
+  supportsFilterClause() {
+    return true;
+  }
+
+  /**
+   * 检查是否有半累加指标
+   *
+   * @param {BaseMeasure[]} measures
+   * @returns {boolean}
+   */
+  hasSemiAdditiveMeasures(measures) {
+    return measures && measures.some(m => m.isSemiAdditive && m.isSemiAdditive());
+  }
+
+  /**
+   * 为半累加指标构建 CTE 重写的查询
+   *
+   * @param {string} originalQuery - 未聚合的内部查询
+   * @param {BaseMeasure[]} measures - 所有measures
+   * @param {string[]} baseColumns - 基础列的 SELECT 表达式列表（维度 + 原始数据列）
+   * @param {string[]} timeDimensionsForOrdering - 用于 ORDER BY 的时间维度名称列表
+   * @returns {string} 重写后的CTE查询
+   */
+  buildSemiAdditiveCTEQuery(originalQuery, measures, baseColumns, timeDimensionsForOrdering = []) {
+    const semiAdditiveMeasures = measures.filter(m => m.isSemiAdditive && m.isSemiAdditive());
+
+    if (semiAdditiveMeasures.length === 0) {
+      return originalQuery;
+    }
+
+    // 为每个半累加指标生成窗口函数表达式
+    // 生成两个窗口函数：
+    // 1. 计算 MIN(ds) 或 MAX(ds)（根据 windowChoice）
+    // 2. 原始 balance 列（用于后续过滤和聚合）
+    const windowExpressions = semiAdditiveMeasures.flatMap(measure => {
+      const config = measure.nonAdditiveConfig;
+      if (!config) return [];
+
+      const partitionBy = this.buildSemiAdditivePartitionBy(measure, config, timeDimensionsForOrdering);
+
+      // 获取用于 ORDER BY 的时间维度列
+      const timeDimColumn = this.getSemiAdditiveTimeDimensionColumn(measure, config, timeDimensionsForOrdering);
+
+      if (!timeDimColumn) {
+        return [];
+      }
+
+      // 生成两个窗口表达式：
+      // 1. MIN(ds) 或 MAX(ds) 窗口函数
+      // 2. 原始 balance 列（使用转义的列名，无需窗口函数）
+      const windowColumnName = this.escapeColumnName(`${measure.unescapedAliasName()}_min_ds`);
+      const rawColumnName = this.escapeColumnName(`_${measure.unescapedAliasName()}_raw`);
+
+      // 根据 windowChoice 选择窗口函数类型
+      // first/min: 使用 MIN(ds) - 找最早时间
+      // last/max: 使用 MAX(ds) - 找最晚时间
+      const ascendingChoices = ['first', 'min'];
+      const descendingChoices = ['last', 'max'];
+
+      let timeWindowFunc;
+      if (ascendingChoices.includes(config.windowChoice)) {
+        timeWindowFunc = `MIN(${timeDimColumn}) OVER (${partitionBy})`;
+      } else if (descendingChoices.includes(config.windowChoice)) {
+        timeWindowFunc = `MAX(${timeDimColumn}) OVER (${partitionBy})`;
+      } else {
+        // avg 比较特殊，需要不同的处理
+        timeWindowFunc = `MIN(${timeDimColumn}) OVER (${partitionBy})`;
+      }
+
+      return [
+        `${timeWindowFunc} as ${windowColumnName}`,
+        // 原始 balance 列不需要窗口函数，它已经在 base_data 中有了
+        // 这里返回空字符串，因为我们会从 baseColumnAliases 中引用它
+      ];
+    });
+
+    // 提取 baseColumns 中的列别名
+    const baseColumnAliases = baseColumns.map(colExpr => {
+      // 匹配 "expression as alias" 格式
+      const asMatch = colExpr.match(/ as\s+(\S+?)$/i);
+      if (asMatch) {
+        return asMatch[1].trim();
+      }
+      // 匹配 "expression alias" 格式（无 as 关键字）
+      const parts = colExpr.split(/\s+/);
+      const lastPart = parts[parts.length - 1];
+      // 去掉可能的尾随双引号
+      return lastPart.replace(/^"|"$/g, '');
+    }).filter(alias => alias);
+
+    // 构建最终查询的 SELECT 子句（包含聚合）
+    // 对于半累加指标，使用 measureSql()（包含聚合逻辑）
+    const dimensionColumns = this.dimensionsForSelect().map(d => d.aliasName());
+    const measureColumns = measures.map(m => {
+      if (m.isSemiAdditive && m.isSemiAdditive()) {
+        // 半累加指标：使用 measureSql() 生成聚合表达式
+        const sql = m.measureSql();
+        const alias = m.aliasName();
+        return `${sql} as ${alias}`;
+      } else {
+        // 非半累加指标：直接引用列（在 windowed_data 中计算）
+        // 或者也使用 measureSql()
+        return `${m.measureSql()} as ${m.aliasName()}`;
+      }
+    });
+    const selectColumns = [...dimensionColumns, ...measureColumns].join(', ');
+
+    // 构建 CTE：windowed_data 包含窗口函数结果
+    // 然后执行最终查询（包含聚合）
+    const cteQuery = `WITH base_data AS (
+  ${originalQuery}
+), windowed_data AS (
+  SELECT ${baseColumnAliases.join(', ')}, ${windowExpressions.join(', ')}
+  FROM base_data
+)
+SELECT ${selectColumns} FROM windowed_data ${this.groupByClause()}`;
+
+    return cteQuery;
+  }
+
+  /**
+   * 为半累加指标构建 PARTITION BY 子句
+   *
+   * @param {BaseMeasure} measure
+   * @param {NonAdditiveDimensionConfig} config
+   * @returns {string}
+   */
+  buildSemiAdditivePartitionBy(measure, config, timeDimensionsForOrdering = []) {
+    const clauses = [];
+    const cubeName = measure.cube().name;
+    const dimensionPath = config.name.includes('.') ? config.name : `${cubeName}.${config.name}`;
+
+    // 从查询的 timeDimensions 中获取粒度信息
+    // 在 regularMeasuresSubQuery 的上下文中，this.timeDimensions 应该包含查询的时间维度
+    const queryTimeDimensions = this.timeDimensions || [];
+
+    // 查找匹配的时间维度
+    const matchingTimeDim = queryTimeDimensions.find(td => {
+      const tdPath = td.dimension || `${td.cube ? td.cube().name : cubeName}.${td.name}`;
+      return tdPath === dimensionPath || tdPath.endsWith(`.${config.name}`);
+    });
+
+    if (matchingTimeDim && matchingTimeDim.granularity) {
+      // 找到了粒度信息，构建 PARTITION BY 子句
+      // 在 windowed_data CTE 中，需要使用 base_data 中已经选择的日期列
+      // 获取该日期列在 windowed_data 中的别名
+      const dimension = this.newDimension(dimensionPath);
+      const unescapedAlias = dimension.unescapedAliasName();
+      const columnAlias = `_${unescapedAlias}_for_ordering`;
+      const escapedColumnAlias = this.escapeColumnName(columnAlias);
+
+      // 使用 timeGroupedColumn() 生成时间分组表达式
+      // 将其应用到 windowed_data 中的日期列
+      const timeGroupedSql = this.timeGroupedColumn(matchingTimeDim.granularity, escapedColumnAlias);
+      clauses.push(timeGroupedSql);
+    }
+
+    // 添加 windowGroupings
+    if (config.windowGroupings) {
+      config.windowGroupings.forEach(grouping => {
+        const groupingPath = grouping.includes('.') ? grouping : `${cubeName}.${grouping}`;
+        const dimension = this.newDimension(groupingPath);
+        // 在 windowed_data CTE 中，使用维度列的别名而不是 dimensionSql
+        // dimensionSql 可能包含表名引用，但在 windowed_data 中应该使用列别名
+        const dimensionAlias = this.aliasName(groupingPath);
+        clauses.push(this.escapeColumnName(dimensionAlias));
+      });
+    }
+
+    return clauses.length > 0 ? `PARTITION BY ${clauses.join(', ')}` : '';
+  }
+
+  /**
+   * 为半累加指标构建 ORDER BY 子句
+   * 基于非可加时间维度排序，使窗口函数能正确选择时点值
+   *
+   * @param {BaseMeasure} measure
+   * @param {NonAdditiveDimensionConfig} config
+   * @param {string[]} timeDimensionsForOrdering - 用于 ORDER BY 的时间维度名称列表
+   * @returns {string} ORDER BY 子句（如 "ORDER BY ds ASC" 或 "ORDER BY ds DESC"）
+   */
+  buildSemiAdditiveOrderBy(measure, config, timeDimensionsForOrdering = []) {
+    // 检查是否在时间维度列表中（支持 Set 和 Array）
+    const hasDimension = typeof timeDimensionsForOrdering.has === 'function'
+      ? timeDimensionsForOrdering.has(config.name)
+      : timeDimensionsForOrdering.includes(config.name);
+
+    if (!hasDimension) {
+      return ''; // 如果没有对应的时间维度列，不添加 ORDER BY
+    }
+
+    // 使用 CTE 中的列别名（格式：_dimensionAlias_for_ordering）
+    const cubeName = measure.cube().name;
+    const dimensionPath = config.name.includes('.') ? config.name : `${cubeName}.${config.name}`;
+    const dimension = this.newDimension(dimensionPath);
+    // 获取不带引号的别名
+    const unescapedAlias = dimension.unescapedAliasName();
+    const columnAlias = this.escapeColumnName(`_${unescapedAlias}_for_ordering`);
+
+    // 根据 windowChoice 决定排序方向：
+    // - first/min: 时间升序（ASC），取最早时间的值
+    // - last/max: 时间降序（DESC），取最晚时间的值
+    const ascendingChoices = ['first', 'min'];
+    const descendingChoices = ['last', 'max'];
+
+    const orderDirection = ascendingChoices.includes(config.windowChoice) ? 'ASC' :
+                          descendingChoices.includes(config.windowChoice) ? 'DESC' : 'ASC';
+
+    return ` ORDER BY ${columnAlias} ${orderDirection}`;
+  }
+
+  /**
+   * 获取半累加指标使用的非可加时间维度列
+   *
+   * @param {BaseMeasure} measure
+   * @param {NonAdditiveDimensionConfig} config
+   * @param {string[]} timeDimensionsForOrdering - 用于 ORDER BY 的时间维度名称列表
+   * @returns {string | null} 时间维度列名（带转义）
+   */
+  getSemiAdditiveTimeDimensionColumn(measure, config, timeDimensionsForOrdering = []) {
+    // 检查是否在时间维度列表中（支持 Set 和 Array）
+    const hasDimension = typeof timeDimensionsForOrdering.has === 'function'
+      ? timeDimensionsForOrdering.has(config.name)
+      : timeDimensionsForOrdering.includes(config.name);
+
+    if (!hasDimension) {
+      return null;
+    }
+
+    // 使用 CTE 中的列别名（格式：_dimensionAlias_for_ordering）
+    const cubeName = measure.cube().name;
+    const dimensionPath = config.name.includes('.') ? config.name : `${cubeName}.${config.name}`;
+    const dimension = this.newDimension(dimensionPath);
+    const unescapedAlias = dimension.unescapedAliasName();
+    const columnAlias = this.escapeColumnName(`_${unescapedAlias}_for_ordering`);
+
+    return columnAlias;
+  }
+
+  /**
+   * 获取半累加指标使用的时间维度别名（不带转义）
+   * 用于 BaseMeasure 生成 SQL
+   *
+   * @param {NonAdditiveDimensionConfig} config
+   * @returns {string | null} 维度别名
+   */
+  getSemiAdditiveTimeDimensionAlias(config) {
+    // 从当前查询的 dimensions 中查找匹配的维度
+    // 首先尝试解析 config.name 获取 cube 名称
+    let cubeName;
+    let dimensionName;
+
+    if (config.name.includes('.')) {
+      const parts = config.name.split('.');
+      cubeName = parts[0];
+      dimensionName = parts.slice(1).join('.');
+    } else {
+      // 如果没有 cube 前缀，从当前查询的 dimensions 中查找
+      const dimensions = this.dimensionsForSelect();
+      if (dimensions && dimensions.length > 0) {
+        cubeName = dimensions[0].cube().name;
+        dimensionName = config.name;
+      } else {
+        return null;
+      }
+    }
+
+    const dimensionPath = `${cubeName}.${dimensionName}`;
+
+    try {
+      const dimension = this.newDimension(dimensionPath);
+      return dimension.unescapedAliasName();
+    } catch (e) {
+      return null;
+    }
   }
 }
