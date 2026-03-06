@@ -1,6 +1,6 @@
 import { UserError } from '../compiler/UserError';
 import type { BaseQuery } from './BaseQuery';
-import { MeasureDefinition } from '../compiler/CubeEvaluator';
+import { MeasureDefinition, NonAdditiveDimensionConfig } from '../compiler/CubeEvaluator';
 import { CubeSymbols } from '../compiler/CubeSymbols';
 
 export class BaseMeasure {
@@ -15,6 +15,12 @@ export class BaseMeasure {
   protected readonly patchedMeasure: MeasureDefinition | null = null;
 
   public readonly joinHint: Array<string> = [];
+
+  /**
+   * 非可加维度配置
+   * 如果配置了此项，该 measure 将被视为半累加指标
+   */
+  public readonly nonAdditiveConfig: NonAdditiveDimensionConfig | null = null;
 
   protected preparePatchedMeasure(sourceMeasure: string, newMeasureType: string | null, addFilters: Array<{sql: Function}>): MeasureDefinition {
     const source = this.query.cubeEvaluator.measureByPath(sourceMeasure);
@@ -133,6 +139,21 @@ export class BaseMeasure {
       this.measure = path;
       this.joinHint = joinHint;
     }
+
+    // 提取非可加维度配置
+    const definition = this.measureDefinition();
+    if (definition.nonAdditiveDimension) {
+      this.nonAdditiveConfig = definition.nonAdditiveDimension;
+    }
+  }
+
+  /**
+   * 判断是否为半累加指标
+   *
+   * @returns {boolean}
+   */
+  public isSemiAdditive(): boolean {
+    return !!this.nonAdditiveConfig;
   }
 
   public getMembers() {
@@ -161,9 +182,17 @@ export class BaseMeasure {
   }
 
   public measureSql() {
+    // 处理表达式类型的 measure
     if (this.expression) {
       return this.convertTzForRawTimeDimensionIfNeeded(() => this.query.evaluateSymbolSql(this.expressionCubeName, this.expressionName, this.definition(), 'measure'));
     }
+
+    // 处理半累加指标
+    if (this.isSemiAdditive()) {
+      return this.semiAdditiveMeasureSql();
+    }
+
+    // 常规指标
     return this.query.measureSql(this);
   }
 
@@ -235,6 +264,12 @@ export class BaseMeasure {
     if (this.expression) { // TODO
       return false;
     }
+
+    // 如果配置了非可加维度，则不是完全可加的
+    if (this.isSemiAdditive()) {
+      return false;
+    }
+
     const definition = this.measureDefinition();
     if (definition.multiStage) {
       return false;
@@ -338,5 +373,71 @@ export class BaseMeasure {
       throw new Error('Unexpected null path');
     }
     return this.query.cubeEvaluator.pathFromArray(path);
+  }
+
+  /**
+   * 生成半累加指标的 SQL
+   *
+   * 使用 Query 的多态方法生成数据库特定的 SQL
+   *
+   * @private
+   * @returns {string}
+   */
+  private semiAdditiveMeasureSql(): string {
+    const config = this.nonAdditiveConfig!;
+    const baseSql = this.measureDefinition().sql();
+
+    // 构建窗口函数（调用 Query 的多态方法）
+    const partitionBy = this.buildPartitionByForMeasure(config);
+    const windowFunc = this.query.semiAdditiveWindowFunction(
+      config.windowChoice.toUpperCase(),
+      baseSql,
+      partitionBy
+    );
+
+    // 构建条件聚合（调用 Query 的多态方法）
+    const aggregateType = this.measureDefinition().type.toUpperCase();
+    const aggregateExpr = `${aggregateType}(${baseSql})`;
+
+    // 多态调用：根据数据库类型自动选择正确的实现
+    return this.query.semiAdditiveAggregateFilter(
+      aggregateExpr,
+      `${baseSql} = (${windowFunc})`
+    );
+  }
+
+  /**
+   * 构建 PARTITION BY 子句
+   *
+   * @private
+   * @param {NonAdditiveDimensionConfig} config
+   * @returns {string}
+   */
+  private buildPartitionByForMeasure(config: NonAdditiveDimensionConfig): string {
+    const clauses: string[] = [];
+
+    // 添加时间粒度分区
+    // 从查询的 timeDimensions 中查找对应维度的粒度
+    const timeDimension = this.query.timeDimensions.find(
+      (td: any) => td.dimension === config.name || td.dimension === `${this.measure.cubeName || this.measure}.${config.name}`
+    );
+
+    if (timeDimension && (timeDimension as any).granularity) {
+      const dimensionSql = this.query.dimensionSql(config.name);
+      const granularity = (timeDimension as any).granularity;
+      // 使用 Query 的 timeGroupedColumn 方法（数据库特定的时间分组）
+      clauses.push(
+        this.query.timeGroupedColumn(granularity, dimensionSql)
+      );
+    }
+
+    // 添加 windowGroupings
+    if (config.windowGroupings) {
+      config.windowGroupings.forEach(grouping => {
+        clauses.push(this.query.dimensionSql(grouping));
+      });
+    }
+
+    return clauses.length > 0 ? `PARTITION BY ${clauses.join(', ')}` : '';
   }
 }
