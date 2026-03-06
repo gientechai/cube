@@ -55,6 +55,40 @@ export type TimeShiftDefinitionReference = {
   type?: 'next' | 'prior';
 };
 
+/**
+ * 非可加维度配置（参考 dbt Metricflow 设计）
+ * 用于定义半累加指标（如月末余额、库存快照等）
+ */
+export type NonAdditiveDimensionConfig = {
+  /**
+   * 非可加维度的名称（通常是时间维度）
+   */
+  name: string;
+
+  /**
+   * 窗口函数选择器
+   * - 'max': 取窗口内最大值（月末余额、期末MRR）
+   * - 'min': 取窗口内最小值（月初余额、期初MRR）
+   * - 'avg': 取窗口内平均值
+   * - 'first': 取窗口内第一个值
+   * - 'last': 取窗口内最后一个值
+   */
+  windowChoice: 'max' | 'min' | 'avg' | 'first' | 'last';
+
+  /**
+   * 分组维度列表（可选但重要）
+   * 决定在应用窗口函数之前的分组粒度
+   *
+   * 示例: ['userId'] 表示在每个 (月份, 用户) 分区内取最大值
+   */
+  windowGroupings?: string[];
+
+  /**
+   * 可选：是否使用 DISTINCT 去重
+   */
+  distinct?: boolean;
+};
+
 export type MeasureDefinition = {
   type: string;
   sql(): string;
@@ -73,6 +107,11 @@ export type MeasureDefinition = {
   addGroupByReferences?: string[];
   timeShiftReferences?: TimeShiftDefinitionReference[];
   patchedFrom?: { cubeName: string; name: string };
+  /**
+   * 非可加维度配置
+   * 当配置此项时，该 measure 将被视为半累加指标
+   */
+  nonAdditiveDimension?: NonAdditiveDimensionConfig;
 };
 
 export type PreAggregationFilters = {

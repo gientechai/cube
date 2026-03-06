@@ -5238,4 +5238,42 @@ export class BaseQuery {
       return path ? `${path}.${field}` : member;
     };
   }
+
+  /**
+   * 生成半累加指标的条件聚合 SQL
+   * 默认实现使用 FILTER 语法（PostgreSQL 风格）
+   *
+   * 子类可以重写此方法以支持不支持 FILTER 的数据库（如 MSSQL, Oracle）
+   *
+   * @param {string} aggregateExpr - 聚合表达式，如 'SUM(balance)'
+   * @param {string} condition - 过滤条件，如 'balance = max_balance_window'
+   * @returns {string} 条件聚合 SQL
+   */
+  semiAdditiveAggregateFilter(aggregateExpr, condition) {
+    return `${aggregateExpr} FILTER (WHERE ${condition})`;
+  }
+
+  /**
+   * 生成窗口函数 SQL
+   *
+   * @param {string} funcName - 窗口函数名，如 'MAX', 'MIN'
+   * @param {string} expr - 表达式，如 'balance'
+   * @param {string} partitionBy - PARTITION BY 子句
+   * @param {string} [orderBy=''] - ORDER BY 子句（可选）
+   * @returns {string} 窗口函数 SQL
+   */
+  semiAdditiveWindowFunction(funcName, expr, partitionBy, orderBy = '') {
+    const orderByClause = orderBy ? ` ORDER BY ${orderBy}` : '';
+    return `${funcName}(${expr}) OVER (${partitionBy}${orderByClause})`;
+  }
+
+  /**
+   * 检查数据库是否支持 FILTER 语法
+   * 默认为 true，子类可以重写
+   *
+   * @returns {boolean}
+   */
+  supportsFilterClause() {
+    return true;
+  }
 }
