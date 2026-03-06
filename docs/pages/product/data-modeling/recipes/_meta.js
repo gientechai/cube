@@ -13,6 +13,7 @@ module.exports = {
   "custom-calendar": "Custom calendars",
   "entity-attribute-value": "EAV model",
   "snapshots": "Data snapshots",
+  "semi-additive-measures": "Semi-additive measures",
   "active-users": "Active users",
   "event-analytics": "Event analytics",
   "funnels": "Funnel analysis",
