@@ -353,4 +353,37 @@ export class MssqlQuery extends BaseQuery {
     templates.expressions.wrap_segment_filter = '{{ expr }} = 1';
     return templates;
   }
+
+  /**
+   * 重写：MSSQL 不支持 FILTER 语法，使用 CASE WHEN 替代
+   *
+   * @param {string} aggregateExpr - 聚合表达式，如 'SUM(balance)'
+   * @param {string} condition - 过滤条件，如 'balance = max_balance_window'
+   * @returns {string}
+   */
+  semiAdditiveAggregateFilter(aggregateExpr, condition) {
+    // 解析聚合表达式: 'SUM(balance)' -> { func: 'SUM', arg: 'balance' }
+    const match = aggregateExpr.match(/(\w+)\(([^)]+)\)/);
+
+    if (!match) {
+      throw new Error(
+        `Invalid aggregate expression for semi-additive measure: ${aggregateExpr}`
+      );
+    }
+
+    const [, func, arg] = match;
+
+    // SUM(balance) FILTER (WHERE balance = max_window)
+    // -> SUM(CASE WHEN balance = max_window THEN balance ELSE 0 END)
+    return `${func}(CASE WHEN ${condition} THEN ${arg} ELSE 0 END)`;
+  }
+
+  /**
+   * 重写：MSSQL 不支持 FILTER 语法
+   *
+   * @returns {boolean}
+   */
+  supportsFilterClause() {
+    return false;
+  }
 }
