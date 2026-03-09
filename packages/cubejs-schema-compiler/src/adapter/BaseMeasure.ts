@@ -161,6 +161,13 @@ export class BaseMeasure {
   }
 
   public selectColumns() {
+    // 对于半累加指标，如果查询已经包含聚合（在 CTE 中），
+    // 则直接返回列名，而不是重新计算聚合
+    if (this.isSemiAdditive()) {
+      // 检查查询是否已经处理了半累加指标（通过检查上下文）
+      // 如果是，则只返回列名
+      return [`${this.aliasName()}`];
+    }
     return [`${this.measureSql()} ${this.aliasName()}`];
   }
 
@@ -378,32 +385,77 @@ export class BaseMeasure {
   /**
    * 生成半累加指标的 SQL
    *
-   * 使用 Query 的多态方法生成数据库特定的 SQL
+   * 在 CTE 上下文中，引用 windowed_data CTE 中已经计算的窗口函数结果
+   * 在非 CTE 上下文中，使用窗口函数直接生成 SQL
    *
    * @private
    * @returns {string}
    */
   private semiAdditiveMeasureSql(): string {
     const config = this.nonAdditiveConfig!;
-    const baseSql = this.measureDefinition().sql();
-
-    // 构建窗口函数（调用 Query 的多态方法）
-    const partitionBy = this.buildPartitionByForMeasure(config);
-    const windowFunc = this.query.semiAdditiveWindowFunction(
-      config.windowChoice.toUpperCase(),
-      baseSql,
-      partitionBy
-    );
-
-    // 构建条件聚合（调用 Query 的多态方法）
     const aggregateType = this.measureDefinition().type.toUpperCase();
-    const aggregateExpr = `${aggregateType}(${baseSql})`;
 
-    // 多态调用：根据数据库类型自动选择正确的实现
-    return this.query.semiAdditiveAggregateFilter(
-      aggregateExpr,
-      `${baseSql} = (${windowFunc})`
-    );
+    // 检查是否在 CTE 上下文中（通过检查是否有特定的列别名）
+    // 在 CTE 上下文中，应该使用 windowed_data CTE 中已经计算的列
+    const timeDimColumn = this.query.getSemiAdditiveTimeDimensionColumn &&
+      this.query.getSemiAdditiveTimeDimensionColumn(this, config, [config.name]);
+
+    if (timeDimColumn) {
+      // CTE 上下文：使用 windowed_data 中已经计算的窗口函数结果
+      const rawColumn = this.query.escapeColumnName(`_${this.unescapedAliasName()}_raw`);
+      const minDsColumn = this.query.escapeColumnName(`${this.unescapedAliasName()}_min_ds`);
+
+      // 生成过滤表达式：CASE WHEN time_dimension = min_ds THEN raw_value ELSE NULL END
+      const filterExpression = `CASE WHEN ${timeDimColumn} = (${minDsColumn}) THEN ${rawColumn} ELSE NULL END`;
+
+      // 应用聚合函数
+      const sumExpression = `${aggregateType}(${filterExpression})`;
+
+      // 对 SUM 和 COUNT 使用 COALESCE
+      if (aggregateType === 'SUM' || aggregateType === 'COUNT') {
+        return `COALESCE(${sumExpression}, 0)`;
+      }
+
+      return sumExpression;
+    } else {
+      // 非 CTE 上下文：直接生成窗口函数
+      // 获取基础 SQL（未聚合的值表达式）
+      const baseSql = this.query.evaluateSymbolSql(
+        this.query.cubeEvaluator.cubeFromPath(this.measure),
+        this.measure,
+        this.measureDefinition(),
+        'measure'
+      );
+
+      // 获取时间维度 SQL
+      const cubeName = this.cube().name;
+      const dimensionPath = config.name.includes('.') ? config.name : `${cubeName}.${config.name}`;
+      const dimension = this.query.newDimension(dimensionPath);
+      const dimensionSql = this.query.dimensionSql(dimension);
+
+      // 构建 PARTITION BY 子句
+      const partitionBy = this.buildPartitionByForMeasure(config);
+
+      // 根据窗口选择类型生成窗口函数
+      let windowFunc: string;
+      if (config.windowChoice === 'min' || config.windowChoice === 'first') {
+        windowFunc = `MIN(${dimensionSql}) OVER (${partitionBy})`;
+      } else if (config.windowChoice === 'max' || config.windowChoice === 'last') {
+        windowFunc = `MAX(${dimensionSql}) OVER (${partitionBy})`;
+      } else {
+        throw new UserError(`Unsupported window choice for semi-additive measure: ${config.windowChoice}`);
+      }
+
+      // 生成过滤表达式
+      const filterExpression = `CASE WHEN ${dimensionSql} = (${windowFunc}) THEN ${baseSql} ELSE NULL END`;
+      const sumExpression = `${aggregateType}(${filterExpression})`;
+
+      if (aggregateType === 'SUM' || aggregateType === 'COUNT') {
+        return `COALESCE(${sumExpression}, 0)`;
+      }
+
+      return sumExpression;
+    }
   }
 
   /**
@@ -416,25 +468,68 @@ export class BaseMeasure {
   private buildPartitionByForMeasure(config: NonAdditiveDimensionConfig): string {
     const clauses: string[] = [];
 
-    // 添加时间粒度分区
-    // 从查询的 timeDimensions 中查找对应维度的粒度
-    const timeDimension = this.query.timeDimensions.find(
-      (td: any) => td.dimension === config.name || td.dimension === `${this.measure.cubeName || this.measure}.${config.name}`
-    );
+    // 尝试从多个来源获取粒度信息
+    let granularity: string | null = null;
+    let dimensionSql: string | null = null;
 
-    if (timeDimension && (timeDimension as any).granularity) {
-      const dimensionSql = this.query.dimensionSql(config.name);
-      const granularity = (timeDimension as any).granularity;
-      // 使用 Query 的 timeGroupedColumn 方法（数据库特定的时间分组）
-      clauses.push(
-        this.query.timeGroupedColumn(granularity, dimensionSql)
+    // 方法1: 从 this.query.timeDimensions 获取
+    if (this.query.timeDimensions && this.query.timeDimensions.length > 0) {
+      const timeDimension = this.query.timeDimensions.find(
+        (td: any) => {
+          const dimensionName = td.dimension;
+          const cubeName = this.measure.cubeName || this.measure;
+          return dimensionName === config.name ||
+                 dimensionName === `${cubeName}.${config.name}` ||
+                 dimensionName.endsWith(`.${config.name}`);
+        }
       );
+
+      if (timeDimension && (timeDimension as any).granularity) {
+        granularity = (timeDimension as any).granularity;
+        // 构建完整的维度路径并创建维度对象
+        const cubeName = this.cube().name;
+        const dimensionPath = config.name.includes('.') ? config.name : `${cubeName}.${config.name}`;
+        const dimension = this.query.newDimension(dimensionPath);
+        dimensionSql = this.query.dimensionSql(dimension);
+      }
+    }
+
+    // 方法2: 如果方法1失败，尝试从 this.query.dimensionsForSelect() 获取
+    if (!granularity && this.query.dimensionsForSelect) {
+      const dimensions = this.query.dimensionsForSelect();
+      const matchingDim = dimensions.find((d: any) => {
+        const dimPath = d.dimension || `${d.cube().name}.${d.name}`;
+        const cubeName = this.measure.cubeName || this.measure;
+        const dimensionPath = config.name.includes('.') ? config.name : `${cubeName}.${config.name}`;
+        return dimPath === dimensionPath || dimPath.endsWith(`.${config.name}`);
+      });
+
+      if (matchingDim && (matchingDim as any).granularity) {
+        granularity = (matchingDim as any).granularity;
+        // 对于已经在 dimensionsForSelect 中的维度，使用其别名
+        dimensionSql = matchingDim.aliasName();
+      }
+    }
+
+    // 如果找到了粒度和维度SQL，添加到PARTITION BY子句
+    if (granularity && dimensionSql) {
+      // 使用 timeGroupedColumn 方法生成时间分组表达式
+      // 如果dimensionSql已经是列别名（来自dimensionsForSelect），直接使用
+      // 否则使用timeGroupedColumn方法
+      const partitionExpr = dimensionSql.includes('__') ?
+        dimensionSql :
+        this.query.timeGroupedColumn(granularity, dimensionSql);
+      clauses.push(partitionExpr);
     }
 
     // 添加 windowGroupings
     if (config.windowGroupings) {
       config.windowGroupings.forEach(grouping => {
-        clauses.push(this.query.dimensionSql(grouping));
+        // 构建完整的维度路径并创建维度对象
+        const cubeName = this.cube().name;
+        const groupingPath = grouping.includes('.') ? grouping : `${cubeName}.${grouping}`;
+        const dimension = this.query.newDimension(groupingPath);
+        clauses.push(this.query.dimensionSql(dimension));
       });
     }
 

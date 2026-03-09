@@ -1,0 +1,503 @@
+# Semi-additive measures
+
+## Use case
+
+Semi-additive measures are measures that can be aggregated across some dimensions but not others. The most common example is account balances or inventory levels - you can sum balances across different accounts on a given day, but you cannot sum balances across multiple days (summing daily balances would give a meaningless number).
+
+Instead, for time-based analysis, you typically want to use a **point-in-time value** such as:
+- **Month-end balance** (using the last day's balance)
+- **Month-start balance** (using the first day's balance)
+- **Period-end balance** (using the balance at the end of a query period)
+
+<WarningBox>
+
+Semi-additive measures use SQL window functions and CTEs (Common Table Expressions). Ensure your database supports window functions (PostgreSQL, MySQL 8.0+, Snowflake, BigQuery, Redshift, SQL Server, Oracle, etc.).
+
+</WarningBox>
+
+## Data modeling
+
+Cube supports semi-additive measures through the `nonAdditiveDimension` configuration. This tells Cube which dimension should not be aggregated and how to select the appropriate value.
+
+### Basic month-end balance
+
+Let's start with a simple example - calculating month-end account balances:
+
+<CodeTabs>
+
+```javascript
+cube('AccountBalances', {
+  sql: 'account_balances',
+
+  dimensions: {
+    ds: {
+      sql: 'snapshot_date',
+      type: 'time',
+    },
+
+    accountId: {
+      sql: 'account_id',
+      type: 'string',
+    },
+  },
+
+  measures: {
+    // Month-end balance - sum of all account balances on the last day of the month
+    monthEndBalance: {
+      sql: 'balance_usd',
+      type: 'sum',
+      nonAdditiveDimension: {
+        name: 'ds',           // Time dimension that is non-additive
+        windowChoice: 'max'   // Use maximum date (month-end)
+      }
+    }
+  }
+});
+```
+
+```yaml
+cubes:
+  - name: AccountBalances
+    sql: account_balances
+
+    dimensions:
+      - name: ds
+        sql: snapshot_date
+        type: time
+
+      - name: accountId
+        sql: account_id
+        type: string
+
+    measures:
+      - name: monthEndBalance
+        sql: balance_usd
+        type: sum
+        nonAdditiveDimension:
+          name: ds           # Time dimension that is non-additive
+          windowChoice: max   # Use maximum date (month-end)
+```
+
+</CodeTabs>
+
+### Month-start balance
+
+To calculate month-start balances, use `windowChoice: 'min'`:
+
+<CodeTabs>
+
+```javascript
+measures: {
+  monthStartBalance: {
+    sql: 'balance_usd',
+    type: 'sum',
+    nonAdditiveDimension: {
+      name: 'ds',
+      windowChoice: 'min'   // Use minimum date (month-start)
+    }
+  }
+}
+```
+
+```yaml
+measures:
+  - name: monthStartBalance
+    sql: balance_usd
+    type: sum
+    nonAdditiveDimension:
+      name: ds
+      windowChoice: min   # Use minimum date (month-start)
+```
+
+</CodeTabs>
+
+### Per-account month-end balance
+
+When you want to see month-end balances **per account**, use the `windowGroupings` option:
+
+<CodeTabs>
+
+```javascript
+measures: {
+  accountMonthEndBalance: {
+    sql: 'balance_usd',
+    type: 'sum',
+    nonAdditiveDimension: {
+      name: 'ds',
+      windowChoice: 'max',
+      windowGroupings: ['accountId']  // Apply window per account
+    }
+  }
+}
+```
+
+```yaml
+measures:
+  - name: accountMonthEndBalance
+    sql: balance_usd
+    type: sum
+    nonAdditiveDimension:
+      name: ds
+      windowChoice: max
+      windowGroupings:   # Apply window per account
+        - accountId
+```
+
+</CodeTabs>
+
+This creates a separate window for each account, ensuring you get the month-end balance **for each account individually** rather than a global month-end balance.
+
+### Complete example with all window choices
+
+Here's a complete example showing all available `windowChoice` options:
+
+<CodeTabs>
+
+```javascript
+cube('AccountBalances', {
+  sql: 'account_balances',
+
+  dimensions: {
+    ds: {
+      sql: 'snapshot_date',
+      type: 'time',
+    },
+    accountId: {
+      sql: 'account_id',
+      type: 'string',
+    },
+  },
+
+  measures: {
+    // Month-end balance (last day of each month)
+    monthEndBalance: {
+      sql: 'balance_usd',
+      type: 'sum',
+      nonAdditiveDimension: {
+        name: 'ds',
+        windowChoice: 'max'
+      }
+    },
+
+    // Month-start balance (first day of each month)
+    monthStartBalance: {
+      sql: 'balance_usd',
+      type: 'sum',
+      nonAdditiveDimension: {
+        name: 'ds',
+        windowChoice: 'min'
+      }
+    },
+
+    // Period-end balance (last day in query range)
+    periodEndBalance: {
+      sql: 'balance_usd',
+      type: 'sum',
+      nonAdditiveDimension: {
+        name: 'ds',
+        windowChoice: 'last'
+      }
+    },
+
+    // Period-start balance (first day in query range)
+    periodStartBalance: {
+      sql: 'balance_usd',
+      type: 'sum',
+      nonAdditiveDimension: {
+        name: 'ds',
+        windowChoice: 'first'
+      }
+    },
+
+    // Per-account month-end balance
+    accountMonthEndBalance: {
+      sql: 'balance_usd',
+      type: 'sum',
+      nonAdditiveDimension: {
+        name: 'ds',
+        windowChoice: 'max',
+        windowGroupings: ['accountId']
+      }
+    }
+  }
+});
+```
+
+```yaml
+cubes:
+  - name: AccountBalances
+    sql: account_balances
+
+    dimensions:
+      - name: ds
+        sql: snapshot_date
+        type: time
+      - name: accountId
+        sql: account_id
+        type: string
+
+    measures:
+      # Month-end balance (last day of each month)
+      - name: monthEndBalance
+        sql: balance_usd
+        type: sum
+        nonAdditiveDimension:
+          name: ds
+          windowChoice: max
+
+      # Month-start balance (first day of each month)
+      - name: monthStartBalance
+        sql: balance_usd
+        type: sum
+        nonAdditiveDimension:
+          name: ds
+          windowChoice: min
+
+      # Period-end balance (last day in query range)
+      - name: periodEndBalance
+        sql: balance_usd
+        type: sum
+        nonAdditiveDimension:
+          name: ds
+          windowChoice: last
+
+      # Period-start balance (first day in query range)
+      - name: periodStartBalance
+        sql: balance_usd
+        type: sum
+        nonAdditiveDimension:
+          name: ds
+          windowChoice: first
+
+      # Per-account month-end balance
+      - name: accountMonthEndBalance
+        sql: balance_usd
+        type: sum
+        nonAdditiveDimension:
+          name: ds
+          windowChoice: max
+          windowGroupings:
+            - accountId
+```
+
+</CodeTabs>
+
+## Window choices reference
+
+The `windowChoice` option determines which value to select from the time window:
+
+| windowChoice | Description | Example Use Case |
+|--------------|-------------|------------------|
+| `max` | Select the value at the maximum timestamp in each time partition | Month-end balance, quarter-end MRR |
+| `min` | Select the value at the minimum timestamp in each time partition | Month-start balance, opening inventory |
+| `first` | Select the first value in the entire query result | Period-opening balance |
+| `last` | Select the last value in the entire query result | Period-closing balance |
+
+<InfoBox>
+
+The difference between `max`/`min` and `first`/`last`:
+- **`max`/`min`** operate on each time partition (e.g., each month when using `month` granularity)
+- **`first`/`last`** operate on the entire query result regardless of time granularity
+
+</InfoBox>
+
+## Query examples
+
+### Query 1: Month-end balances by month
+
+```json
+{
+  "measures": ["AccountBalances.monthEndBalance"],
+  "timeDimensions": [
+    {
+      "dimension": "AccountBalances.ds",
+      "granularity": "month",
+      "dateRange": ["2024-01-01", "2024-03-31"]
+    }
+  ]
+}
+```
+
+**Result:**
+```json
+[
+  {
+    "AccountBalances.ds": "2024-01-01T00:00:00.000Z",
+    "AccountBalances.monthEndBalance": 4500.00
+  },
+  {
+    "AccountBalances.ds": "2024-02-01T00:00:00.000Z",
+    "AccountBalances.monthEndBalance": 5200.00
+  },
+  {
+    "AccountBalances.ds": "2024-03-01T00:00:00.000Z",
+    "AccountBalances.monthEndBalance": 6100.00
+  }
+]
+```
+
+### Query 2: Per-account month-end balances
+
+```json
+{
+  "measures": ["AccountBalances.accountMonthEndBalance"],
+  "dimensions": ["AccountBalances.accountId"],
+  "timeDimensions": [
+    {
+      "dimension": "AccountBalances.ds",
+      "granularity": "month",
+      "dateRange": ["2024-01-01", "2024-01-31"]
+    }
+  ]
+}
+```
+
+**Result:**
+```json
+[
+  {
+    "AccountBalances.accountId": "A001",
+    "AccountBalances.ds": "2024-01-01T00:00:00.000Z",
+    "AccountBalances.accountMonthEndBalance": 1000.00
+  },
+  {
+    "AccountBalances.accountId": "A002",
+    "AccountBalances.ds": "2024-01-01T00:00:00.000Z",
+    "AccountBalances.accountMonthEndBalance": 1500.00
+  },
+  {
+    "AccountBalances.accountId": "A003",
+    "AccountBalances.ds": "2024-01-01T00:00:00.000Z",
+    "AccountBalances.accountMonthEndBalance": 2000.00
+  }
+]
+```
+
+## How it works
+
+When you use `nonAdditiveDimension`, Cube automatically generates SQL using CTEs and window functions. For example, the month-end balance query generates SQL similar to:
+
+```sql
+WITH base_data AS (
+  SELECT
+    account_balances.account_id AS account_id,
+    account_balances.snapshot_date AS ds,
+    account_balances.balance_usd AS balance_usd,
+    DATE_TRUNC('month', account_balances.snapshot_date) AS ds_month
+  FROM account_balances
+  WHERE account_balances.snapshot_date >= '2024-01-01'
+    AND account_balances.snapshot_date < '2024-04-01'
+),
+windowed_data AS (
+  SELECT
+    account_id,
+    ds,
+    ds_month,
+    balance_usd,
+    -- Find the maximum date in each month partition
+    MAX(ds) OVER (PARTITION BY ds_month) AS month_end_ds
+  FROM base_data
+)
+SELECT
+  ds_month,
+  -- Sum balances where date equals the month-end date
+  COALESCE(SUM(CASE WHEN ds = month_end_ds THEN balance_usd ELSE NULL END), 0) AS month_end_balance
+FROM windowed_data
+GROUP BY ds_month
+ORDER BY ds_month ASC
+```
+
+<InfoBox>
+
+The SQL varies slightly depending on your database:
+- **PostgreSQL, MySQL 8.0+, Snowflake, BigQuery, Redshift**: Uses `FILTER (WHERE ...)` clause
+- **SQL Server, Oracle**: Uses `CASE WHEN ... THEN ... ELSE 0 END`
+
+Cube automatically generates the correct SQL for your database.
+
+</InfoBox>
+
+## Common use cases
+
+### Financial reporting
+
+- **Month-end asset balances**: `windowChoice: 'max'` with monthly granularity
+- **Quarter-end liabilities**: `windowChoice: 'max'` with quarterly granularity
+- **Year-end equity**: `windowChoice: 'max'` with yearly granularity
+
+### Inventory management
+
+- **Month-start inventory**: `windowChoice: 'min'` for opening stock levels
+- **Month-end inventory**: `windowChoice: 'max'` for closing stock levels
+- **Warehouse-level inventory**: Use `windowGroupings: ['warehouseId']`
+
+### Subscription metrics
+
+- **Month-end MRR**: `windowChoice: 'max'` for recurring revenue at period end
+- **User-level month-end MRR**: Add `windowGroupings: ['userId']`
+
+## Performance considerations
+
+### Indexing
+
+For optimal performance, ensure you have indexes on:
+- The time dimension column (`snapshot_date`)
+- Any columns used in `windowGroupings` (e.g., `account_id`)
+
+### Pre-aggregations
+
+Semi-additive measures work with pre-aggregations. To improve performance:
+
+<CodeTabs>
+
+```javascript
+preAggregations: {
+  monthEndBalances: {
+    measures: [monthEndBalance],
+    timeDimensions: [{
+      dimension: AccountBalances.ds,
+      granularity: 'month'
+    }],
+    schedule: {
+      every: '1 hour'
+    }
+  }
+}
+```
+
+```yaml
+preAggregations:
+  - name: monthEndBalances
+    measures:
+      - monthEndBalance
+    timeDimensions:
+      - dimension: AccountBalances.ds
+        granularity: month
+    schedule:
+      every: 1 hour
+```
+
+</CodeTabs>
+
+## Database compatibility
+
+| Database | Status | Notes |
+|----------|--------|-------|
+| PostgreSQL | ✅ Supported | Full support |
+| MySQL 8.0+ | ✅ Supported | Full support |
+| Snowflake | ✅ Supported | Full support |
+| BigQuery | ✅ Supported | Full support |
+| Redshift | ✅ Supported | Full support |
+| SQL Server | ✅ Supported | Uses CASE WHEN instead of FILTER |
+| Oracle | ✅ Supported | Uses CASE WHEN instead of FILTER |
+| MySQL < 8.0 | ❌ Not supported | Window functions not available |
+
+## See also
+
+- [Measures reference][measures-ref]
+- [Pre-aggregations][pre-aggs-ref]
+- [Working with joins][joins-guide]
+
+[measures-ref]: /product/data-modeling/reference/measures
+[pre-aggs-ref]: /product/data-modeling/reference/pre-aggregations
+[joins-guide]: /product/data-modeling/concepts/working-with-joins
