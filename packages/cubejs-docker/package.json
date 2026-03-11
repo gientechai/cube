@@ -38,7 +38,8 @@
     "@cubejs-backend/trino-driver": "1.6.21",
     "@cubejs-backend/vertica-driver": "1.6.21",
     "cubejs-cli": "1.6.21",
-    "typescript": "~5.2.2"
+    "typescript": "~5.2.2",
+    "dmdb": "^1.0.0"
   },
   "resolutions": {
     "colors": "1.4.0"
