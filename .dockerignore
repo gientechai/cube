@@ -1,24 +1,46 @@
-**
-!package.json
-!tsconfig.base.json
-!tsconfig.json
-!rollup.config.js
-!yarn.lock
-!lerna.json
-!packages/
-!rust/cubestore/js-wrapper/
-!rust/cubestore/tsconfig.json
-!rust/cubestore/package.json
-!rust/cubestore/bin
-!rust/cubesql/package.json
+# Node modules
+node_modules/
+**/node_modules/
 
-# Ignoring builds for native from local machime to protect a problem with different architecture
+# Build artifacts（保留 dist，排除其他）
+packages/*/lib/
+packages/*/coverage/
+
+# Native builds for different architectures
 packages/cubejs-backend-native/index.node
 packages/cubejs-backend-native/native/
-# Caches
 packages/cubejs-backend-native/target
-packages/*/node_modules/
-packages/*/dist/
-packages/*/coverage/
+
+# Cache and temp files
+.npm
+.yarn/cache
+.yarn/install-state.gz
+*.log
+
+# Git
+.git/
+.gitignore
+
+# CI/CD
+.github/
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Test files
+**/*.test.ts
+**/*.test.js
+**/test/
+**/tests/
+
+# Development
+.vscode/
+.idea/
+*.swp
+*.swo
+
 # Other
 packages/cubejs-server-core/playground/
+.DS_Store
