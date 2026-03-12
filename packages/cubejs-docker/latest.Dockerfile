@@ -18,28 +18,57 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Install npm packages from local tarballs or download from GitHub Releases
+# First, save npm-packages to a temp location for later re-installation
 RUN if [ -d "npm-packages" ] && [ "$(ls -A npm-packages/*.tgz 2>/dev/null)" ]; then \
-      echo "Installing npm packages from local tarballs..." && \
-      for pkg in npm-packages/*.tgz; do \
-        yarn add file:"$pkg" --ignore-scripts || true; \
-      done; \
+      cp -r npm-packages /tmp/npm-packages-backup; \
     elif [ -n "$NPM_PACKAGES_VERSION" ] && [ "$NPM_PACKAGES_VERSION" != "noop" ]; then \
       echo "Downloading npm packages from GitHub Releases..." && \
-      curl -L -o npm-packages.tar.gz "https://github.com/cube-js/cube/releases/download/v${NPM_PACKAGES_VERSION}/npm-packages-${NPM_PACKAGES_VERSION}.tar.gz" && \
-      mkdir -p npm-packages && \
-      tar xzf npm-packages.tar.gz -C npm-packages && \
-      for pkg in npm-packages/*.tgz; do \
-        yarn add file:"$pkg" --ignore-scripts || true; \
-      done && \
+      curl -fL -o npm-packages.tar.gz "https://github.com/peace0phmind/cube/releases/download/v${NPM_PACKAGES_VERSION}/npm-packages-${NPM_PACKAGES_VERSION}.tar.gz" && \
+      mkdir -p /tmp/npm-packages-backup && \
+      tar xzf npm-packages.tar.gz -C /tmp/npm-packages-backup && \
       rm -f npm-packages.tar.gz; \
     fi
 
 # We are copying root yarn.lock file to the context folder during the Publish GH
 # action. So, a process will use the root lock file here.
 RUN yarn install --prod \
-    # Remove DuckDB sources to reduce image size
+    # Remove unnecessary files to reduce image size
     && rm -rf /cube/node_modules/duckdb/src \
+    && find /cube/node_modules -name "*.md" -type f -delete \
+    && find /cube/node_modules -name "test" -type d -exec rm -rf {} + 2>/dev/null || true \
+    && find /cube/node_modules -name "*.test.js" -o -name "*.test.ts" | xargs rm -f 2>/dev/null || true \
+    && find /cube/node_modules -name "*.map" -type f -delete 2>/dev/null || true \
     && yarn cache clean
+
+# Re-install our custom packages from npm-packages-backup to override npm registry versions
+RUN if [ -d "/tmp/npm-packages-backup" ]; then \
+      echo "Re-installing custom packages from GitHub Releases..." && \
+      for pkg in /tmp/npm-packages-backup/*.tgz; do \
+        temp_dir=$(mktemp -d) && \
+        tar xzf "$pkg" -C "$temp_dir" && \
+        pkg_name=$(cat "$temp_dir"/package/package.json | grep -m1 '"name"' | cut -d'"' -f4) && \
+        if [ -n "$pkg_name" ]; then \
+          rm -rf "/cube/node_modules/$pkg_name" && \
+          mv "$temp_dir/package" "/cube/node_modules/$pkg_name"; \
+        fi && \
+        rm -rf "$temp_dir"; \
+      done; \
+      rm -rf /tmp/npm-packages-backup; \
+    fi
+
+# Fix file permissions for executables and clean up npm-packages directory
+RUN chmod +x /cube/node_modules/cubejs-cli/dist/src/index.js \
+    && chmod +x /cube/node_modules/.bin/cubejs \
+    && rm -rf /cube/npm-packages
+
+# Copy native binaries if available
+RUN if [ -d "native" ] && [ -f "native/native/index.node" ]; then \
+      mkdir -p /cube/node_modules/@cubejs-backend/native/native && \
+      cp native/native/index.node /cube/node_modules/@cubejs-backend/native/native/ && \
+      echo "Native binaries copied successfully"; \
+    else \
+      echo "No native binaries found in native/native/"; \
+    fi
 
 FROM node:22.20.0-bookworm-slim
 
