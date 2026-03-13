@@ -521,6 +521,13 @@ const BaseMeasure = {
       sql: Joi.func().required()
     })
   ),
+  // Semi-additive measures support
+  nonAdditiveDimension: Joi.object().keys({
+    name: Joi.string().required(),
+    windowChoice: Joi.string().valid('max', 'min', 'avg', 'first', 'last').required(),
+    windowGroupings: Joi.array().items(Joi.string()),
+    distinct: Joi.boolean().strict()
+  }),
   meta: Joi.any()
 };
 
