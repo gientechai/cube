@@ -189,7 +189,7 @@ jobs:
       - name: Prepare
         id: prep
         run: |
-          DOCKER_IMAGE=0fpy/cube
+          DOCKER_IMAGE=gientechai/cube
           VERSION=noop
 
           if [ "${{ github.event_name }}" = "schedule" ]; then
@@ -229,11 +229,20 @@ jobs:
       - name: Download npm packages
         if: steps.prep.outputs.version != 'noop'
         run: |
-          curl -L -o npm-packages.tar.gz "https://github.com/cube-js/cube/releases/download/${{ steps.prep.outputs.version }}/npm-packages-${{ steps.prep.outputs.version }}.tar.gz" || echo "npm-packages.tar.gz not found, will use local packages if available"
+          curl -L -o npm-packages.tar.gz "https://github.com/gientechai/cube/releases/download/${{ steps.prep.outputs.version }}/npm-packages-${{ steps.prep.outputs.version }}.tar.gz" || echo "npm-packages.tar.gz not found, will use local packages if available"
           if [ -f npm-packages.tar.gz ]; then
             mkdir -p npm-packages
             tar xzf npm-packages.tar.gz -C npm-packages
             cp -r npm-packages packages/cubejs-docker/
+          fi
+      - name: Download native binaries
+        run: |
+          mkdir -p packages/cubejs-docker/native
+          # Download fallback native binary for x64-linux from gientechai/cube
+          curl -fL -o packages/cubejs-docker/native.tar.gz "https://github.com/gientechai/cube/releases/download/${{ steps.prep.outputs.version }}/native-linux-x64-glibc-fallback.tar.gz" || echo "Native binary not available in releases"
+          if [ -f packages/cubejs-docker/native.tar.gz ]; then
+            tar xzf packages/cubejs-docker/native.tar.gz -C packages/cubejs-docker/native
+            rm -f packages/cubejs-docker/native.tar.gz
           fi
       - name: Push to Docker Hub
         uses: docker/build-push-action@v6
@@ -278,7 +287,7 @@ jobs:
       - name: Prepare
         id: prep
         run: |
-          DOCKER_IMAGE=0fpy/cube
+          DOCKER_IMAGE=gientechai/cube
           VERSION=noop
 
           if [ "${{ github.event_name }}" = "schedule" ]; then
@@ -318,11 +327,20 @@ jobs:
       - name: Download npm packages
         if: steps.prep.outputs.version != 'noop'
         run: |
-          curl -L -o npm-packages.tar.gz "https://github.com/cube-js/cube/releases/download/${{ steps.prep.outputs.version }}/npm-packages-${{ steps.prep.outputs.version }}.tar.gz" || echo "npm-packages.tar.gz not found, will use local packages if available"
+          curl -L -o npm-packages.tar.gz "https://github.com/gientechai/cube/releases/download/${{ steps.prep.outputs.version }}/npm-packages-${{ steps.prep.outputs.version }}.tar.gz" || echo "npm-packages.tar.gz not found, will use local packages if available"
           if [ -f npm-packages.tar.gz ]; then
             mkdir -p npm-packages
             tar xzf npm-packages.tar.gz -C npm-packages
             cp -r npm-packages packages/cubejs-docker/
+          fi
+      - name: Download native binaries
+        run: |
+          mkdir -p packages/cubejs-docker/native
+          # Download fallback native binary for x64-linux from gientechai/cube
+          curl -fL -o packages/cubejs-docker/native.tar.gz "https://github.com/gientechai/cube/releases/download/${{ steps.prep.outputs.version }}/native-linux-x64-glibc-fallback.tar.gz" || echo "Native binary not available in releases"
+          if [ -f packages/cubejs-docker/native.tar.gz ]; then
+            tar xzf packages/cubejs-docker/native.tar.gz -C packages/cubejs-docker/native
+            rm -f packages/cubejs-docker/native.tar.gz
           fi
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -394,7 +412,7 @@ jobs:
         env:
           GITHUB_SHA: ${{ github.sha }}
         run: |
-          DOCKER_IMAGE=0fpy/cubestore
+          DOCKER_IMAGE=gientechai/cubestore
           VERSION=noop
 
           if [ "${{ github.event_name }}" = "schedule" ]; then
@@ -452,7 +470,7 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-          repository: cubejs/cubestore
+          repository: gientechai/cubestore
           readme-filepath: ./rust/cubestore/README.md
 
   cubestore_linux:
@@ -464,7 +482,6 @@ jobs:
       matrix:
         target:
           - x86_64-unknown-linux-gnu
-          - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-gnu
         include:
           # Please use minimal possible version of ubuntu, because it produces constraint on glibc
@@ -473,13 +490,6 @@ jobs:
             image: cubejs/rust-cross:x86_64-unknown-linux-gnu-15082024
             executable_name: cubestored
             strip: true
-            compress: false
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-musl
-            image: cubejs/rust-cross:x86_64-unknown-linux-musl-15082024
-            executable_name: cubestored
-            strip: true
-            # cubestored: CantPackException: bad DT_HASH nbucket=0x344  len=0x1890
             compress: false
           - os: ubuntu-24.04-arm
             image: cubejs/rust-builder:bullseye-llvm-18
