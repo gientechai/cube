@@ -1805,6 +1805,13 @@ export class BaseQuery {
     const select = fromSubQuery && fromSubQuery.outerMeasuresJoinFullKeyQueryAggregate(membersToSelect, membersToSelect, withQuery.memberFrom.map(f => f.alias));
     const fromSql = select && this.wrapInParenthesis(select);
 
+    // When memberFrom only has dimensions (no measures), the previous CTE cannot supply
+    // the base table rows needed to compute this stage's measures. Use base table as FROM
+    // instead to avoid "missing FROM clause item" when measures reference the cube table.
+    const useFromSubQuery = fromSql && fromMeasures && fromMeasures.length > 0;
+    // When querying from base table, do not remap dimensions to previous CTE aliases
+    // (e.g. score__subject); use actual column refs (e.g. "score".subject) so the SQL is valid.
+    const effectiveRenderedReference = useFromSubQuery ? renderedReferenceContext.renderedReference : undefined;
     const subQueryOptions = {
       measures: withQuery.measures,
       dimensions: withQuery.dimensions,
@@ -1813,7 +1820,7 @@ export class BaseQuery {
       multiStageTimeDimensions: withQuery.multiStageTimeDimensions,
       filters: withQuery.filters,
       segments: withQuery.segments,
-      from: fromSql && {
+      from: useFromSubQuery && {
         sql: fromSql,
         alias: `${withQuery.alias}_join`,
       },
@@ -1834,10 +1841,14 @@ export class BaseQuery {
       }
     }
 
+    const contextForSubQuery = {
+      ...renderedReferenceContext,
+      renderedReference: effectiveRenderedReference,
+    };
     return {
       query: subQuery.evaluateSymbolSqlWithContext(
         () => subQuery.buildParamAnnotatedSql(),
-        renderedReferenceContext,
+        contextForSubQuery,
       ),
       alias: withQuery.alias
     };
