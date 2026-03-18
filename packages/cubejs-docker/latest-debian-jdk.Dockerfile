@@ -24,7 +24,7 @@ RUN if [ -d "npm-packages" ] && [ "$(ls -A npm-packages/*.tgz 2>/dev/null)" ]; t
       cp -r npm-packages /tmp/npm-packages-backup; \
     elif [ -n "$NPM_PACKAGES_VERSION" ] && [ "$NPM_PACKAGES_VERSION" != "noop" ]; then \
       echo "Downloading npm packages from GitHub Releases..." && \
-      curl -fL -o npm-packages.tar.gz "https://github.com/peace0phmind/cube/releases/download/v${NPM_PACKAGES_VERSION}/npm-packages-${NPM_PACKAGES_VERSION}.tar.gz" && \
+      curl -fL -o npm-packages.tar.gz "https://github.com/gientechai/cube/releases/download/v${NPM_PACKAGES_VERSION}/npm-packages-${NPM_PACKAGES_VERSION}.tar.gz" && \
       mkdir -p /tmp/npm-packages-backup && \
       tar xzf npm-packages.tar.gz -C /tmp/npm-packages-backup && \
       rm -f npm-packages.tar.gz; \
