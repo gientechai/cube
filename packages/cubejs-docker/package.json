@@ -15,6 +15,7 @@
     "@cubejs-backend/crate-driver": "1.6.61",
     "@cubejs-backend/databricks-jdbc-driver": "1.6.61",
     "@cubejs-backend/dbt-schema-extension": "1.6.61",
+    "@cubejs-backend/dm-driver": "1.6.61",
     "@cubejs-backend/dremio-driver": "1.6.61",
     "@cubejs-backend/druid-driver": "1.6.61",
     "@cubejs-backend/duckdb-driver": "1.6.61",
@@ -38,6 +39,7 @@
     "@cubejs-backend/trino-driver": "1.6.61",
     "@cubejs-backend/vertica-driver": "1.6.61",
     "cubejs-cli": "1.6.61",
+    "dmdb": "^1.0.0",
     "typescript": "~5.2.2"
   },
   "resolutions": {
