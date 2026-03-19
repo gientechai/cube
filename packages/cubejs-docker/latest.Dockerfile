@@ -61,13 +61,49 @@ RUN chmod +x /cube/node_modules/cubejs-cli/dist/src/index.js \
     && chmod +x /cube/node_modules/.bin/cubejs \
     && rm -rf /cube/npm-packages
 
-# Copy native binaries if available
-RUN if [ -d "native" ] && [ -f "native/native/index.node" ]; then \
+# Copy or download native binaries based on architecture
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "x86_64" ]; then \
+      NATIVE_ARCH="x64"; \
+    elif [ "$ARCH" = "aarch64" ]; then \
+      NATIVE_ARCH="arm64"; \
+    else \
+      echo "Unsupported architecture: $ARCH"; \
+      exit 1; \
+    fi && \
+    echo "Detected architecture: $ARCH, downloading native binary for $NATIVE_ARCH..." && \
+    if [ -d "native" ] && [ -f "native/native/index.node" ]; then \
+      echo "Checking if native binary matches architecture..." && \
+      FILE_ARCH=$(file native/native/index.node | grep -o 'x86-64\|aarch64' | head -1) && \
+      if [ \( "$NATIVE_ARCH" = "x64" -a "$FILE_ARCH" = "x86-64" \) -o \( "$NATIVE_ARCH" = "arm64" -a "$FILE_ARCH" = "aarch64" \) ]; then \
+        echo "Native binary architecture matches, using local file..." && \
+        mkdir -p /cube/node_modules/@cubejs-backend/native/native && \
+        cp native/native/index.node /cube/node_modules/@cubejs-backend/native/native/ && \
+        echo "Native binaries copied successfully"; \
+      else \
+        echo "Native binary architecture mismatch (expected $NATIVE_ARCH, got $FILE_ARCH), downloading correct version..." && \
+        rm -rf native && \
+        if [ -n "$NPM_PACKAGES_VERSION" ] && [ "$NPM_PACKAGES_VERSION" != "noop" ]; then \
+          curl -fL -o native.tar.gz "https://github.com/gientechai/cube/releases/download/v${NPM_PACKAGES_VERSION}/native-linux-${NATIVE_ARCH}-glibc-fallback.tar.gz" && \
+          mkdir -p native && \
+          tar xzf native.tar.gz -C native && \
+          rm -f native.tar.gz && \
+          mkdir -p /cube/node_modules/@cubejs-backend/native/native && \
+          cp native/native/index.node /cube/node_modules/@cubejs-backend/native/native/ && \
+          echo "Native binaries downloaded and copied successfully for $NATIVE_ARCH"; \
+        fi; \
+      fi; \
+    elif [ -n "$NPM_PACKAGES_VERSION" ] && [ "$NPM_PACKAGES_VERSION" != "noop" ]; then \
+      echo "No local native binary found, downloading for $NATIVE_ARCH..." && \
+      curl -fL -o native.tar.gz "https://github.com/gientechai/cube/releases/download/v${NPM_PACKAGES_VERSION}/native-linux-${NATIVE_ARCH}-glibc-fallback.tar.gz" && \
+      mkdir -p native && \
+      tar xzf native.tar.gz -C native && \
+      rm -f native.tar.gz && \
       mkdir -p /cube/node_modules/@cubejs-backend/native/native && \
       cp native/native/index.node /cube/node_modules/@cubejs-backend/native/native/ && \
-      echo "Native binaries copied successfully"; \
+      echo "Native binaries downloaded and copied successfully for $NATIVE_ARCH"; \
     else \
-      echo "No native binaries found in native/native/"; \
+      echo "No native binaries found and no NPM_PACKAGES_VERSION specified"; \
     fi
 
 FROM node:22.20.0-bookworm-slim

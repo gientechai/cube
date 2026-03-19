@@ -57,6 +57,27 @@ RUN if [ -d "/tmp/npm-packages-backup" ]; then \
       rm -rf /tmp/npm-packages-backup; \
     fi
 
+# Download and install native binaries based on target architecture
+# This ensures we get the correct architecture (x64 or arm64) for the native module
+RUN if [ -n "$NPM_PACKAGES_VERSION" ] && [ "$NPM_PACKAGES_VERSION" != "noop" ]; then \
+      NATIVE_ARCH=$(dpkg --print-architecture) && \
+      if [ "$NATIVE_ARCH" = "amd64" ]; then \
+        NATIVE_ARCH="x64"; \
+      elif [ "$NATIVE_ARCH" = "arm64" ]; then \
+        NATIVE_ARCH="arm64"; \
+      fi && \
+      echo "Downloading native binaries for $NATIVE_ARCH architecture..." && \
+      curl -fL -o native.tar.gz "https://github.com/gientechai/cube/releases/download/v${NPM_PACKAGES_VERSION}/native-linux-${NATIVE_ARCH}-glibc-fallback.tar.gz" && \
+      mkdir -p native && \
+      tar xzf native.tar.gz -C native && \
+      rm -f native.tar.gz && \
+      mkdir -p /cube/node_modules/@cubejs-backend/native/native && \
+      cp native/native/index.node /cube/node_modules/@cubejs-backend/native/native/ && \
+      echo "Native binaries downloaded and copied successfully for $NATIVE_ARCH"; \
+    else \
+      echo "No native binaries found and no NPM_PACKAGES_VERSION specified"; \
+    fi
+
 # Fix file permissions for executables and clean up npm-packages directory
 RUN chmod +x /cube/node_modules/cubejs-cli/dist/src/index.js \
     && chmod +x /cube/node_modules/.bin/cubejs \
