@@ -20,13 +20,17 @@ RUN mkdir -p cubestore/src/bin && \
 
 ARG WITH_AVX2=1
 RUN [ "$WITH_AVX2" -eq "1" ] && export RUSTFLAGS="-C target-feature=+avx2"; \
-    cargo build --release -p cubestore
+    cargo build --release -p cubestore \
+    --retry 3 \
+    --network-timeout 300
 
 # Cube Store get version from his own package
 COPY cubestore/package.json package.json
 COPY cubestore/cubestore cubestore
 RUN [ "$WITH_AVX2" -eq "1" ] && export RUSTFLAGS="-C target-feature=+avx2"; \
-    cargo build --release -p cubestore
+    cargo build --release -p cubestore \
+    --retry 3 \
+    --network-timeout 300
 
 FROM debian:bookworm-slim
 
