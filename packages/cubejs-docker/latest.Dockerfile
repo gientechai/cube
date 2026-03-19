@@ -1,4 +1,4 @@
-FROM node:22.22.0-bookworm-slim AS builder
+FROM node:22.20.0-bookworm-slim AS builder
 
 WORKDIR /cube
 COPY . .
@@ -18,30 +18,95 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Install npm packages from local tarballs or download from GitHub Releases
+# First, save npm-packages to a temp location for later re-installation
 RUN if [ -d "npm-packages" ] && [ "$(ls -A npm-packages/*.tgz 2>/dev/null)" ]; then \
-      echo "Installing npm packages from local tarballs..." && \
-      for pkg in npm-packages/*.tgz; do \
-        yarn add file:"$pkg" --ignore-scripts || true; \
-      done; \
+      cp -r npm-packages /tmp/npm-packages-backup; \
     elif [ -n "$NPM_PACKAGES_VERSION" ] && [ "$NPM_PACKAGES_VERSION" != "noop" ]; then \
       echo "Downloading npm packages from GitHub Releases..." && \
-      curl -L -o npm-packages.tar.gz "https://github.com/cube-js/cube/releases/download/v${NPM_PACKAGES_VERSION}/npm-packages-${NPM_PACKAGES_VERSION}.tar.gz" && \
-      mkdir -p npm-packages && \
-      tar xzf npm-packages.tar.gz -C npm-packages && \
-      for pkg in npm-packages/*.tgz; do \
-        yarn add file:"$pkg" --ignore-scripts || true; \
-      done && \
+      curl -fL -o npm-packages.tar.gz "https://github.com/gientechai/cube/releases/download/v${NPM_PACKAGES_VERSION}/npm-packages-${NPM_PACKAGES_VERSION}.tar.gz" && \
+      mkdir -p /tmp/npm-packages-backup && \
+      tar xzf npm-packages.tar.gz -C /tmp/npm-packages-backup && \
       rm -f npm-packages.tar.gz; \
     fi
 
 # We are copying root yarn.lock file to the context folder during the Publish GH
 # action. So, a process will use the root lock file here.
 RUN yarn install --prod \
-    # Remove DuckDB sources to reduce image size
+    # Remove unnecessary files to reduce image size
     && rm -rf /cube/node_modules/duckdb/src \
+    && find /cube/node_modules -name "*.md" -type f -delete \
+    && find /cube/node_modules -name "test" -type d -exec rm -rf {} + 2>/dev/null || true \
+    && find /cube/node_modules -name "*.test.js" -o -name "*.test.ts" | xargs rm -f 2>/dev/null || true \
+    && find /cube/node_modules -name "*.map" -type f -delete 2>/dev/null || true \
     && yarn cache clean
 
-FROM node:22.22.0-bookworm-slim
+# Re-install our custom packages from npm-packages-backup to override npm registry versions
+RUN if [ -d "/tmp/npm-packages-backup" ]; then \
+      echo "Re-installing custom packages from GitHub Releases..." && \
+      for pkg in /tmp/npm-packages-backup/*.tgz; do \
+        temp_dir=$(mktemp -d) && \
+        tar xzf "$pkg" -C "$temp_dir" && \
+        pkg_name=$(cat "$temp_dir"/package/package.json | grep -m1 '"name"' | cut -d'"' -f4) && \
+        if [ -n "$pkg_name" ]; then \
+          rm -rf "/cube/node_modules/$pkg_name" && \
+          mv "$temp_dir/package" "/cube/node_modules/$pkg_name"; \
+        fi && \
+        rm -rf "$temp_dir"; \
+      done; \
+      rm -rf /tmp/npm-packages-backup; \
+    fi
+
+# Fix file permissions for executables and clean up npm-packages directory
+RUN chmod +x /cube/node_modules/cubejs-cli/dist/src/index.js \
+    && chmod +x /cube/node_modules/.bin/cubejs \
+    && rm -rf /cube/npm-packages
+
+# Copy or download native binaries based on architecture
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "x86_64" ]; then \
+      NATIVE_ARCH="x64"; \
+    elif [ "$ARCH" = "aarch64" ]; then \
+      NATIVE_ARCH="arm64"; \
+    else \
+      echo "Unsupported architecture: $ARCH"; \
+      exit 1; \
+    fi && \
+    echo "Detected architecture: $ARCH, downloading native binary for $NATIVE_ARCH..." && \
+    if [ -d "native" ] && [ -f "native/native/index.node" ]; then \
+      echo "Checking if native binary matches architecture..." && \
+      FILE_ARCH=$(file native/native/index.node | grep -o 'x86-64\|aarch64' | head -1) && \
+      if [ \( "$NATIVE_ARCH" = "x64" -a "$FILE_ARCH" = "x86-64" \) -o \( "$NATIVE_ARCH" = "arm64" -a "$FILE_ARCH" = "aarch64" \) ]; then \
+        echo "Native binary architecture matches, using local file..." && \
+        mkdir -p /cube/node_modules/@cubejs-backend/native/native && \
+        cp native/native/index.node /cube/node_modules/@cubejs-backend/native/native/ && \
+        echo "Native binaries copied successfully"; \
+      else \
+        echo "Native binary architecture mismatch (expected $NATIVE_ARCH, got $FILE_ARCH), downloading correct version..." && \
+        rm -rf native && \
+        if [ -n "$NPM_PACKAGES_VERSION" ] && [ "$NPM_PACKAGES_VERSION" != "noop" ]; then \
+          curl -fL -o native.tar.gz "https://github.com/gientechai/cube/releases/download/v${NPM_PACKAGES_VERSION}/native-linux-${NATIVE_ARCH}-glibc-fallback.tar.gz" && \
+          mkdir -p native && \
+          tar xzf native.tar.gz -C native && \
+          rm -f native.tar.gz && \
+          mkdir -p /cube/node_modules/@cubejs-backend/native/native && \
+          cp native/native/index.node /cube/node_modules/@cubejs-backend/native/native/ && \
+          echo "Native binaries downloaded and copied successfully for $NATIVE_ARCH"; \
+        fi; \
+      fi; \
+    elif [ -n "$NPM_PACKAGES_VERSION" ] && [ "$NPM_PACKAGES_VERSION" != "noop" ]; then \
+      echo "No local native binary found, downloading for $NATIVE_ARCH..." && \
+      curl -fL -o native.tar.gz "https://github.com/gientechai/cube/releases/download/v${NPM_PACKAGES_VERSION}/native-linux-${NATIVE_ARCH}-glibc-fallback.tar.gz" && \
+      mkdir -p native && \
+      tar xzf native.tar.gz -C native && \
+      rm -f native.tar.gz && \
+      mkdir -p /cube/node_modules/@cubejs-backend/native/native && \
+      cp native/native/index.node /cube/node_modules/@cubejs-backend/native/native/ && \
+      echo "Native binaries downloaded and copied successfully for $NATIVE_ARCH"; \
+    else \
+      echo "No native binaries found and no NPM_PACKAGES_VERSION specified"; \
+    fi
+
+FROM node:22.20.0-bookworm-slim
 
 ARG IMAGE_VERSION=unknown
 
