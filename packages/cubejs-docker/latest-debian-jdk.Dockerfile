@@ -30,6 +30,27 @@ RUN if [ -d "npm-packages" ] && [ "$(ls -A npm-packages/*.tgz 2>/dev/null)" ]; t
       rm -f npm-packages.tar.gz; \
     fi
 
+# Pre-install packages from npm-packages-backup BEFORE yarn install
+# This ensures packages not in npm registry (like dm-driver) are available
+# yarn will see them already installed and won't try to download from registry
+RUN if [ -d "/tmp/npm-packages-backup" ]; then \
+      echo "Pre-installing packages from npm-packages..." && \
+      mkdir -p /cube/node_modules && \
+      for pkg in /tmp/npm-packages-backup/*.tgz; do \
+        if [ -f "$pkg" ]; then \
+          temp_dir=$(mktemp -d) && \
+          tar xzf "$pkg" -C "$temp_dir" && \
+          pkg_name=$(cat "$temp_dir"/package/package.json | grep -m1 '"name"' | cut -d'"' -f4) && \
+          if [ -n "$pkg_name" ]; then \
+            echo "Pre-installing $pkg_name from local package..." && \
+            mkdir -p "/cube/node_modules/$pkg_name" && \
+            cp -r "$temp_dir/package/"* "/cube/node_modules/$pkg_name/"; \
+          fi && \
+          rm -rf "$temp_dir"; \
+        fi; \
+      done; \
+    fi
+
 # We are copying root yarn.lock file to the context folder during the Publish GH
 # action. So, a process will use the root lock file here.
 RUN yarn install --prod \
