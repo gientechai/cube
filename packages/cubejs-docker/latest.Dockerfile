@@ -23,7 +23,7 @@ RUN if [ -d "npm-packages" ] && [ "$(ls -A npm-packages/*.tgz 2>/dev/null)" ]; t
       cp -r npm-packages /tmp/npm-packages-backup; \
     elif [ -n "$NPM_PACKAGES_VERSION" ] && [ "$NPM_PACKAGES_VERSION" != "noop" ]; then \
       echo "Downloading npm packages from GitHub Releases..." && \
-      curl -fL -o npm-packages.tar.gz "https://github.com/gientechai/cube/releases/download/v${NPM_PACKAGES_VERSION}/npm-packages-${NPM_PACKAGES_VERSION}.tar.gz" && \
+      curl -fL -o npm-packages.tar.gz "https://github.com/gientechai/cube/releases/download/${NPM_PACKAGES_VERSION}/npm-packages-${NPM_PACKAGES_VERSION}.tar.gz" && \
       mkdir -p /tmp/npm-packages-backup && \
       tar xzf npm-packages.tar.gz -C /tmp/npm-packages-backup && \
       rm -f npm-packages.tar.gz; \
@@ -84,7 +84,7 @@ RUN ARCH=$(uname -m) && \
         echo "Native binary architecture mismatch (expected $NATIVE_ARCH, got $FILE_ARCH), downloading correct version..." && \
         rm -rf native && \
         if [ -n "$NPM_PACKAGES_VERSION" ] && [ "$NPM_PACKAGES_VERSION" != "noop" ]; then \
-          curl -fL -o native.tar.gz "https://github.com/gientechai/cube/releases/download/v${NPM_PACKAGES_VERSION}/native-linux-${NATIVE_ARCH}-glibc-fallback.tar.gz" && \
+          curl -fL -o native.tar.gz "https://github.com/gientechai/cube/releases/download/${NPM_PACKAGES_VERSION}/native-linux-${NATIVE_ARCH}-glibc-fallback.tar.gz" && \
           mkdir -p native && \
           tar xzf native.tar.gz -C native && \
           rm -f native.tar.gz && \
@@ -95,7 +95,7 @@ RUN ARCH=$(uname -m) && \
       fi; \
     elif [ -n "$NPM_PACKAGES_VERSION" ] && [ "$NPM_PACKAGES_VERSION" != "noop" ]; then \
       echo "No local native binary found, downloading for $NATIVE_ARCH..." && \
-      curl -fL -o native.tar.gz "https://github.com/gientechai/cube/releases/download/v${NPM_PACKAGES_VERSION}/native-linux-${NATIVE_ARCH}-glibc-fallback.tar.gz" && \
+      curl -fL -o native.tar.gz "https://github.com/gientechai/cube/releases/download/${NPM_PACKAGES_VERSION}/native-linux-${NATIVE_ARCH}-glibc-fallback.tar.gz" && \
       mkdir -p native && \
       tar xzf native.tar.gz -C native && \
       rm -f native.tar.gz && \
