@@ -409,7 +409,8 @@ export class BaseMeasure {
    */
   private semiAdditiveMeasureSql(): string {
     const config = this.nonAdditiveConfig!;
-    const aggregateType = this.measureDefinition().type.toUpperCase();
+    const measureType = this.measureDefinition().type;
+    const aggregateType = measureType.toUpperCase();
 
     // 检查是否在 CTE 上下文中（通过检查是否有特定的列别名）
     // 在 CTE 上下文中，应该使用 windowed_data CTE 中已经计算的列
@@ -425,10 +426,27 @@ export class BaseMeasure {
       const filterExpression = `CASE WHEN ${timeDimColumn} = (${minDsColumn}) THEN ${rawColumn} ELSE NULL END`;
 
       // 应用聚合函数
-      const sumExpression = `${aggregateType}(${filterExpression})`;
+      // 对于 count_distinct 类型，使用 query 的 renderSqlMeasure 方法以确保数据库特定的语法
+      // 这样可以支持 ClickHouse 的 uniqExact() 等数据库特定函数
+      let sumExpression: string;
+      if (measureType === 'count_distinct' || measureType === 'countDistinct') {
+        // 使用 query 的 renderSqlMeasure 方法，它会根据数据库类型生成正确的语法
+        // 对于大多数数据库是 COUNT(DISTINCT ...)，对于 ClickHouse 可能是 uniqExact(...)
+        const symbol = this.measureDefinition();
+        sumExpression = this.query.renderSqlMeasure(
+          this.measure.split('.').pop() || this.measure,
+          filterExpression,
+          { ...symbol, type: 'countDistinct' },
+          this.cube().name,
+          null,
+          []
+        );
+      } else {
+        sumExpression = `${aggregateType}(${filterExpression})`;
+      }
 
       // 对 SUM 和 COUNT 使用 COALESCE
-      if (aggregateType === 'SUM' || aggregateType === 'COUNT') {
+      if (aggregateType === 'SUM' || aggregateType === 'COUNT' || measureType === 'count_distinct' || measureType === 'countDistinct') {
         return `COALESCE(${sumExpression}, 0)`;
       }
 
@@ -464,9 +482,25 @@ export class BaseMeasure {
 
       // 生成过滤表达式
       const filterExpression = `CASE WHEN ${dimensionSql} = (${windowFunc}) THEN ${baseSql} ELSE NULL END`;
-      const sumExpression = `${aggregateType}(${filterExpression})`;
+      
+      // 对于 count_distinct 类型，使用 query 的 renderSqlMeasure 方法以确保数据库特定的语法
+      let sumExpression: string;
+      if (measureType === 'count_distinct' || measureType === 'countDistinct') {
+        // 使用 query 的 renderSqlMeasure 方法，它会根据数据库类型生成正确的语法
+        const symbol = this.measureDefinition();
+        sumExpression = this.query.renderSqlMeasure(
+          this.measure.split('.').pop() || this.measure,
+          filterExpression,
+          { ...symbol, type: 'countDistinct' },
+          this.cube().name,
+          null,
+          []
+        );
+      } else {
+        sumExpression = `${aggregateType}(${filterExpression})`;
+      }
 
-      if (aggregateType === 'SUM' || aggregateType === 'COUNT') {
+      if (aggregateType === 'SUM' || aggregateType === 'COUNT' || measureType === 'count_distinct' || measureType === 'countDistinct') {
         return `COALESCE(${sumExpression}, 0)`;
       }
 

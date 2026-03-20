@@ -901,6 +901,12 @@ export class BaseQuery {
         }
       }
 
+      // Tesseract 原生规划器目前不支持半累加指标（nonAdditiveDimension），
+      // 需要回退到 JS 生成器以使用 CTE + 窗口函数的复杂逻辑
+      if (this.hasSemiAdditiveMeasures(this.measures)) {
+        return this.newQueryWithoutNative().buildSqlAndParams(exportAnnotatedSql);
+      }
+
       return this.buildSqlAndParamsRust(exportAnnotatedSql);
     }
 
