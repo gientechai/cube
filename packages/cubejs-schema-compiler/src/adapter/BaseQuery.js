@@ -1395,6 +1395,7 @@ export class BaseQuery {
       regularMeasures,
       cumulativeMeasures,
       toJoin,
+      { multiStageBranchCount: multiStageMembers.length },
     ), renderedWithQueries);
   }
 
@@ -1403,15 +1404,18 @@ export class BaseQuery {
     regularMeasures,
     cumulativeMeasures,
     toJoin,
+    joinOptions = {},
   ) {
     return this.outerMeasuresJoinFullKeyQueryAggregate(
       multipliedMeasures.concat(regularMeasures).concat(cumulativeMeasures.map(([multiplied, measure]) => measure)),
       this.measures,
-      toJoin
+      toJoin,
+      joinOptions,
     );
   }
 
-  outerMeasuresJoinFullKeyQueryAggregate(innerMembers, outerMembers, toJoin) {
+  outerMeasuresJoinFullKeyQueryAggregate(innerMembers, outerMembers, toJoin, joinOptions = {}) {
+    const multiStageBranchCount = joinOptions.multiStageBranchCount ?? 0;
     const renderedReferenceContext = {
       renderedReference: R.pipe(
         R.map(m => {
@@ -1425,11 +1429,23 @@ export class BaseQuery {
       )(innerMembers),
     };
 
+    const firstMultiStageBranchIndex =
+      multiStageBranchCount > 0 ? toJoin.length - multiStageBranchCount : Number.POSITIVE_INFINITY;
+
     const join = R.drop(1, toJoin)
       .map(
-        (q, i) => (this.dimensionAliasNames().length ?
-          `INNER JOIN ${this.wrapInParenthesis((q))} ${this.asSyntaxJoin} q_${i + 1} ON ${this.dimensionsJoinCondition(`q_${i}`, `q_${i + 1}`)}` :
-          `, ${this.wrapInParenthesis(q)} ${this.asSyntaxJoin} q_${i + 1}`),
+        (q, i) => {
+          const qRightIndex = i + 1;
+          if (!this.dimensionAliasNames().length) {
+            return `, ${this.wrapInParenthesis(q)} ${this.asSyntaxJoin} q_${qRightIndex}`;
+          }
+          const useLeftJoinToQ0 =
+            multiStageBranchCount > 0 && qRightIndex >= firstMultiStageBranchIndex;
+          if (useLeftJoinToQ0) {
+            return `LEFT JOIN ${this.wrapInParenthesis((q))} ${this.asSyntaxJoin} q_${qRightIndex} ON ${this.dimensionsJoinCondition('q_0', `q_${qRightIndex}`)}`;
+          }
+          return `INNER JOIN ${this.wrapInParenthesis((q))} ${this.asSyntaxJoin} q_${qRightIndex} ON ${this.dimensionsJoinCondition(`q_${i}`, `q_${qRightIndex}`)}`;
+        },
       ).join('\n');
 
     const columnsToSelect = this.evaluateSymbolSqlWithContext(
@@ -1788,7 +1804,12 @@ export class BaseQuery {
     const multiStageTimeDimensions = fromSubQuery && fromTimeDimensions.map(m => fromSubQuery.newTimeDimension(m)).filter(d => d.isMultiStage());
     // TODO not working yet
     const membersToSelect = measures?.concat(multiStageDimensions).concat(multiStageTimeDimensions);
-    const select = fromSubQuery && fromSubQuery.outerMeasuresJoinFullKeyQueryAggregate(membersToSelect, membersToSelect, withQuery.memberFrom.map(f => f.alias));
+    const select = fromSubQuery && fromSubQuery.outerMeasuresJoinFullKeyQueryAggregate(
+      membersToSelect,
+      membersToSelect,
+      withQuery.memberFrom.map(f => f.alias),
+      { multiStageBranchCount: withQuery.memberFrom?.length ?? 0 },
+    );
     const fromSql = select && this.wrapInParenthesis(select);
 
     // When memberFrom only has dimensions (no measures), the previous CTE cannot supply
