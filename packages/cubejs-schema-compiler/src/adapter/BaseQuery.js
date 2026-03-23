@@ -775,7 +775,9 @@ export class BaseQuery {
     let sql;
     let preAggForQuery;
     // TODO Most probably should be called later than here but avoids errors during pre-aggregation match for now
-    if (this.from) {
+    // Semi-additive measures need row-level base table + regularMeasuresSubQuery (base_data/windowed_data).
+    // simpleQuery() would only project aliases and skip that path when `from` wraps a prior CTE.
+    if (this.from && !this.queryHasSemiAdditiveMeasures()) {
       return this.simpleQuery();
     }
     const hasMemberExpressions = this.allMembersConcat(false).some(m => m.isMemberExpression);
@@ -902,8 +904,10 @@ export class BaseQuery {
       }
 
       // Tesseract 原生规划器目前不支持半累加指标（nonAdditiveDimension），
-      // 需要回退到 JS 生成器以使用 CTE + 窗口函数的复杂逻辑
-      if (this.hasSemiAdditiveMeasures(this.measures)) {
+      // 需要回退到 JS 生成器以使用 CTE + 窗口函数的复杂逻辑。
+      // 顶层 measure 可能是同比差值等 calculated（type: number），本身不是 semi-additive，
+      // 但必须检测 collectAllMemberNames 是否包含 base_metric1 等半累加依赖。
+      if (this.hasSemiAdditiveMeasures(this.measures) || this.queryReferencesSemiAdditiveMeasures()) {
         return this.newQueryWithoutNative().buildSqlAndParams(exportAnnotatedSql);
       }
 
@@ -1267,7 +1271,7 @@ export class BaseQuery {
    * @returns {string}
    */
   fullKeyQueryAggregate() {
-    if (this.from) {
+    if (this.from && !this.queryHasSemiAdditiveMeasures()) {
       return this.simpleQuery();
     }
     const {
@@ -1814,7 +1818,21 @@ export class BaseQuery {
     // When memberFrom only has dimensions (no measures), the previous CTE cannot supply
     // the base table rows needed to compute this stage's measures. Use base table as FROM
     // instead to avoid "missing FROM clause item" when measures reference the cube table.
-    const useFromSubQuery = fromSql && fromMeasures && fromMeasures.length > 0;
+    // Semi-additive (nonAdditiveDimension) measures must aggregate from raw rows (MIN/MAX of ordering
+    // dimension per partition); a prior CTE that only has pre-aggregated sums is wrong. Force base table.
+    const stageHasSemiAdditiveMeasure =
+      withQuery.measures &&
+      withQuery.measures.length > 0 &&
+      withQuery.measures.some((measurePath) => {
+        try {
+          const bm = this.newMeasure(measurePath);
+          return typeof bm.isSemiAdditive === 'function' && bm.isSemiAdditive();
+        } catch (e) {
+          return false;
+        }
+      });
+    const useFromSubQuery =
+      fromSql && fromMeasures && fromMeasures.length > 0 && !stageHasSemiAdditiveMeasure;
     // When querying from base table, do not remap dimensions to previous CTE aliases
     // (e.g. score__subject); use actual column refs (e.g. "score".subject) so the SQL is valid.
     const effectiveRenderedReference = useFromSubQuery ? renderedReferenceContext.renderedReference : undefined;
@@ -5626,6 +5644,46 @@ export class BaseQuery {
    */
   hasSemiAdditiveMeasures(measures) {
     return measures && measures.some(m => m.isSemiAdditive && m.isSemiAdditive());
+  }
+
+  /**
+   * True if the current query lists any semi-additive measure (nonAdditiveDimension).
+   * Used with `this.from` so multi-stage subqueries still run regularMeasuresSubQuery.
+   */
+  queryHasSemiAdditiveMeasures() {
+    return (this.measures || []).some(
+      m => typeof m.isSemiAdditive === 'function' && m.isSemiAdditive()
+    );
+  }
+
+  /**
+   * True if any measure referenced by the query (including via calculated / multi-stage SQL) is semi-additive.
+   * Used so Tesseract falls back when the user selects only e.g. `m - m_last_year` while `m` has nonAdditiveDimension.
+   */
+  queryReferencesSemiAdditiveMeasures() {
+    let names;
+    try {
+      names = this.collectAllMemberNames();
+    } catch (e) {
+      return false;
+    }
+    if (!names || !names.length) {
+      return false;
+    }
+    return names.some((path) => {
+      if (!path || typeof path !== 'string') {
+        return false;
+      }
+      if (!this.cubeEvaluator.isMeasure(path)) {
+        return false;
+      }
+      try {
+        const m = this.newMeasure(path);
+        return typeof m.isSemiAdditive === 'function' && m.isSemiAdditive();
+      } catch (e) {
+        return false;
+      }
+    });
   }
 
   /**
