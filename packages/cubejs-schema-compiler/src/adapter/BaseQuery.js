@@ -2484,11 +2484,36 @@ export class BaseQuery {
       // 选择所有维度和原始数据列（不聚合）
       // 注意：selectColumns() 返回 string[] | null，需要展平
       const unaggregatedColumns = [];
-      this.dimensionsForSelect().forEach(d => {
-        const cols = d.selectColumns();
+      const pushedDimensionPaths = new Set();
+      const dimensionsForSemiAdditiveRemap = [];
+
+      const pushDimensionColumns = (d) => {
+        const path = d.expressionPath && d.expressionPath();
+        if (!path || pushedDimensionPaths.has(path)) {
+          return;
+        }
+        pushedDimensionPaths.add(path);
+        const cols = d.selectColumns && d.selectColumns();
         if (cols) {
           cols.forEach(col => unaggregatedColumns.push(col));
         }
+        dimensionsForSemiAdditiveRemap.push(d);
+      };
+
+      this.dimensionsForSelect().forEach(pushDimensionColumns);
+
+      // measure / filter 中引用的维度必须进入 base_data，并在 windowed_data 外层用列别名解析。
+      // collectSubQueryDimensionsFor 仅在维度定义 subQuery:true 时才会记录，measure filters（如 yzzbgl 的 subject）
+      // 里的维度会被完全漏掉；collectMemberNamesFor 会随 evaluateSymbolSql 收集所有引用成员。
+      const implicitDimensionPaths = R.uniq(
+        this.collectFrom(
+          measures.concat(filters),
+          this.collectMemberNamesFor.bind(this),
+          'collectMemberNamesFor',
+        ).filter((p) => this.cubeEvaluator.isDimension(p))
+      );
+      implicitDimensionPaths.forEach((p) => {
+        pushDimensionColumns(this.newDimension(p));
       });
 
       const semiAdditiveMeasures = measures.filter(m => m.isSemiAdditive && m.isSemiAdditive());
@@ -2530,11 +2555,37 @@ export class BaseQuery {
         });
       }
 
+      // 非半累加指标的外层聚合仍引用主表限定列（如 "main__score".score），需投影到 CTE 列别名并在下游替换。
+      measures.filter(m => !(m.isSemiAdditive && m.isSemiAdditive())).forEach((measure) => {
+        const def = measure.measureDefinition();
+        const baseSql = def && def.sql;
+        if (baseSql == null || baseSql === '') {
+          return;
+        }
+        const evaluatedBase = this.evaluateSql(measure.cube().name, baseSql);
+        if (evaluatedBase == null) {
+          return;
+        }
+        const rawStr = String(evaluatedBase).trim();
+        if (!/^[_a-zA-Z][_a-zA-Z0-9]*$/.test(rawStr)) {
+          return;
+        }
+        const prefixed = `${this.cubeAlias(measure.cube().name)}.${rawStr}`;
+        const colAlias = `_${measure.unescapedAliasName()}_measure_base`;
+        unaggregatedColumns.push(`${prefixed} as ${this.escapeColumnName(colAlias)}`);
+      });
+
       const innerSelect = unaggregatedColumns.join(', ');
       const innerQuery = `SELECT ${innerSelect} FROM ${baseQuery} ${this.baseWhere(filters.concat(inlineWhereConditions))}`;
 
       // 使用 CTE 包装，传递列名列表和完整的时间维度信息（包含粒度）
-      return this.buildSemiAdditiveCTEQuery(innerQuery, measures, unaggregatedColumns, timeDimensionsForOrdering);
+      return this.buildSemiAdditiveCTEQuery(
+        innerQuery,
+        measures,
+        unaggregatedColumns,
+        timeDimensionsForOrdering,
+        dimensionsForSemiAdditiveRemap,
+      );
     }
 
     // 原来的逻辑
@@ -5455,15 +5506,56 @@ export class BaseQuery {
   }
 
   /**
+   * 将非半累加指标 SQL 中的主表限定列替换为 windowed_data 中的投影列别名。
+   *
+   * @param {*} measure
+   * @param {string} sql
+   * @returns {string}
+   */
+  rewriteSemiAdditiveOuterMeasureSql(measure, sql) {
+    const def = measure.measureDefinition();
+    const baseSql = def && def.sql;
+    if (baseSql == null || baseSql === '') {
+      return sql;
+    }
+    const evaluatedBase = this.evaluateSql(measure.cube().name, baseSql);
+    if (evaluatedBase == null) {
+      return sql;
+    }
+    const rawStr = String(evaluatedBase).trim();
+    if (!/^[_a-zA-Z][_a-zA-Z0-9]*$/.test(rawStr)) {
+      return sql;
+    }
+    const replacement = this.escapeColumnName(`_${measure.unescapedAliasName()}_measure_base`);
+    const cubeAlias = this.cubeAlias(measure.cube().name);
+    const prefixedUnquoted = `${cubeAlias}.${rawStr}`;
+    if (sql.includes(prefixedUnquoted)) {
+      return sql.split(prefixedUnquoted).join(replacement);
+    }
+    const prefixedQuoted = `${cubeAlias}.${this.escapeColumnName(rawStr)}`;
+    if (sql.includes(prefixedQuoted)) {
+      return sql.split(prefixedQuoted).join(replacement);
+    }
+    return sql;
+  }
+
+  /**
    * 为半累加指标构建 CTE 重写的查询
    *
    * @param {string} originalQuery - 未聚合的内部查询
    * @param {BaseMeasure[]} measures - 所有measures
    * @param {string[]} baseColumns - 基础列的 SELECT 表达式列表（维度 + 原始数据列）
    * @param {string[]} timeDimensionsForOrdering - 用于 ORDER BY 的时间维度名称列表
+   * @param {unknown[]} [dimensionsForSemiAdditiveRemap] - 需映射到列别名的维度（含 measure 隐式依赖）
    * @returns {string} 重写后的CTE查询
    */
-  buildSemiAdditiveCTEQuery(originalQuery, measures, baseColumns, timeDimensionsForOrdering = []) {
+  buildSemiAdditiveCTEQuery(
+    originalQuery,
+    measures,
+    baseColumns,
+    timeDimensionsForOrdering = [],
+    dimensionsForSemiAdditiveRemap = [],
+  ) {
     const semiAdditiveMeasures = measures.filter(m => m.isSemiAdditive && m.isSemiAdditive());
 
     if (semiAdditiveMeasures.length === 0) {
@@ -5530,6 +5622,23 @@ export class BaseQuery {
       return lastPart.replace(/^"|"$/g, '');
     }).filter(alias => alias);
 
+    const renderedRefFromDims = R.fromPairs(
+      (dimensionsForSemiAdditiveRemap || [])
+        .filter(d => d.expressionPath && d.aliasName && d.aliasName())
+        .map(d => [d.expressionPath(), d.aliasName()])
+    );
+
+    // 计算类 measure（number/string/…）展开子 measure 时会走 renderSqlMeasure；默认生成 sum("main__…")
+    // 在半累加 CTE 外层 FROM 仅为 windowed_data，需让对已选半累加指标的引用改为同一套 windowed_data 上的 measureSql()。
+    const renderedRefFromSemiAdditiveMeasures = R.fromPairs(
+      semiAdditiveMeasures.map((m) => [m.measure, m.measureSql()])
+    );
+
+    const semiAdditiveCteRenderedReference = {
+      ...renderedRefFromDims,
+      ...renderedRefFromSemiAdditiveMeasures,
+    };
+
     // 构建最终查询的 SELECT 子句（包含聚合）
     // 对于半累加指标，使用 measureSql()（包含聚合逻辑）
     const dimensionColumns = this.dimensionsForSelect().map(d => d.aliasName());
@@ -5540,9 +5649,12 @@ export class BaseQuery {
         const alias = m.aliasName();
         return `${sql} as ${alias}`;
       } else {
-        // 非半累加指标：直接引用列（在 windowed_data 中计算）
-        // 或者也使用 measureSql()
-        return `${m.measureSql()} as ${m.aliasName()}`;
+        const sql = this.evaluateSymbolSqlWithContext(
+          () => m.measureSql(),
+          { renderedReference: semiAdditiveCteRenderedReference },
+        );
+        const rewritten = this.rewriteSemiAdditiveOuterMeasureSql(m, sql);
+        return `${rewritten} as ${m.aliasName()}`;
       }
     });
     const selectColumns = [...dimensionColumns, ...measureColumns].join(', ');
