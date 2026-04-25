@@ -2490,15 +2490,16 @@ export class BaseQuery {
   regularMeasuresSubQuery(measures, filters) {
     filters = filters || this.allFilters;
 
-    // 检查是否有半累加指标
-    const hasSemiAdditive = this.hasSemiAdditiveMeasures(measures);
+    // 检查是否有半累加指标，包含计算指标递归引用到的半累加指标。
+    const semiAdditiveMeasuresForCte = this.collectReferencedSemiAdditiveMeasures(measures, filters);
+    const hasSemiAdditive = semiAdditiveMeasuresForCte.length > 0;
 
     const inlineWhereConditions = [];
 
     const baseQuery = this.rewriteInlineWhere(() => this.joinQuery(
       this.join,
       this.collectFrom(
-        this.dimensionsForSelect().concat(measures).concat(this.allFilters),
+        this.dimensionsForSelect().concat(measures).concat(semiAdditiveMeasuresForCte).concat(this.allFilters),
         this.collectSubQueryDimensionsFor.bind(this),
         'collectSubQueryDimensionsFor'
       )
@@ -2532,7 +2533,7 @@ export class BaseQuery {
       // 里的维度会被完全漏掉；collectMemberNamesFor 会随 evaluateSymbolSql 收集所有引用成员。
       const implicitDimensionPaths = R.uniq(
         this.collectFrom(
-          measures.concat(filters),
+          measures.concat(semiAdditiveMeasuresForCte).concat(filters),
           this.collectMemberNamesFor.bind(this),
           'collectMemberNamesFor',
         ).filter((p) => this.cubeEvaluator.isDimension(p))
@@ -2541,10 +2542,8 @@ export class BaseQuery {
         pushDimensionColumns(this.newDimension(p));
       });
 
-      const semiAdditiveMeasures = measures.filter(m => m.isSemiAdditive && m.isSemiAdditive());
-
       // 添加半累加指标的原始列（使用下划线前缀避免命名冲突）
-      semiAdditiveMeasures.forEach(measure => {
+      semiAdditiveMeasuresForCte.forEach(measure => {
         const baseSql = measure.measureDefinition().sql();
         // 不使用双引号，让 PostgreSQL 自动处理为小写
         const rawColumnName = `_${measure.unescapedAliasName()}_raw`;
@@ -2555,7 +2554,7 @@ export class BaseQuery {
       // 收集所有半累加指标使用的非可加时间维度名称
       const timeDimensionsForOrdering = new Set();
 
-      semiAdditiveMeasures.forEach(measure => {
+      semiAdditiveMeasuresForCte.forEach(measure => {
         const config = measure.nonAdditiveConfig;
         if (config && config.name) {
           timeDimensionsForOrdering.add(config.name);
@@ -2564,8 +2563,8 @@ export class BaseQuery {
 
       // 为每个时间维度添加原始列（用于 ORDER BY）
       // 使用第一个半累加指标的 cube 作为上下文
-      if (semiAdditiveMeasures.length > 0) {
-        const contextMeasure = semiAdditiveMeasures[0];
+      if (semiAdditiveMeasuresForCte.length > 0) {
+        const contextMeasure = semiAdditiveMeasuresForCte[0];
         timeDimensionsForOrdering.forEach(dimensionName => {
           const cubeName = contextMeasure.cube().name;
           const dimensionPath = dimensionName.includes('.') ? dimensionName : `${cubeName}.${dimensionName}`;
@@ -2610,6 +2609,7 @@ export class BaseQuery {
         unaggregatedColumns,
         timeDimensionsForOrdering,
         dimensionsForSemiAdditiveRemap,
+        semiAdditiveMeasuresForCte,
       );
     }
 
@@ -5719,6 +5719,41 @@ export class BaseQuery {
   }
 
   /**
+   * 收集查询指标及其计算表达式递归引用到的半累加指标。
+   *
+   * @param {BaseMeasure[]} measures
+   * @param {Array<BaseFilter>} filters
+   * @returns {BaseMeasure[]}
+   */
+  collectReferencedSemiAdditiveMeasures(measures, filters = []) {
+    const explicitMeasurePaths = (measures || [])
+      .map(m => m.expressionPath && m.expressionPath())
+      .filter(Boolean);
+
+    let referencedMemberPaths = [];
+    try {
+      referencedMemberPaths = this.collectFrom(
+        (measures || []).concat(filters || []),
+        this.collectMemberNamesFor.bind(this),
+        'collectMemberNamesFor',
+      );
+    } catch (e) {
+      referencedMemberPaths = [];
+    }
+
+    return R.uniq(explicitMeasurePaths.concat(referencedMemberPaths))
+      .filter(path => path && this.cubeEvaluator.isMeasure(path))
+      .map((path) => {
+        try {
+          return this.newMeasure(path);
+        } catch (e) {
+          return null;
+        }
+      })
+      .filter(m => m && m.isSemiAdditive && m.isSemiAdditive());
+  }
+
+  /**
    * True if the current query lists any semi-additive measure (nonAdditiveDimension).
    * Used with `this.from` so multi-stage subqueries still run regularMeasuresSubQuery.
    */
@@ -5800,6 +5835,7 @@ export class BaseQuery {
    * @param {string[]} baseColumns - 基础列的 SELECT 表达式列表（维度 + 原始数据列）
    * @param {string[]} timeDimensionsForOrdering - 用于 ORDER BY 的时间维度名称列表
    * @param {unknown[]} [dimensionsForSemiAdditiveRemap] - 需映射到列别名的维度（含 measure 隐式依赖）
+   * @param {BaseMeasure[]} [semiAdditiveMeasuresForCte] - CTE 中需要投影的半累加指标（含隐式依赖）
    * @returns {string} 重写后的CTE查询
    */
   buildSemiAdditiveCTEQuery(
@@ -5808,8 +5844,10 @@ export class BaseQuery {
     baseColumns,
     timeDimensionsForOrdering = [],
     dimensionsForSemiAdditiveRemap = [],
+    semiAdditiveMeasuresForCte = null,
   ) {
-    const semiAdditiveMeasures = measures.filter(m => m.isSemiAdditive && m.isSemiAdditive());
+    const semiAdditiveMeasures = semiAdditiveMeasuresForCte ||
+      measures.filter(m => m.isSemiAdditive && m.isSemiAdditive());
 
     if (semiAdditiveMeasures.length === 0) {
       return originalQuery;
