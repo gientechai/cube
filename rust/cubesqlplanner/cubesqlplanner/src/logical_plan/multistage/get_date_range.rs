@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 pub struct MultiStageGetDateRange {
     pub time_dimension: Rc<MemberSymbol>,
+    pub filter: Rc<LogicalFilter>,
     pub source: Rc<LogicalJoin>,
 }
 
@@ -23,6 +24,7 @@ impl LogicalNode for MultiStageGetDateRange {
 
         Ok(Rc::new(Self {
             time_dimension: self.time_dimension.clone(),
+            filter: self.filter.clone(),
             source: source.clone().into_logical_node()?,
         }))
     }
@@ -49,6 +51,8 @@ impl PrettyPrint for MultiStageGetDateRange {
             &format!("time_dimension: {}", self.time_dimension.full_name()),
             &details_state,
         );
+        result.println("filter:", &state);
+        self.filter.pretty_print(result, &details_state);
         result.println("source:", &state);
         self.source.pretty_print(result, &details_state);
     }

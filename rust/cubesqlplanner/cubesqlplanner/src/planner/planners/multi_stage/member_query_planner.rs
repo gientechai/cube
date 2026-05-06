@@ -59,15 +59,25 @@ impl MultiStageMemberQueryPlanner {
         &self,
         time_dimension: Rc<MemberSymbol>,
     ) -> Result<Rc<LogicalMultiStageMember>, CubeError> {
+        let logical_filter = Rc::new(LogicalFilter {
+            dimensions_filters: self.description.state().dimensions_filters().clone(),
+            time_dimensions_filters: self.description.state().time_dimensions_filters().clone(),
+            measures_filter: self.description.state().measures_filters().clone(),
+            segments: self.description.state().segments().clone(),
+        });
         let cte_query_properties = QueryProperties::try_new_from_precompiled(
             self.query_tools.clone(),
             vec![],
             vec![],
             vec![time_dimension.clone()],
-            vec![],
-            vec![],
-            vec![],
-            vec![],
+            // Respect query filters when calculating MIN/MAX for time series.
+            // Without this, MIN/MAX is computed for the whole table and we
+            // generate extra time buckets outside the requested inDateRange
+            // (which show up as rows with null values).
+            self.description.state().time_dimensions_filters().clone(),
+            self.description.state().dimensions_filters().clone(),
+            self.description.state().measures_filters().clone(),
+            self.description.state().segments().clone(),
             vec![],
             None,
             None,
@@ -87,6 +97,7 @@ impl MultiStageMemberQueryPlanner {
 
         let result = MultiStageGetDateRange {
             time_dimension: time_dimension.clone(),
+            filter: logical_filter,
             source,
         };
         let member = LogicalMultiStageMember {

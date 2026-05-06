@@ -42,6 +42,10 @@ impl<'a> LogicalNodeProcessor<'a, MultiStageGetDateRange> for MultiStageGetDateR
             "min_date".to_string(),
         );
 
+        // Apply the same filters as the main query so MIN/MAX bounds (and thus generated
+        // time_series) are constrained to the requested slice (e.g. inDateRange, city = 南京, segments).
+        select_builder.set_filter(get_date_range.filter.all_filters());
+
         self.builder.resolve_subquery_dimensions_references(
             &get_date_range.source.dimension_subqueries(),
             &references_builder,
