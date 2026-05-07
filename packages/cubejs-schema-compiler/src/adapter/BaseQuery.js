@@ -1879,10 +1879,23 @@ export class BaseQuery {
     const subQuery = this.newSubQuery(subQueryOptions);
 
     if (!subQuery.from) {
-      const allSubQueryMembers = R.flatten(subQuery.collectFromMembers(false, subQuery.collectMemberNamesFor.bind(subQuery), 'collectMemberNamesFor'));
-      const multiStageMember = allSubQueryMembers.find(m => this.memberInstanceByPath(m).isMultiStage());
-      if (multiStageMember) {
-        throw new Error(`Multi stage member '${multiStageMember}' lacks FROM clause in sub query: ${JSON.stringify(subQueryOptions)}`);
+      // `subQuery.from` indicates using a previous-stage CTE as FROM. It's not the same as
+      // having no FROM clause at all: regular join-tree queries will still render FROM <cube>.
+      // Guard only the truly invalid case where the generated query has no FROM clause.
+      const renderedSubQueryFrom = (() => {
+        try {
+          return subQuery.query();
+        } catch (e) {
+          return null;
+        }
+      })();
+      const hasFromClause = typeof renderedSubQueryFrom === 'string' && /\bfrom\b/i.test(renderedSubQueryFrom);
+      if (!hasFromClause) {
+        const allSubQueryMembers = R.flatten(subQuery.collectFromMembers(false, subQuery.collectMemberNamesFor.bind(subQuery), 'collectMemberNamesFor'));
+        const multiStageMember = allSubQueryMembers.find(m => this.memberInstanceByPath(m).isMultiStage());
+        if (multiStageMember) {
+          throw new Error(`Multi stage member '${multiStageMember}' lacks FROM clause in sub query: ${JSON.stringify(subQueryOptions)}`);
+        }
       }
     }
 
@@ -5952,13 +5965,22 @@ export class BaseQuery {
 
     // 构建 CTE：windowed_data 包含窗口函数结果
     // 然后执行最终查询（包含聚合）
+    //
+    // IMPORTANT:
+    // Some dialects (e.g. Oracle/DM) override groupByClause() to use full expressions
+    // instead of indexes. In the semi-additive CTE, the final SELECT reads from
+    // `windowed_data`, so base table aliases (e.g. main__cube) are out of scope.
+    // Group by the projected dimension aliases to keep the SQL valid across dialects.
+    const semiAdditiveGroupByClause = (this.ungrouped || !dimensionColumns.length)
+      ? ''
+      : ` GROUP BY ${dimensionColumns.join(', ')}`;
     const cteQuery = `WITH base_data AS (
   ${originalQuery}
 ), windowed_data AS (
   SELECT ${baseColumnAliases.join(', ')}, ${windowExpressions.join(', ')}
   FROM base_data
 )
-SELECT ${selectColumns} FROM windowed_data ${this.groupByClause()}`;
+SELECT ${selectColumns} FROM windowed_data${semiAdditiveGroupByClause}`;
 
     return cteQuery;
   }
