@@ -90,6 +90,27 @@ export class MssqlQuery extends BaseQuery {
     return new MssqlSegment(this, segment);
   }
 
+  /**
+   * SQL Server doesn't support `NULLS FIRST/LAST` in ORDER BY.
+   * Make NULL the minimum value:
+   * - ASC  -> NULLs first:  `expr IS NULL DESC, expr ASC`
+   * - DESC -> NULLs last:   `expr IS NULL ASC,  expr DESC`
+   */
+  public orderHashToString(hash: { id: string; desc: boolean }) {
+    if (!hash || !hash.id) {
+      return null;
+    }
+
+    const expr = this.getFieldAlias(hash.id);
+    if (expr === null) {
+      return null;
+    }
+
+    const asc = !hash.desc;
+    const nullsFirst = asc;
+    return `${expr} IS NULL ${nullsFirst ? 'DESC' : 'ASC'}, ${expr} ${asc ? 'ASC' : 'DESC'}`;
+  }
+
   public castToString(sql) {
     return `CAST(${sql} as VARCHAR)`;
   }

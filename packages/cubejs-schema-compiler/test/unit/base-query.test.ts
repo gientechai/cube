@@ -96,7 +96,7 @@ describe('SQL Generation', () => {
       const expected = 'SELECT\n' +
           '      "cards".type "cards__type", count("cards".id) "cards__count"\n' +
           '    FROM\n' +
-          '      card_tbl AS "cards"  GROUP BY 1 ORDER BY 2 DESC';
+          '      card_tbl AS "cards"  GROUP BY 1 ORDER BY 2 DESC NULLS LAST';
       expect(queryAndParams[0]).toEqual(expected);
     });
     it('Simple query - time dimension', async () => {
@@ -160,7 +160,7 @@ describe('SQL Generation', () => {
       const expected = 'SELECT\n' +
           '      CONCAT("cards".type, \' \', "cards".location) "cards__type_complex", max("cards".amount) - min("cards".amount) "cards__diff"\n' +
           '    FROM\n' +
-          '      card_tbl AS "cards"  GROUP BY 1 ORDER BY 2 DESC';
+          '      card_tbl AS "cards"  GROUP BY 1 ORDER BY 2 DESC NULLS LAST';
       expect(queryAndParams[0]).toEqual(expected);
     });
     it('Simple query - CUBE dimension', async () => {
@@ -180,7 +180,7 @@ describe('SQL Generation', () => {
       const expected = 'SELECT\n' +
           '      "cards".type "cards__type_with_cube", max("cards".amount) - min("cards".amount) "cards__diff"\n' +
           '    FROM\n' +
-          '      card_tbl AS "cards"  GROUP BY 1 ORDER BY 2 DESC';
+          '      card_tbl AS "cards"  GROUP BY 1 ORDER BY 2 DESC NULLS LAST';
       expect(queryAndParams[0]).toEqual(expected);
     });
     it('Simple query - CUBE id', async () => {
@@ -200,7 +200,7 @@ describe('SQL Generation', () => {
       const expected = 'SELECT\n' +
           '      "cards".id "cards__id_cube", max("cards".amount) - min("cards".amount) "cards__diff"\n' +
           '    FROM\n' +
-          '      card_tbl AS "cards"  GROUP BY 1 ORDER BY 2 DESC';
+          '      card_tbl AS "cards"  GROUP BY 1 ORDER BY 2 DESC NULLS LAST';
       expect(queryAndParams[0]).toEqual(expected);
     });
     it('Simple query - simple filter', async () => {
@@ -241,7 +241,7 @@ describe('SQL Generation', () => {
       const expected = 'SELECT\n' +
           '      "cards".type "cards__type", count("cards".id) "cards__count"\n' +
           '    FROM\n' +
-          '      card_tbl AS "cards"  WHERE (("cards".type = $1) OR ("cards".type <> $2 OR "cards".type IS NULL)) AND ("cards".type = $3) GROUP BY 1 ORDER BY 2 DESC';
+          '      card_tbl AS "cards"  WHERE (("cards".type = $1) OR ("cards".type <> $2 OR "cards".type IS NULL)) AND ("cards".type = $3) GROUP BY 1 ORDER BY 2 DESC NULLS LAST';
       expect(queryAndParams[0]).toEqual(expected);
       const expectedParams = ['type_value', 'not_type_value', 'type_value'];
       expect(queryAndParams[1]).toEqual(expectedParams);
@@ -312,7 +312,7 @@ describe('SQL Generation', () => {
       const expected = 'SELECT\n' +
           '      "cards".type "cards__type", count("cards".id) "cards__count"\n' +
           '    FROM\n' +
-          '      card_tbl AS "cards"  WHERE (("cards".type IS NULL) OR ("cards".type IS NOT NULL)) AND (("cards".type IN ($1, $2)) OR ("cards".type NOT IN ($3, $4) OR "cards".type IS NULL)) AND (("cards".type IN ($5, $6) OR "cards".type IS NULL) OR ("cards".type NOT IN ($7, $8))) GROUP BY 1 ORDER BY 2 DESC';
+          '      card_tbl AS "cards"  WHERE (("cards".type IS NULL) OR ("cards".type IS NOT NULL)) AND (("cards".type IN ($1, $2)) OR ("cards".type NOT IN ($3, $4) OR "cards".type IS NULL)) AND (("cards".type IN ($5, $6) OR "cards".type IS NULL) OR ("cards".type NOT IN ($7, $8))) GROUP BY 1 ORDER BY 2 DESC NULLS LAST';
       expect(queryAndParams[0]).toEqual(expected);
       // let expectedParams = [ 'type_value', 'not_type_value', 'type_value' ];
       // expect(queryAndParams[1]).toEqual(expectedParams);
@@ -356,7 +356,7 @@ describe('SQL Generation', () => {
       const expected = 'SELECT\n' +
           '      "cards".type "cards__type", count("cards".id) "cards__count"\n' +
           '    FROM\n' +
-          '      card_tbl AS "cards"  WHERE (("cards".type = $1) OR ("cards".type <> $2 OR "cards".type IS NULL)) GROUP BY 1 HAVING (count("cards".id) = $3) ORDER BY 2 DESC';
+          '      card_tbl AS "cards"  WHERE (("cards".type = $1) OR ("cards".type <> $2 OR "cards".type IS NULL)) GROUP BY 1 HAVING (count("cards".id) = $3) ORDER BY 2 DESC NULLS LAST';
       expect(queryAndParams[0]).toEqual(expected);
       const expectedParams = ['type_value', 'not_type_value', '3'];
       expect(queryAndParams[1]).toEqual(expectedParams);

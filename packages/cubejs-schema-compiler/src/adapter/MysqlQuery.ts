@@ -33,6 +33,27 @@ export class MysqlQuery extends BaseQuery {
     this.useNamedTimezones = getEnv('mysqlUseNamedTimezones', { dataSource: this.dataSource });
   }
 
+  /**
+   * MySQL doesn't reliably support `NULLS FIRST/LAST` in ORDER BY.
+   * Make NULL the minimum value:
+   * - ASC  -> NULLs first:  `expr IS NULL DESC, expr ASC`
+   * - DESC -> NULLs last:   `expr IS NULL ASC,  expr DESC`
+   */
+  public orderHashToString(hash: { id: string; desc: boolean }) {
+    if (!hash || !hash.id) {
+      return null;
+    }
+
+    const expr = this.getFieldAlias(hash.id);
+    if (expr === null) {
+      return null;
+    }
+
+    const asc = !hash.desc;
+    const nullsFirst = asc;
+    return `${expr} IS NULL ${nullsFirst ? 'DESC' : 'ASC'}, ${expr} ${asc ? 'ASC' : 'DESC'}`;
+  }
+
   public newFilter(filter) {
     return new MysqlFilter(this, filter);
   }
@@ -189,6 +210,9 @@ export class MysqlQuery extends BaseQuery {
     templates.quotes.escape = '\\`';
     // NOTE: this template contains a comma; two order expressions are being generated
     templates.expressions.sort = '{{ expr }} IS NULL {% if nulls_first %}DESC{% else %}ASC{% endif %}, {{ expr }} {% if asc %}ASC{% else %}DESC{% endif %}';
+    // MySQL: avoid unconditional NULLS FIRST/LAST from BaseQuery (support varies); keep deterministic NULL ordering via JS `orderHashToString`.
+    templates.expressions.order_by =
+      '{% if index %} {{ index }} {% else %} {{ expr }} {% endif %} {% if asc %}ASC{% else %}DESC{% endif %}';
     delete templates.expressions.ilike;
     templates.types.string = 'CHAR';
     templates.types.boolean = 'TINYINT';
