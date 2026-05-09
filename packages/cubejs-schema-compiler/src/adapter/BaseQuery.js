@@ -3212,6 +3212,21 @@ export class BaseQuery {
   }
 
   /**
+   * Ensures consistent NULL ordering across databases by treating NULL as the minimum value:
+   * - ASC  -> NULLS FIRST
+   * - DESC -> NULLS LAST
+   *
+   * Dialects without `NULLS FIRST/LAST` (e.g. MySQL, MSSQL) should override `orderHashToString`.
+   *
+   * @protected
+   * @param {{ desc: boolean }} hash
+   * @returns {string}
+   */
+  orderByNullsOrderingSuffix(hash) {
+    return hash && hash.desc ? ' NULLS LAST' : ' NULLS FIRST';
+  }
+
+  /**
    * @param {{ id: string, desc: boolean }} hash
    * @returns {string|null}
    */
@@ -3227,7 +3242,7 @@ export class BaseQuery {
     }
 
     const direction = hash.desc ? 'DESC' : 'ASC';
-    return `${fieldIndex} ${direction}`;
+    return `${fieldIndex} ${direction}${this.orderByNullsOrderingSuffix(hash)}`;
   }
 
   orderBy() {
@@ -4557,7 +4572,10 @@ export class BaseQuery {
         is_null: '({{ expr }} IS {% if negate %}NOT {% endif %}NULL)',
         binary: '({{ left }} {{ op }} {{ right }})',
         sort: '{{ expr }} {% if asc %}ASC{% else %}DESC{% endif %} NULLS {% if nulls_first %}FIRST{% else %}LAST{% endif %}',
-        order_by: '{% if index %} {{ index }} {% else %} {{ expr }} {% endif %} {% if asc %}ASC{% else %}DESC{% endif %}{% if nulls_first %} NULLS FIRST{% endif %}',
+        // Note: Tesseract/Rust SQL generation renders ORDER BY via this template without passing
+        // `nulls_first`, so NULL handling must be unconditional here for PG-like dialects.
+        // MySQL dialect overrides this template to avoid `NULLS FIRST/LAST` incompatibilities.
+        order_by: '{% if index %} {{ index }} {% else %} {{ expr }} {% endif %} {% if asc %}ASC NULLS FIRST{% else %}DESC NULLS LAST{% endif %}',
         cast: 'CAST({{ expr }} AS {{ data_type }})',
         window_function: '{{ fun_call }} OVER ({% if partition_by_concat %}PARTITION BY {{ partition_by_concat }}{% if order_by_concat or window_frame %} {% endif %}{% endif %}{% if order_by_concat %}ORDER BY {{ order_by_concat }}{% if window_frame %} {% endif %}{% endif %}{% if window_frame %}{{ window_frame }}{% endif %})',
         window_frame_bounds: '{{ frame_type }} BETWEEN {{ frame_start }} AND {{ frame_end }}',
@@ -5820,7 +5838,9 @@ SELECT ${selectColumns} FROM windowed_data${semiAdditiveGroupByClause}`;
     const orderDirection = ascendingChoices.includes(config.windowChoice) ? 'ASC' :
                           descendingChoices.includes(config.windowChoice) ? 'DESC' : 'ASC';
 
-    return ` ORDER BY ${columnAlias} ${orderDirection}`;
+    const nullsSuffix = orderDirection === 'ASC' ? ' NULLS FIRST' : ' NULLS LAST';
+
+    return ` ORDER BY ${columnAlias} ${orderDirection}${nullsSuffix}`;
   }
 
   /**
