@@ -11,7 +11,9 @@
  * - cubeAlias：对 DM 返回无引号短别名（≤30 字节），避免「无法解析的成员访问表达式」。
  * - escapeColumnName：对 DM_xxx 短别名不再加引号。
  * - overTimeSeriesSelect：用 WITH DM_BASE AS (...) 替代子查询别名，避免达梦解析错误。
+ * - addInterval/subtractInterval：仅「整天」且无时分秒偏移时改用 DATE±N，避免 NUMTODSINTERVAL 升为 TIMESTAMP后与 TO_TIMESTAMP_TZ比较在 DM 上报类型不匹配。
  */
+import { parseSqlInterval } from '@cubejs-backend/shared';
 import { OracleQuery } from './OracleQuery';
 
 const DM_MAX_ALIAS_LENGTH = 30;
@@ -41,6 +43,98 @@ export class DmQuery extends OracleQuery {
     // Native SQL planner generates GROUP BY 1,2,3; Oracle requires column expressions.
     this.useNativeSqlPlanner = false;
   }
+
+  /**
+   * DM 在时间列表达式（常为 TIMESTAMP/DATE）与 TO_TIMESTAMP_TZ 结果比较时易出现「数据类型不匹配」，
+   * 将达梦侧的边界值降为无时区 TIMESTAMP，与列类型对齐（仍先用 TO_TIMESTAMP_TZ 解析带 Z 的 ISO 字面量）。
+   */
+  public override timeStampCast(value: string) {
+    return `CAST(${super.timeStampCast(value)} AS TIMESTAMP)`;
+  }
+
+  /** DM：DATE ± 整数天仍为 DATE；NUMTODSINTERVAL(day) 常为 TIMESTAMP，与 TO_TIMESTAMP_TZ/CAST 比较易报错。有时分秒时再退回父类。 */
+  private static dmUseNumericDayArithmetic(intervalParsed: ReturnType<typeof parseSqlInterval>): boolean {
+    return !!intervalParsed.day && !intervalParsed.hour && !intervalParsed.minute && !intervalParsed.second;
+  }
+
+  public override addInterval(date: string, interval: string): string {
+    const intervalParsed = parseSqlInterval(interval);
+    let res = date;
+
+    let totalMonths = 0;
+    if (intervalParsed.year) {
+      totalMonths += intervalParsed.year * 12;
+    }
+    if (intervalParsed.quarter) {
+      totalMonths += intervalParsed.quarter * 3;
+    }
+    if (intervalParsed.month) {
+      totalMonths += intervalParsed.month;
+    }
+
+    if (totalMonths !== 0) {
+      res = `ADD_MONTHS(${res}, ${totalMonths})`;
+    }
+
+    if (intervalParsed.day) {
+      if (DmQuery.dmUseNumericDayArithmetic(intervalParsed)) {
+        res = `${res} + ${intervalParsed.day}`;
+      } else {
+        res = `${res} + NUMTODSINTERVAL(${intervalParsed.day}, 'DAY')`;
+      }
+    }
+    if (intervalParsed.hour) {
+      res = `${res} + NUMTODSINTERVAL(${intervalParsed.hour}, 'HOUR')`;
+    }
+    if (intervalParsed.minute) {
+      res = `${res} + NUMTODSINTERVAL(${intervalParsed.minute}, 'MINUTE')`;
+    }
+    if (intervalParsed.second) {
+      res = `${res} + NUMTODSINTERVAL(${intervalParsed.second}, 'SECOND')`;
+    }
+
+    return res;
+  }
+
+  public override subtractInterval(date: string, interval: string): string {
+    const intervalParsed = parseSqlInterval(interval);
+    let res = date;
+
+    let totalMonths = 0;
+    if (intervalParsed.year) {
+      totalMonths += intervalParsed.year * 12;
+    }
+    if (intervalParsed.quarter) {
+      totalMonths += intervalParsed.quarter * 3;
+    }
+    if (intervalParsed.month) {
+      totalMonths += intervalParsed.month;
+    }
+
+    if (totalMonths !== 0) {
+      res = `ADD_MONTHS(${res}, -${totalMonths})`;
+    }
+
+    if (intervalParsed.day) {
+      if (DmQuery.dmUseNumericDayArithmetic(intervalParsed)) {
+        res = `${res} - ${intervalParsed.day}`;
+      } else {
+        res = `${res} - NUMTODSINTERVAL(${intervalParsed.day}, 'DAY')`;
+      }
+    }
+    if (intervalParsed.hour) {
+      res = `${res} - NUMTODSINTERVAL(${intervalParsed.hour}, 'HOUR')`;
+    }
+    if (intervalParsed.minute) {
+      res = `${res} - NUMTODSINTERVAL(${intervalParsed.minute}, 'MINUTE')`;
+    }
+    if (intervalParsed.second) {
+      res = `${res} - NUMTODSINTERVAL(${intervalParsed.second}, 'SECOND')`;
+    }
+
+    return res;
+  }
+
   /** 达梦生成的短表别名格式（DM_+hash，可能大小写），用于 escapeColumnName 中判断是否不加重引号 */
   private static readonly DM_SHORT_ALIAS_REGEX = /^DM_[A-Z0-9]+$/i;
   /**
