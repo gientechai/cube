@@ -3379,11 +3379,36 @@ export class BaseQuery {
     return this.evaluateSymbolSql(measure.path()[0], measure.path()[1], measure.measureDefinition());
   }
 
+  /**
+   * 将成员 SQL 中显式写死的当前 cube 名限定列，重写为运行时实际使用的表别名。
+   *
+   * 这样既保留了模型里使用 `table.column` / `"table"."column"` 规避 join 歧义的写法，
+   * 也能兼容多阶段查询、子查询和方言适配场景下动态生成的 `main__cube` / `DM_xxx` 别名。
+   *
+   * @param {string} cubeName
+   * @param {string} sql
+   * @returns {string}
+   */
+  rewriteOwnedCubeQualifiedColumnReferences(cubeName, sql) {
+    if (!sql || typeof sql !== 'string' || !cubeName) {
+      return sql;
+    }
+
+    const cubeAlias = this.cubeAlias(cubeName);
+    const escapedCubeName = cubeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const quotedCubePattern = new RegExp(`"${escapedCubeName}"\\s*\\.`, 'g');
+    const unquotedCubePattern = new RegExp(`(^|[^A-Za-z0-9_$."'])${escapedCubeName}\\s*\\.`, 'g');
+
+    const withQuotedAliases = sql.replace(quotedCubePattern, `${cubeAlias}.`);
+
+    return withQuotedAliases.replace(unquotedCubePattern, `$1${cubeAlias}.`);
+  }
+
   autoPrefixWithCubeName(cubeName, sql, isMemberExpr = false) {
     if (!isMemberExpr && sql.match(/^[_a-zA-Z][_a-zA-Z0-9]*$/)) {
       return `${this.cubeAlias(cubeName)}.${sql}`;
     }
-    return sql;
+    return this.rewriteOwnedCubeQualifiedColumnReferences(cubeName, sql);
   }
 
   wrapSegmentForDimensionSelect(sql) {
