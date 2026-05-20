@@ -203,6 +203,34 @@ describe('SQL Generation', () => {
           '      card_tbl AS "cards"  GROUP BY 1 ORDER BY 2 DESC NULLS LAST';
       expect(queryAndParams[0]).toEqual(expected);
     });
+    it('Rewrites hard-coded current cube references to the runtime alias prefix', async () => {
+      await compilers.compiler.compile();
+
+      const query = new PostgresQuery(compilers, {
+        measures: [
+          'cards.sum'
+        ],
+        timeDimensions: [],
+        filters: [],
+      });
+
+      const rewrittenQuotedReference = query.withCubeAliasPrefix(
+        'main',
+        () => query.autoPrefixWithCubeName('cards', '"cards"."amount"')
+      );
+      const rewrittenUnquotedReference = query.withCubeAliasPrefix(
+        'main',
+        () => query.autoPrefixWithCubeName('cards', 'cards.amount')
+      );
+      const untouchedOtherCubeReference = query.withCubeAliasPrefix(
+        'main',
+        () => query.autoPrefixWithCubeName('cards', '"orders"."amount"')
+      );
+
+      expect(rewrittenQuotedReference).toEqual('"main__cards"."amount"');
+      expect(rewrittenUnquotedReference).toEqual('"main__cards".amount');
+      expect(untouchedOtherCubeReference).toEqual('"orders"."amount"');
+    });
     it('Simple query - simple filter', async () => {
       await compilers.compiler.compile();
 
