@@ -2557,7 +2557,14 @@ export class BaseQuery {
 
       // 添加半累加指标的原始列（使用下划线前缀避免命名冲突）
       semiAdditiveMeasuresForCte.forEach(measure => {
-        const baseSql = measure.measureDefinition().sql();
+        // 半累加 CTE 里的原始列直接来自 measure 原始 sql；这里不能重跑整套 symbol 解析，
+        // 否则像 `balance_snapshot` / `balance_snapshot * 2` 这类合法表达式会被误判为成员引用。
+        // 我们只做最小必要修复：把显式写死的 `"cube"."column"` / `cube.column`
+        // 重写为当前查询真实使用的运行时别名。
+        const baseSql = this.rewriteOwnedCubeQualifiedColumnReferences(
+          measure.cube().name,
+          measure.measureDefinition().sql(),
+        );
         // 不使用双引号，让 PostgreSQL 自动处理为小写
         const rawColumnName = `_${measure.unescapedAliasName()}_raw`;
         unaggregatedColumns.push(`${baseSql} as ${rawColumnName}`);
