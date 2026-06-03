@@ -82,6 +82,13 @@ export class MssqlQuery extends BaseQuery {
   }
 
   /**
+   * Same as MySQL: `ORDER BY 1 IS NULL` does not refer to column position.
+   */
+  protected usePositionalOrderBy() {
+    return false;
+  }
+
+  /**
    * SQL Server doesn't support `NULLS FIRST/LAST` in ORDER BY.
    * Make NULL the minimum value:
    * - ASC  -> NULLs first:  `expr IS NULL DESC, expr ASC`
@@ -92,7 +99,7 @@ export class MssqlQuery extends BaseQuery {
       return null;
     }
 
-    const expr = this.getFieldAlias(hash.id);
+    const expr = this.getFieldOrderExpr(hash.id);
     if (expr === null) {
       return null;
     }

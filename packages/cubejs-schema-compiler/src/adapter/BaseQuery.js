@@ -147,6 +147,8 @@ export class BaseQuery {
 
     this.orderHashToString = this.orderHashToString.bind(this);
     this.defaultOrder = this.defaultOrder.bind(this);
+    /** @type {boolean} set while generating multi-subquery JOIN ORDER BY */
+    this.orderByJoinAmbiguity = false;
     /** @type {ParamAllocator} */
     this.paramAllocator = this.options.paramAllocator || this.newParamAllocator(this.options.expressionParams);
     this.initFromOptions();
@@ -756,6 +758,26 @@ export class BaseQuery {
    */
   escapeColumnName(name) {
     return `"${name}"`;
+  }
+
+  /**
+   * Strip dialect quotes so escapeColumnName is not applied twice.
+   *
+   * @protected
+   * @param {string} name
+   * @returns {string}
+   */
+  unquotedColumnName(name) {
+    if (typeof name !== 'string') {
+      return name;
+    }
+    const quoteChars = ['`', '"'];
+    for (const quote of quoteChars) {
+      if (name.length >= 2 && name.startsWith(quote) && name.endsWith(quote)) {
+        return name.slice(1, -1);
+      }
+    }
+    return name;
   }
 
   /**
@@ -1463,18 +1485,26 @@ export class BaseQuery {
       renderedReferenceContext,
     );
 
-    // TODO all having filters should be pushed down
-    // subQuery dimensions can introduce projection remapping
-    if (
-      toJoin.length === 1 &&
-      this.measureFilters.length === 0 &&
-      outerMembers.filter(m => m.expression).length === 0 &&
-      queryHasNoRemapping
-    ) {
-      return `${toJoin[0].replace(/^SELECT/, `SELECT ${this.topLimit()}`)} ${this.orderBy()}${this.groupByDimensionLimit()}`;
-    }
+    const prevOrderByJoinAmbiguity = this.orderByJoinAmbiguity;
+    this.orderByJoinAmbiguity =
+      toJoin.length > 1 && this.dimensionAliasNames().length > 0;
 
-    return `SELECT ${this.topLimit()}${columnsToSelect} FROM ${this.wrapInParenthesis(toJoin[0])} ${this.asSyntaxJoin} q_0 ${join}${havingFilters}${this.orderBy()}${this.groupByDimensionLimit()}`;
+    try {
+      // TODO all having filters should be pushed down
+      // subQuery dimensions can introduce projection remapping
+      if (
+        toJoin.length === 1 &&
+        this.measureFilters.length === 0 &&
+        outerMembers.filter(m => m.expression).length === 0 &&
+        queryHasNoRemapping
+      ) {
+        return `${toJoin[0].replace(/^SELECT/, `SELECT ${this.topLimit()}`)} ${this.orderBy()}${this.groupByDimensionLimit()}`;
+      }
+
+      return `SELECT ${this.topLimit()}${columnsToSelect} FROM ${this.wrapInParenthesis(toJoin[0])} ${this.asSyntaxJoin} q_0 ${join}${havingFilters}${this.orderBy()}${this.groupByDimensionLimit()}`;
+    } finally {
+      this.orderByJoinAmbiguity = prevOrderByJoinAmbiguity;
+    }
   }
 
   wrapInParenthesis(select) {
@@ -3234,6 +3264,56 @@ export class BaseQuery {
   }
 
   /**
+   * Whether ORDER BY may use SELECT-list position (1-based). MySQL/MSSQL and ClickHouse
+   * override to false: MySQL treats `1` in `1 IS NULL` as a literal; ClickHouse rejects
+   * ordinal ORDER BY. Those dialects use aliases via `getFieldOrderExpr` instead.
+   *
+   * @protected
+   * @returns {boolean}
+   */
+  usePositionalOrderBy() {
+    return true;
+  }
+
+  /**
+   * Sort key for ORDER BY. In multi-subquery JOINs, dimensions are selected from q_0
+   * but the same alias can exist on joined branches — qualify or use position.
+   *
+   * @protected
+   * @param {string} id
+   * @returns {string|null}
+   */
+  getFieldOrderExpr(id) {
+    const index = this.getFieldIndex(id);
+    if (index === null) {
+      return null;
+    }
+
+    if (this.usePositionalOrderBy()) {
+      return String(index);
+    }
+
+    const alias = this.getFieldAlias(id);
+    if (alias === null) {
+      return null;
+    }
+
+    const escapedAlias = this.escapeColumnName(this.unquotedColumnName(alias));
+    const dimensionCount = this.dimensionColumns().length;
+    const isDimension =
+      typeof index === 'number'
+      && dimensionCount > 0
+      && index <= dimensionCount
+      && this.orderByJoinAmbiguity;
+
+    if (isDimension) {
+      return `q_0.${escapedAlias}`;
+    }
+
+    return escapedAlias;
+  }
+
+  /**
    * @param {{ id: string, desc: boolean }} hash
    * @returns {string|null}
    */
@@ -3242,14 +3322,14 @@ export class BaseQuery {
       return null;
     }
 
-    const fieldIndex = this.getFieldIndex(hash.id);
+    const expr = this.getFieldOrderExpr(hash.id);
 
-    if (fieldIndex === null) {
+    if (expr === null) {
       return null;
     }
 
     const direction = hash.desc ? 'DESC' : 'ASC';
-    return `${fieldIndex} ${direction}${this.orderByNullsOrderingSuffix(hash)}`;
+    return `${expr} ${direction}${this.orderByNullsOrderingSuffix(hash)}`;
   }
 
   orderBy() {

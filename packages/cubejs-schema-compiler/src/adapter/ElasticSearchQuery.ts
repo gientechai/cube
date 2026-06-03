@@ -78,19 +78,23 @@ export class ElasticSearchQuery extends BaseQuery {
     return dimensionColumns.length ? ` GROUP BY ${dimensionColumns.join(', ')}` : '';
   }
 
+  protected usePositionalOrderBy() {
+    return false;
+  }
+
   public override orderHashToString(hash: { id: string, desc: boolean }) {
     if (!hash || !hash.id) {
       return null;
     }
 
-    const fieldAlias = this.getFieldAlias(hash.id);
+    const expr = this.getFieldOrderExpr(hash.id);
 
-    if (fieldAlias === null) {
+    if (expr === null) {
       return null;
     }
 
     const direction = hash.desc ? 'DESC' : 'ASC';
-    return `${fieldAlias} ${direction}`;
+    return `${expr} ${direction}`;
   }
 
   /**
