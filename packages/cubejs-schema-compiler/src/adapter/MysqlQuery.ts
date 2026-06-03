@@ -34,6 +34,15 @@ export class MysqlQuery extends BaseQuery {
   }
 
   /**
+   * MySQL cannot use SELECT-list position in `expr IS NULL` patterns: `ORDER BY 1 IS NULL`
+   * treats `1` as a literal, not the first column. Use column aliases instead (see
+   * `orderHashToString`); `getFieldOrderExpr` adds `q_0.` when JOINs would make aliases ambiguous.
+   */
+  protected usePositionalOrderBy() {
+    return false;
+  }
+
+  /**
    * MySQL doesn't reliably support `NULLS FIRST/LAST` in ORDER BY.
    * Make NULL the minimum value:
    * - ASC  -> NULLs first:  `expr IS NULL DESC, expr ASC`
@@ -44,7 +53,7 @@ export class MysqlQuery extends BaseQuery {
       return null;
     }
 
-    const expr = this.getFieldAlias(hash.id);
+    const expr = this.getFieldOrderExpr(hash.id);
     if (expr === null) {
       return null;
     }
