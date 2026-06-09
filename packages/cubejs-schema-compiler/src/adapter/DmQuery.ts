@@ -7,11 +7,13 @@
  * - cubeAlias：表别名中 "default" 替换为 "ds_default"（Oracle 同款，达梦复用）。
  *
  * 本文件内达梦专属逻辑：
- * - sqlTemplates：禁用 PERCENTILE_CONT（达梦报「不支持的语句类型」）。
+ * - sqlTemplates：禁用 PERCENTILE_CONT；Tesseract 模板改用列表达式 GROUP BY/ORDER BY（DM 不支持 GROUP BY 1,2,3），
+ *   time_series 使用 UNION ALL ... FROM DUAL（DM 不支持 Postgres 式 VALUES 子句）。
  * - cubeAlias：对 DM 返回无引号短别名（≤30 字节），避免「无法解析的成员访问表达式」。
  * - escapeColumnName：对 DM_xxx 短别名不再加引号。
  * - overTimeSeriesSelect：用 WITH DM_BASE AS (...) 替代子查询别名，避免达梦解析错误。
  * - addInterval/subtractInterval：仅「整天」且无时分秒偏移时改用 DATE±N，避免 NUMTODSINTERVAL 升为 TIMESTAMP后与 TO_TIMESTAMP_TZ比较在 DM 上报类型不匹配。
+ * - withTimeDimensionDateRangeFromFilters：将 filters.inDateRange 提升到 timeDimensions.dateRange，供 Tesseract rolling window 使用。
  */
 import { parseSqlInterval } from '@cubejs-backend/shared';
 import { OracleQuery } from './OracleQuery';
@@ -37,11 +39,100 @@ const GRANULARITY_VALUE = {
   quarter: 'Q',
   year: 'YYYY'
 };
+
+type QueryFilter = {
+  member?: string;
+  dimension?: string;
+  operator?: string;
+  values?: string[];
+  and?: QueryFilter[];
+  or?: QueryFilter[];
+};
+
+type QueryTimeDimension = {
+  dimension: string;
+  granularity?: string;
+  dateRange?: string | [string, string];
+};
+
+type QueryOptions = {
+  filters?: QueryFilter[];
+  timeDimensions?: QueryTimeDimension[];
+  [key: string]: unknown;
+};
+
 export class DmQuery extends OracleQuery {
-  constructor(compilers, options) {
-    super(compilers, options);
-    // Native SQL planner generates GROUP BY 1,2,3; Oracle requires column expressions.
-    this.useNativeSqlPlanner = false;
+  constructor(compilers, options: QueryOptions) {
+    super(compilers, DmQuery.withTimeDimensionDateRangeFromFilters(options));
+  }
+
+  /**
+   * Tesseract rolling window on DM requires dateRange on timeDimensions (no generate_series fallback).
+   * Frontends often send the range only as filters.inDateRange — promote it for time series planning.
+   */
+  static withTimeDimensionDateRangeFromFilters(options: QueryOptions): QueryOptions {
+    if (!options?.timeDimensions?.length || !options?.filters?.length) {
+      return options;
+    }
+
+    const filterDateRanges = DmQuery.collectInDateRangeFilters(options.filters);
+    if (!filterDateRanges.length) {
+      return options;
+    }
+
+    let changed = false;
+    const timeDimensions = options.timeDimensions.map((timeDimension) => {
+      if (timeDimension.dateRange) {
+        return timeDimension;
+      }
+
+      const matchedRange = filterDateRanges.find(
+        ({ dimension }) => dimension === timeDimension.dimension
+      );
+      if (!matchedRange) {
+        return timeDimension;
+      }
+
+      changed = true;
+      return {
+        ...timeDimension,
+        dateRange: matchedRange.dateRange,
+      };
+    });
+
+    return changed ? { ...options, timeDimensions } : options;
+  }
+
+  private static collectInDateRangeFilters(
+    filters: QueryFilter[],
+    result: Array<{ dimension: string; dateRange: [string, string] }> = [],
+  ): Array<{ dimension: string; dateRange: [string, string] }> {
+    filters.forEach((filter) => {
+      if (filter.and) {
+        DmQuery.collectInDateRangeFilters(filter.and, result);
+        return;
+      }
+      if (filter.or) {
+        DmQuery.collectInDateRangeFilters(filter.or, result);
+        return;
+      }
+
+      const dimension = filter.member || filter.dimension;
+      if (
+        filter.operator === 'inDateRange'
+        && dimension
+        && Array.isArray(filter.values)
+        && filter.values.length === 2
+        && !result.some((entry) => entry.dimension === dimension)
+      ) {
+        result.push({
+          dimension,
+          dateRange: [filter.values[0], filter.values[1]],
+        });
+      }
+    });
+
+    return result;
   }
 
   /**
@@ -163,10 +254,33 @@ export class DmQuery extends OracleQuery {
     return parts.map(quote).join('.');
   }
 
+  private static timeSeriesLiteralCast(isoTimestamp: string): string {
+    return `CAST(TO_TIMESTAMP_TZ('${isoTimestamp}', 'YYYY-MM-DD"T"HH24:MI:SS.FF"Z"') AS TIMESTAMP)`;
+  }
+
+  /**
+   * 达梦不支持 `FROM (VALUES ...) AS t` 语法；与 Oracle 一样用 UNION ALL + DUAL 生成时间序列。
+   */
+  public override seriesSql(timeDimension) {
+    const rows = timeDimension.timeSeries().map(
+      ([from, to]) => `SELECT ${DmQuery.timeSeriesLiteralCast(from)} as ${this.escapeColumnName('date_from')}, ${DmQuery.timeSeriesLiteralCast(to)} as ${this.escapeColumnName('date_to')} FROM DUAL`,
+    );
+    return rows.join(' UNION ALL ');
+  }
+
   public sqlTemplates() {
     const templates = super.sqlTemplates();
     // 达梦不支持 PERCENTILE_CONT 生成的语句类型，中位数走应用层或其它实现
     delete templates.functions.PERCENTILECONT;
+    // Tesseract 默认 GROUP BY/ORDER BY 使用列序号（1,2,3），达梦不支持，改用完整列表达式（同 MssqlQuery）
+    templates.statements.group_by_exprs = '{{ group_by | map(attribute=\'expr\') | join(\', \') }}';
+    templates.expressions.order_by = '{{ expr }} {% if asc %}ASC NULLS FIRST{% else %}DESC NULLS LAST{% endif %}';
+    // Tesseract：DM 不支持 VALUES 行构造器，改用 UNION ALL ... FROM DUAL
+    templates.statements.time_series_select = '{% for time_item in seria %}'
+      + 'SELECT CAST(TO_TIMESTAMP_TZ(\'{{ time_item[0] }}\', \'YYYY-MM-DD"T"HH24:MI:SS.FF"Z"\') AS TIMESTAMP) AS "date_from", '
+      + 'CAST(TO_TIMESTAMP_TZ(\'{{ time_item[1] }}\', \'YYYY-MM-DD"T"HH24:MI:SS.FF"Z"\') AS TIMESTAMP) AS "date_to" FROM DUAL'
+      + '{% if not loop.last %} UNION ALL {% endif %}'
+      + '{% endfor %}';
     return templates;
   }
 
@@ -236,5 +350,17 @@ export class DmQuery extends OracleQuery {
   }
   public supportsFilterClause() {
     return true;
+  }
+
+  /**
+   * 达梦不允许在 CTE / 子查询的 FROM 源（`(cte_0 FETCH …)`、逗号 JOIN 尾部的 FETCH 等）上使用 FETCH。
+   * multi-stage 中间层由 renderWithQuery 创建并标记 disableExternalPreAggregations，此处跳过 row limit。
+   * 最外层查询仍保留 FETCH NEXT，与用户 limit 一致。
+   */
+  public override groupByDimensionLimit() {
+    if (this.options.disableExternalPreAggregations) {
+      return '';
+    }
+    return super.groupByDimensionLimit();
   }
 }
