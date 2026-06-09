@@ -790,7 +790,8 @@ export class BaseQuery {
     // TODO Most probably should be called later than here but avoids errors during pre-aggregation match for now
     // Semi-additive measures need row-level base table + regularMeasuresSubQuery (base_data/windowed_data).
     // simpleQuery() would only project aliases and skip that path when `from` wraps a prior CTE.
-    if (this.from && !this.queryHasSemiAdditiveMeasures()) {
+    // Calculated measures (type: number) may reference semi-additive base measures indirectly.
+    if (this.from && !this.queryReferencesSemiAdditiveMeasures()) {
       return this.simpleQuery();
     }
     const hasMemberExpressions = this.allMembersConcat(false).some(m => m.isMemberExpression);
@@ -1269,7 +1270,7 @@ export class BaseQuery {
    * @returns {string}
    */
   fullKeyQueryAggregate() {
-    if (this.from && !this.queryHasSemiAdditiveMeasures()) {
+    if (this.from && !this.queryReferencesSemiAdditiveMeasures()) {
       return this.simpleQuery();
     }
     const {
@@ -1280,8 +1281,9 @@ export class BaseQuery {
       multiStageMembers,
     } = this.fullKeyQueryAggregateMeasures();
 
-    // 检查是否有半累加指标
-    const hasSemiAdditiveMeasures = this.hasSemiAdditiveMeasures(regularMeasures);
+    // 检查是否有半累加指标（含计算指标递归引用到的半累加指标）
+    const hasSemiAdditiveMeasures = this.hasSemiAdditiveMeasures(regularMeasures)
+      || this.collectReferencedSemiAdditiveMeasures(regularMeasures, this.allFilters).length > 0;
 
     if (!multipliedMeasures.length && !cumulativeMeasures.length && !multiStageMembers.length && !hasSemiAdditiveMeasures) {
       return this.simpleQuery();
@@ -2562,14 +2564,7 @@ export class BaseQuery {
 
       // 添加半累加指标的原始列（使用下划线前缀避免命名冲突）
       semiAdditiveMeasuresForCte.forEach(measure => {
-        // 半累加 CTE 里的原始列直接来自 measure 原始 sql；这里不能重跑整套 symbol 解析，
-        // 否则像 `balance_snapshot` / `balance_snapshot * 2` 这类合法表达式会被误判为成员引用。
-        // 我们只做最小必要修复：把显式写死的 `"cube"."column"` / `cube.column`
-        // 重写为当前查询真实使用的运行时别名。
-        const baseSql = this.rewriteOwnedCubeQualifiedColumnReferences(
-          measure.cube().name,
-          measure.measureDefinition().sql(),
-        );
+        const baseSql = this.semiAdditiveMeasureRawSql(measure);
         // 不使用双引号，让 PostgreSQL 自动处理为小写
         const rawColumnName = `_${measure.unescapedAliasName()}_raw`;
         unaggregatedColumns.push(`${baseSql} as ${rawColumnName}`);
@@ -5715,6 +5710,26 @@ export class BaseQuery {
       return sql.split(prefixedQuoted).join(replacement);
     }
     return sql;
+  }
+
+  /**
+   * 生成半累加 CTE base_data 中的原始 measure 列 SQL。
+   *
+   * 不能走完整的 evaluateSymbolSql(..., 'measure')，否则像 `balance * 2` 会被误判为成员引用，
+   * 且会提前套上聚合。这里只 evaluate 原始 sql 并应用 schema filters（与普通 measure 一致）。
+   *
+   * @param {BaseMeasure} measure
+   * @returns {string}
+   */
+  semiAdditiveMeasureRawSql(measure) {
+    const cubeName = measure.cube().name;
+    const symbol = measure.measureDefinition();
+    const sql = symbol.sql && this.evaluateSql(cubeName, symbol.sql);
+    return this.applyMeasureFilters(
+      this.autoPrefixWithCubeName(cubeName, sql, false),
+      symbol,
+      cubeName,
+    );
   }
 
   /**
