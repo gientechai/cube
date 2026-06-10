@@ -293,30 +293,51 @@ export class PostgresDriver<Config extends PostgresDriverConfiguration = Postgre
   }
 
   protected async loadUserDefinedTypes(conn: PgClient): Promise<void> {
-    if (!this.userDefinedTypes) {
-      // Postgres enum types defined as typcategory = 'E' these can be assumed
-      // to be of type varchar for the drivers purposes.
-      // TODO: if full implmentation the constraints can be looked up via pg_enum
-      // https://www.postgresql.org/docs/9.1/catalog-pg-enum.html
-      const customTypes = await conn.query(
-        `SELECT
-            oid,
-            CASE
-                WHEN typcategory = 'E' THEN 'varchar'
-                ELSE typname
-            END
-        FROM
-            pg_type
-        WHERE
-            typcategory in ('U', 'E')`,
-        []
-      );
-
-      this.userDefinedTypes = customTypes.rows.reduce(
-        (prev, current) => ({ [current.oid]: current.typname, ...prev }),
-        {}
-      );
+    if (this.userDefinedTypes) {
+      return;
     }
+
+    // Greenplum 5 is based on PostgreSQL 8.3 and does not have pg_type.typcategory.
+    const typcategoryColumn = await conn.query(
+      `SELECT 1
+      FROM pg_catalog.pg_attribute a
+      JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
+      JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+      WHERE n.nspname = 'pg_catalog'
+        AND c.relname = 'pg_type'
+        AND a.attname = 'typcategory'
+        AND a.attisdropped = false
+      LIMIT 1`,
+      []
+    );
+
+    if (!typcategoryColumn.rows.length) {
+      this.userDefinedTypes = {};
+      return;
+    }
+
+    // Postgres enum types defined as typcategory = 'E' these can be assumed
+    // to be of type varchar for the drivers purposes.
+    // TODO: if full implmentation the constraints can be looked up via pg_enum
+    // https://www.postgresql.org/docs/9.1/catalog-pg-enum.html
+    const customTypes = await conn.query(
+      `SELECT
+          oid,
+          CASE
+              WHEN typcategory = 'E' THEN 'varchar'
+              ELSE typname
+          END AS typname
+      FROM
+          pg_catalog.pg_type
+      WHERE
+          typcategory in ('U', 'E')`,
+      []
+    );
+
+    this.userDefinedTypes = customTypes.rows.reduce(
+      (prev, current) => ({ [current.oid]: current.typname, ...prev }),
+      {}
+    );
   }
 
   protected async prepareConnection(
