@@ -30,12 +30,42 @@ describe('Kingbase Oracle Placeholder Normalization', () => {
     );
   });
 
+  test('normalizes bare positional placeholders in SQL text order', () => {
+    expect(normalizeKingbaseOraclePlaceholders(
+      'select * from events where status = ? and amount in (?, ?)',
+      ['paid', 10, 20]
+    )).toEqual({
+      sql: 'select * from events where status = $1 and amount in ($2, $3)',
+      values: ['paid', 10, 20],
+    });
+  });
+
+  test('does not normalize bare question marks without matching parameter values', () => {
+    expect(normalizeKingbaseOraclePlaceholders(
+      'select ? as maybe_operator from dual',
+      []
+    )).toEqual({
+      sql: 'select ? as maybe_operator from dual',
+      values: [],
+    });
+  });
+
   test('skips quoted strings, quoted identifiers, and comments', () => {
     expect(normalizeKingbaseOraclePlaceholders(
-      'select \':"?\"\' as literal, :"?" as value, "literal :""?""" as ident -- keep :"?"\nfrom dual /* keep :"?" */',
+      'select \':"?\" ?\' as literal, :"?" as value, ? as bare_value, "literal :""?"" ?" as ident -- keep :"?" ?\nfrom dual /* keep :"?" ? */',
       ['value']
     ).sql).toEqual(
-      'select \':"?\"\' as literal, $1 as value, "literal :""?""" as ident -- keep :"?"\nfrom dual /* keep :"?" */'
+      'select \':"?\" ?\' as literal, $1 as value, ? as bare_value, "literal :""?"" ?" as ident -- keep :"?" ?\nfrom dual /* keep :"?" ? */'
     );
+  });
+
+  test('skips quoted and commented bare question marks while normalizing real parameters', () => {
+    expect(normalizeKingbaseOraclePlaceholders(
+      'select \'?\' as literal, ? as value, "identifier ?" as ident -- keep ?\nfrom dual /* keep ? */ where code = ?',
+      ['cube', 'ok']
+    )).toEqual({
+      sql: 'select \'?\' as literal, $1 as value, "identifier ?" as ident -- keep ?\nfrom dual /* keep ? */ where code = $2',
+      values: ['cube', 'ok'],
+    });
   });
 });

@@ -90,6 +90,11 @@ export function normalizeKingbaseOraclePlaceholders(
       }
     }
 
+    if (!inSingleQuote && !inDoubleQuote && ch === '?' && nextIndex < values.length) {
+      output += `$${++nextIndex}`;
+      continue;
+    }
+
     output += ch;
   }
 

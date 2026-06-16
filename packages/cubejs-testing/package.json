@@ -84,6 +84,7 @@
     "smoke:postgres": "jest --verbose -i dist/test/smoke-postgres.test.js",
     "smoke:kingbase:local": "CUBEJS_DB_HOST=${CUBEJS_DB_HOST:-127.0.0.1} CUBEJS_DB_NAME=${CUBEJS_DB_NAME:-kingbase} CUBEJS_DB_USER=${CUBEJS_DB_USER:-system} jest --verbose -i dist/test/smoke-kingbase.test.js -- --mode=local",
     "smoke:kingbase:snapshot:local": "CUBEJS_DB_HOST=${CUBEJS_DB_HOST:-127.0.0.1} CUBEJS_DB_NAME=${CUBEJS_DB_NAME:-kingbase} CUBEJS_DB_USER=${CUBEJS_DB_USER:-system} jest --verbose --updateSnapshot -i dist/test/smoke-kingbase.test.js -- --mode=local",
+    "tesseract:kingbase:local": "CUBEJS_DB_HOST=${CUBEJS_DB_HOST:-127.0.0.1} CUBEJS_DB_NAME=${CUBEJS_DB_NAME:-kingbase} CUBEJS_DB_USER=${CUBEJS_DB_USER:-system} jest --verbose -i dist/test/tesseract-kingbase.test.js -- --mode=local",
     "smoke:redshift": "jest --verbose -i dist/test/smoke-redshift.test.js",
     "smoke:redshift:snapshot": "jest --verbose --updateSnapshot -i dist/test/smoke-redshift.test.js",
     "smoke:vertica": "jest --verbose -i dist/test/smoke-vertica.test.js",

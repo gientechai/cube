@@ -76,12 +76,19 @@ Run server smoke coverage:
 yarn workspace @cubejs-backend/testing smoke:kingbase:local
 ```
 
+Run Tesseract real-database coverage:
+
+```sh
+yarn workspace @cubejs-backend/testing tesseract:kingbase:local
+```
+
 ## What The Tests Cover
 
 - Low-level `testConnection`, typed scalar queries, nulls, upload table behavior, stream rows and field metadata, release behavior, invalid SQL, and missing table errors.
 - Kingbase Oracle SQL semantics including `FROM dual`, `TO_TIMESTAMP_TZ(...)`, `FETCH NEXT`, placeholder-heavy filters, `IN` filters, and nested query filters.
 - Driver-suite source queries and pre-aggregation paths using the existing `cubejs-testing` conventions.
 - Server smoke queries through normal Cube API/server flow with `CUBEJS_DB_TYPE`, measures, dimensions, filters, ordering, limits, time dimensions, joins, and pre-aggregation reads.
+- Tesseract real-database queries for rolling windows, period-to-date windows, multi-stage `group_by`, `reduce_by`, `add_group_by`, time shift, switch dimensions, and case measures on both Kingbase Targets.
 
 ## Known Limitations
 
@@ -89,5 +96,7 @@ yarn workspace @cubejs-backend/testing smoke:kingbase:local
 - Docker-mode birdbox runs are not wired for these local host-port containers. Use `--mode=local`.
 - The Kingbase Oracle Target intentionally does not change global `OracleQuery`, global `PostgresQuery`, or global `PostgresDriver` behavior.
 - Kingbase Oracle currently fails the generated source pre-aggregation DDL shape `CREATE TABLE ... SELECT ...` with a syntax error. Server smoke covers ordinary Kingbase Oracle API queries, filters, limits, time dimensions, and joins; Kingbase PG covers pre-aggregation build/read.
+- Kingbase Oracle Tesseract coverage currently skips rolling windows without `dateRange` because that path returns `Date range is required for time series`.
+- Kingbase Oracle Tesseract coverage currently skips bound filters on time-shift measures because generated Oracle-style timestamp placeholders fail after PG-wire normalization.
 - The stream path currently relies on existing Postgres `pg` / `pg-query-stream` behavior. Add a tested Kingbase-specific override only if compatibility testing proves one is necessary.
 - CubeSQL and Tesseract planner snapshots are not expanded by this slice because planner SQL generation is selected through existing dialect hooks rather than a planner rewrite.
