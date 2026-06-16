@@ -119,10 +119,16 @@ describe('index.test', () => {
       dbType: 'kingbase-oracle'
     })).toBeInstanceOf(CubejsServerCore);
 
+    expect(new CubejsServerCore({
+      dbType: 'kingbase-mysql'
+    })).toBeInstanceOf(CubejsServerCore);
+
     expect(driverDependencies('kingbase-pg'))
       .toEqual('@cubejs-backend/kingbase-pg-driver');
     expect(driverDependencies('kingbase-oracle'))
       .toEqual('@cubejs-backend/kingbase-oracle-driver');
+    expect(driverDependencies('kingbase-mysql'))
+      .toEqual('@cubejs-backend/kingbase-mysql-driver');
   });
 
   test('Should create instance of CubejsServerCore, dbType as func', () => {

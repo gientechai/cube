@@ -12,7 +12,7 @@ import {
 type TesseractTarget = {
   type: DriverType;
   port: string;
-  envPrefix: 'KINGBASE_PG' | 'KINGBASE_ORACLE';
+  envPrefix: 'KINGBASE_PG' | 'KINGBASE_ORACLE' | 'KINGBASE_MYSQL';
   schemaDir: string;
   cubejsConfig: string;
 };
@@ -286,4 +286,12 @@ runKingbaseTesseractSuite({
   envPrefix: 'KINGBASE_ORACLE',
   schemaDir: 'kingbase-oracle-tesseract/schema',
   cubejsConfig: 'kingbase-oracle-tesseract/cube.js',
+});
+
+runKingbaseTesseractSuite({
+  type: 'kingbase-mysql',
+  port: '54323',
+  envPrefix: 'KINGBASE_MYSQL',
+  schemaDir: 'kingbase-mysql-tesseract/schema',
+  cubejsConfig: 'kingbase-mysql-tesseract/cube.js',
 });

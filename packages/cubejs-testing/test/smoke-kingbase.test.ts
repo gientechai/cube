@@ -12,7 +12,7 @@ import {
 type SmokeTarget = {
   type: DriverType;
   port: string;
-  envPrefix: 'KINGBASE_PG' | 'KINGBASE_ORACLE';
+  envPrefix: 'KINGBASE_PG' | 'KINGBASE_ORACLE' | 'KINGBASE_MYSQL';
   schemaDir: string;
   cubejsConfig: string;
   supportsPreAggregations: boolean;
@@ -135,4 +135,13 @@ runKingbaseSmoke({
   schemaDir: 'kingbase-oracle-smoke/schema',
   cubejsConfig: 'kingbase-oracle-smoke/cube.js',
   supportsPreAggregations: false,
+});
+
+runKingbaseSmoke({
+  type: 'kingbase-mysql',
+  port: '54323',
+  envPrefix: 'KINGBASE_MYSQL',
+  schemaDir: 'kingbase-mysql-smoke/schema',
+  cubejsConfig: 'kingbase-mysql-smoke/cube.js',
+  supportsPreAggregations: true,
 });

@@ -42,6 +42,19 @@ describe('driver-suite Kingbase fixture targets', () => {
       DATE_SUFFIX: ', \'YYYY-MM-DD\')',
     });
   });
+
+  test('maps the Kingbase MySQL Target to explicit Kingbase-compatible fixture casts', () => {
+    const { DB_CAST, DATE_CAST } = loadCastFixture();
+
+    expect(DB_CAST['kingbase-mysql']).toEqual({
+      SELECT_PREFIX: '',
+      SELECT_SUFFIX: '',
+    });
+    expect(DATE_CAST['kingbase-mysql']).toEqual({
+      DATE_PREFIX: 'CAST(',
+      DATE_SUFFIX: ' AS DATE)',
+    });
+  });
 });
 
 describe('driver-suite Kingbase Oracle capability classification', () => {

@@ -12,6 +12,7 @@ type SupportedDriverType =
   'postgres' |
   'kingbase-pg' |
   'kingbase-oracle' |
+  'kingbase-mysql' |
   'questdb' |
   'firebolt' |
   'bigquery' |

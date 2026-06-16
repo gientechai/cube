@@ -68,6 +68,9 @@
       "path": "packages/cubejs-kingbase-oracle-driver"
     },
     {
+      "path": "packages/cubejs-kingbase-mysql-driver"
+    },
+    {
       "path": "packages/cubejs-duckdb-driver"
     },
     {

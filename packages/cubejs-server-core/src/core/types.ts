@@ -120,6 +120,7 @@ export type DatabaseType =
   | 'postgres'
   | 'kingbase-pg'
   | 'kingbase-oracle'
+  | 'kingbase-mysql'
   | 'prestodb'
   | 'trino'
   | 'redshift'

@@ -23,6 +23,10 @@ export const DB_CAST = {
     SELECT_PREFIX: '',
     SELECT_SUFFIX: '',
   },
+  'kingbase-mysql': {
+    SELECT_PREFIX: '',
+    SELECT_SUFFIX: '',
+  },
   'databricks-jdbc': {
     SELECT_PREFIX: '',
     SELECT_SUFFIX: '',
@@ -60,6 +64,10 @@ export const DATE_CAST = {
   'kingbase-oracle': {
     DATE_PREFIX: 'to_date(',
     DATE_SUFFIX: ', \'YYYY-MM-DD\')',
+  },
+  'kingbase-mysql': {
+    DATE_PREFIX: 'CAST(',
+    DATE_SUFFIX: ' AS DATE)',
   },
   'databricks-jdbc': {
     DATE_PREFIX: 'to_date(',

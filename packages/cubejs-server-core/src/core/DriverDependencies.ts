@@ -21,6 +21,7 @@ const DriverDependencies: Record<DatabaseType, string> = {
   oracle: '@cubejs-backend/oracle-driver',
   'kingbase-pg': '@cubejs-backend/kingbase-pg-driver',
   'kingbase-oracle': '@cubejs-backend/kingbase-oracle-driver',
+  'kingbase-mysql': '@cubejs-backend/kingbase-mysql-driver',
   sqlite: '@cubejs-backend/sqlite-driver',
   awselasticsearch: '@cubejs-backend/elasticsearch-driver',
   elasticsearch: '@cubejs-backend/elasticsearch-driver',

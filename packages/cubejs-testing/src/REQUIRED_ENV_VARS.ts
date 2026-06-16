@@ -41,6 +41,9 @@ export const REQUIRED_ENV_VARS: {[key: string]: string[]} = {
   'kingbase-oracle': [
     'CUBEJS_DB_PASS',
   ],
+  'kingbase-mysql': [
+    'CUBEJS_DB_PASS',
+  ],
   redshift: [
     'CUBEJS_DB_HOST',
     'CUBEJS_DB_PORT',

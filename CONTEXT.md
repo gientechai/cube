@@ -5,7 +5,7 @@ This context defines the language used when Cube describes database targets, com
 ## Language
 
 **Kingbase Target**:
-A first-class Cube database target for a KingbaseES compatibility mode. The current Kingbase Targets are **Kingbase PG Target** and **Kingbase Oracle Target**.
+A first-class Cube database target for a KingbaseES compatibility mode. The current Kingbase Targets are **Kingbase PG Target**, **Kingbase Oracle Target**, and **Kingbase MySQL Target**.
 _Avoid_: Kingbase test alias, Kingbase profile
 
 **Kingbase PG Target**:
@@ -15,6 +15,10 @@ _Avoid_: Kingbase PostgreSQL mode, PG alias
 **Kingbase Oracle Target**:
 The Kingbase Target for KingbaseES Oracle compatibility mode. It uses Postgres-compatible transport and Oracle SQL semantics.
 _Avoid_: Oracle-over-Postgres hack, Oracle alias
+
+**Kingbase MySQL Target**:
+The Kingbase Target for KingbaseES MySQL compatibility mode. It uses MySQL SQL semantics.
+_Avoid_: MySQL alias, generic MySQL profile
 
 **Driver Transport**:
 The database protocol and driver implementation Cube uses to connect to and execute against a database target.
@@ -32,6 +36,10 @@ _Avoid_: Static time series fixture, placeholder normalization
 The Kingbase Oracle Target's binding boundary where Oracle-style placeholders are converted into placeholders accepted by the Postgres-compatible Driver Transport.
 _Avoid_: Global Oracle placeholder rewrite, Postgres driver placeholder rewrite
 
+**Kingbase MySQL Placeholder Normalization**:
+The Kingbase MySQL Target's binding boundary where MySQL-style placeholders are converted into placeholders accepted by the Postgres-compatible Driver Transport.
+_Avoid_: Global MySQL placeholder rewrite, Postgres driver placeholder rewrite
+
 ## Example Dialogue
 
 Developer: Should Kingbase Oracle use the Oracle driver?
@@ -45,6 +53,10 @@ Domain expert: No. The **Kingbase PG Target** is a first-class **Kingbase Target
 Developer: Should we change all Oracle placeholders to Postgres placeholders?
 
 Domain expert: No. **Kingbase Oracle Placeholder Normalization** belongs only to the **Kingbase Oracle Target** because true Oracle and true Postgres keep their existing binding behavior.
+
+Developer: Should Kingbase MySQL use the MySQL driver because it uses MySQL SQL?
+
+Domain expert: No. The **Kingbase MySQL Target** uses MySQL **SQL Dialect**, but local compatibility verification showed it is reached through Postgres-compatible **Driver Transport**. **Kingbase MySQL Placeholder Normalization** belongs only at that target's execution boundary.
 
 Developer: Is missing date-range support in a rolling-window query a placeholder problem?
 
