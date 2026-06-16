@@ -1,0 +1,48 @@
+{
+  "name": "@cubejs-backend/kingbase-pg-driver",
+  "description": "Cube.js Kingbase PG compatibility mode database driver",
+  "author": "Cube Dev, Inc.",
+  "version": "1.6.22",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cube-js/cube.git",
+    "directory": "packages/cubejs-kingbase-pg-driver"
+  },
+  "engines": {
+    "node": "^14.0.0 || ^16.0.0 || >=17.0.0"
+  },
+  "files": [
+    "dist/src",
+    "index.js"
+  ],
+  "main": "index.js",
+  "typings": "dist/src/index.d.ts",
+  "scripts": {
+    "build": "rm -rf dist && npm run tsc",
+    "tsc": "tsc",
+    "test": "jest --runInBand dist/test",
+    "watch": "tsc -w",
+    "lint": "eslint src/* --ext .ts,.js",
+    "lint:fix": "eslint --fix src/* --ext .ts,.js"
+  },
+  "dependencies": {
+    "@cubejs-backend/postgres-driver": "1.6.22",
+    "@cubejs-backend/schema-compiler": "1.6.22"
+  },
+  "devDependencies": {
+    "@cubejs-backend/linter": "1.6.22",
+    "@types/jest": "^29",
+    "jest": "^29",
+    "typescript": "~5.2.2"
+  },
+  "jest": {
+    "testEnvironment": "node"
+  },
+  "eslintConfig": {
+    "extends": "../cubejs-linter"
+  },
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  }
+}

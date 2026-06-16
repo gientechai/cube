@@ -1,0 +1,3 @@
+# Keep Kingbase Oracle Placeholder Normalization Narrow
+
+The **Kingbase Oracle Target** uses Postgres-compatible driver transport while retaining Oracle SQL semantics, which makes parameter binding surprising at the boundary between generated SQL and execution. We will normalize Oracle-style placeholders only on the Kingbase Oracle path after SQL generation and before execution through the Postgres-compatible transport, rather than changing the global Oracle SQL dialect or the global Postgres driver behavior, so existing Oracle and Postgres targets keep their current contracts. The normalization should scan SQL and skip quoted strings, quoted identifiers, and comments; regex-only replacement is too easy to misapply to user SQL text.

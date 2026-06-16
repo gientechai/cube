@@ -10,6 +10,8 @@ import { DriverTest } from './driverTests/driverTest';
 
 type SupportedDriverType =
   'postgres' |
+  'kingbase-pg' |
+  'kingbase-oracle' |
   'questdb' |
   'firebolt' |
   'bigquery' |

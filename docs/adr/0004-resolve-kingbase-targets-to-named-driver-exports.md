@@ -1,0 +1,3 @@
+# Use Target-Specific Kingbase Driver Packages
+
+The existing Cube driver ecosystem assumes one public driver package per database type, including server-core driver resolution and the `cubejs-testing-drivers` helper that imports `@cubejs-backend/${type}-driver`. Server-core option validation also whitelists explicit `DriverDependencies` keys, so Kingbase targets must be registered there rather than relying only on package-name fallback. We will expose target-specific Kingbase driver packages for the **Kingbase PG Target** and **Kingbase Oracle Target**, while sharing wrapper implementation internally where useful, instead of changing the generic resolver to select named exports from a single package.

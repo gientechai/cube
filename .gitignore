@@ -23,6 +23,7 @@ testings/
 rust/cubesql/profile.json
 .cubestore
 .env
+.envrc
 .vimspector.json
 .claude/settings.local.json
 gen

@@ -1,0 +1,3 @@
+# Use Narrow Kingbase Driver Wrappers
+
+Kingbase targets need first-class Cube database identities while reusing Postgres-compatible transport, and the Kingbase Oracle target also needs execution-boundary placeholder normalization. We will add narrow Kingbase driver wrappers instead of mapping Kingbase targets directly to the raw Postgres driver or forking the Postgres driver, so Kingbase-specific behavior has a clear home without changing existing Postgres behavior. The public packages should follow the existing one-db-type-one-driver-package convention, while sharing implementation where that keeps duplication low.

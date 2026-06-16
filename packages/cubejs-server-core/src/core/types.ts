@@ -118,6 +118,8 @@ export type DatabaseType =
   | 'awselasticsearch'
   | 'oracle'
   | 'postgres'
+  | 'kingbase-pg'
+  | 'kingbase-oracle'
   | 'prestodb'
   | 'trino'
   | 'redshift'

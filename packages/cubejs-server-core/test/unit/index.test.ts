@@ -11,6 +11,7 @@ import { OptsHandler } from '../../src/core/OptsHandler';
 import { DatabaseType } from '../../src/core/types';
 import { CompilerApi } from '../../src/core/CompilerApi';
 import { OrchestratorApiOptions } from '../../src/core/OrchestratorApi';
+import { driverDependencies } from '../../src/core/DriverResolvers';
 
 // It's just a mock to open protected methods
 class CubejsServerCoreOpen extends CubejsServerCore {
@@ -107,6 +108,21 @@ describe('index.test', () => {
     expect(new CubejsServerCore({
       dbType: 'mysql'
     })).toBeInstanceOf(CubejsServerCore);
+  });
+
+  test('Should accept first-class Kingbase database types', () => {
+    expect(new CubejsServerCore({
+      dbType: 'kingbase-pg'
+    })).toBeInstanceOf(CubejsServerCore);
+
+    expect(new CubejsServerCore({
+      dbType: 'kingbase-oracle'
+    })).toBeInstanceOf(CubejsServerCore);
+
+    expect(driverDependencies('kingbase-pg'))
+      .toEqual('@cubejs-backend/kingbase-pg-driver');
+    expect(driverDependencies('kingbase-oracle'))
+      .toEqual('@cubejs-backend/kingbase-oracle-driver');
   });
 
   test('Should create instance of CubejsServerCore, dbType as func', () => {

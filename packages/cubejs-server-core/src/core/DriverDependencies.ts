@@ -19,6 +19,8 @@ const DriverDependencies: Record<DatabaseType, string> = {
   prestodb: '@cubejs-backend/prestodb-driver',
   trino: '@cubejs-backend/trino-driver',
   oracle: '@cubejs-backend/oracle-driver',
+  'kingbase-pg': '@cubejs-backend/kingbase-pg-driver',
+  'kingbase-oracle': '@cubejs-backend/kingbase-oracle-driver',
   sqlite: '@cubejs-backend/sqlite-driver',
   awselasticsearch: '@cubejs-backend/elasticsearch-driver',
   elasticsearch: '@cubejs-backend/elasticsearch-driver',

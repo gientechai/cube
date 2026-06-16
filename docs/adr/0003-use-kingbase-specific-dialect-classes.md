@@ -1,0 +1,3 @@
+# Use Kingbase-Specific Dialect Classes
+
+Kingbase targets should use the closest existing SQL dialects as their semantic baseline, but future Kingbase differences should not require changing global Postgres or Oracle query generation. We will use Kingbase-specific dialect classes in the target driver packages that inherit from the existing Postgres and Oracle dialect classes, initially overriding only proven Kingbase-specific behavior. These dialects should be exposed through each driver package's `dialectClass()` hook, matching existing drivers that carry their own query classes, rather than requiring schema-compiler to import Kingbase driver packages.

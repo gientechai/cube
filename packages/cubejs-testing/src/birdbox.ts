@@ -48,7 +48,7 @@ interface Args {
   log: Log,
 }
 
-export type DriverType = 'postgresql' | 'postgres' | 'multidb' | 'materialize' | 'crate' | 'bigquery' | 'athena' | 'postgresql-cubestore' | 'firebolt' | 'questdb' | 'redshift' | 'databricks-jdbc' | 'prestodb' | 'mssql' | 'trino' | 'oracle' | 'duckdb' | 'snowflake' | 'vertica';
+export type DriverType = 'postgresql' | 'postgres' | 'kingbase-pg' | 'kingbase-oracle' | 'multidb' | 'materialize' | 'crate' | 'bigquery' | 'athena' | 'postgresql-cubestore' | 'firebolt' | 'questdb' | 'redshift' | 'databricks-jdbc' | 'prestodb' | 'mssql' | 'trino' | 'oracle' | 'duckdb' | 'snowflake' | 'vertica';
 
 export type Schemas = string[];
 
@@ -93,6 +93,8 @@ type OptionalEnv = {
 const driverNameToFolderNameMapper: Record<DriverType, string> = {
   postgresql: 'postgresql',
   postgres: 'postgresql',
+  'kingbase-pg': 'kingbase-pg',
+  'kingbase-oracle': 'kingbase-oracle',
   multidb: 'postgresql',
   materialize: 'postgresql',
   crate: 'postgresql',

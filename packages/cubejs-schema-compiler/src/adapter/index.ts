@@ -32,4 +32,4 @@ export { PreAggregationReferences } from '../compiler/CubeEvaluator';
 // export * from './HiveQuery';
 // export * from './MongoBiQuery';
 // export * from './MssqlQuery';
-// export * from './OracleQuery';
+export * from './OracleQuery';

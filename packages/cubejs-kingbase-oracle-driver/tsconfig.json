@@ -1,0 +1,20 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "include": [
+    "src",
+    "test"
+  ],
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": ".",
+    "baseUrl": "."
+  },
+  "references": [
+    {
+      "path": "../cubejs-postgres-driver"
+    },
+    {
+      "path": "../cubejs-schema-compiler"
+    }
+  ]
+}

@@ -21,6 +21,7 @@
     "lint:npm": "yarn npmPkgJsonLint packages/*/package.json rust/package.json",
     "lint": "yarn lint:npm && yarn lerna run lint",
     "lint:fix": "lerna run lint:fix",
+    "prototype:kingbase-placeholder": "node packages/cubejs-kingbase-oracle-driver/__prototype__/placeholder-normalization.js",
     "tsc": "tsc --build",
     "tsc:watch": "tsc --build --watch",
     "clean": "rimraf packages/*/{tsconfig.tsbuildinfo,lib,dist}"
