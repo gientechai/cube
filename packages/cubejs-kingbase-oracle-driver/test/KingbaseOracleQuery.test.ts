@@ -1,0 +1,17 @@
+import { KingbaseOracleQuery } from '../src';
+
+describe('Kingbase Oracle Query dialect', () => {
+  test('supports generated time series using recursive CTE templates', () => {
+    const query = Object.create(KingbaseOracleQuery.prototype) as KingbaseOracleQuery;
+    const templates = query.sqlTemplates();
+
+    expect(query.supportGeneratedSeriesForCustomTd()).toEqual(true);
+    expect(templates.statements.generated_time_series_select).toContain('WITH date_series (date_from) AS');
+    expect(templates.statements.generated_time_series_select).toContain("NUMTODSINTERVAL(1, '{{ minimal_time_unit|upper }}')");
+    expect(templates.statements.generated_time_series_select).toContain('ADD_MONTHS(date_from, 3)');
+    expect(templates.statements.generated_time_series_select).toContain("NUMTODSINTERVAL(7, 'DAY')");
+    expect(templates.statements.generated_time_series_select).toContain("NUMTODSINTERVAL(0.001, 'SECOND')");
+    expect(templates.statements.generated_time_series_with_cte_range_source).toContain('WITH date_series (date_from, max_date) AS');
+    expect(templates.statements.generated_time_series_with_cte_range_source).toContain('FROM {{ range_source }}');
+  });
+});

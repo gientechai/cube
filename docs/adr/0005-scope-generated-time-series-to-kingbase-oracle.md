@@ -1,0 +1,3 @@
+# Scope Generated Time Series to Kingbase Oracle
+
+The **Kingbase Oracle Target** currently needs **Generated Time Series** for Tesseract rolling-window queries without explicit date ranges, while global Oracle behavior has not been validated for the same change. We will add this capability in the Kingbase Oracle dialect first instead of changing the global Oracle dialect, so the Kingbase path can move forward without widening the compatibility surface for true Oracle users. A throwaway Kingbase Oracle prototype validated recursive CTEs for both explicit bounds and query-derived min/max bounds, so recursive CTEs are the initial implementation direction.

@@ -1,3 +1,5 @@
+/* eslint-disable no-continue */
+
 export type KingbaseOraclePlaceholderNormalization = {
   sql: string;
   values: unknown[];
@@ -37,9 +39,9 @@ export function normalizeKingbaseOraclePlaceholders(
       continue;
     }
 
-    if (ch === "'") {
+    if (ch === '\'') {
       output += ch;
-      if (!inDoubleQuote && inSingleQuote && next === "'") {
+      if (!inDoubleQuote && inSingleQuote && next === '\'') {
         output += next;
         i++;
       } else if (!inDoubleQuote) {

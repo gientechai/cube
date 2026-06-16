@@ -15,6 +15,14 @@ export const DB_CAST = {
     SELECT_PREFIX: '',
     SELECT_SUFFIX: '',
   },
+  'kingbase-pg': {
+    SELECT_PREFIX: '',
+    SELECT_SUFFIX: '',
+  },
+  'kingbase-oracle': {
+    SELECT_PREFIX: '',
+    SELECT_SUFFIX: '',
+  },
   'databricks-jdbc': {
     SELECT_PREFIX: '',
     SELECT_SUFFIX: '',
@@ -42,6 +50,14 @@ export const DATE_CAST = {
     DATE_SUFFIX: ')',
   },
   postgres: {
+    DATE_PREFIX: 'to_date(',
+    DATE_SUFFIX: ', \'YYYY-MM-DD\')',
+  },
+  'kingbase-pg': {
+    DATE_PREFIX: 'to_date(',
+    DATE_SUFFIX: ', \'YYYY-MM-DD\')',
+  },
+  'kingbase-oracle': {
     DATE_PREFIX: 'to_date(',
     DATE_SUFFIX: ', \'YYYY-MM-DD\')',
   },

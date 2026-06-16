@@ -21,11 +21,31 @@ type SupportedDriverType =
 
 type TestSuite = {
   config?: Partial<Env>
+  skip?: boolean;
   type: SupportedDriverType;
   tests: DriverTest[];
 };
 
-export function executeTestSuite({ type, tests, config = {} }: TestSuite) {
+const REDACTED_CONFIG_VALUE = '[REDACTED]';
+
+function isSensitiveConfigKey(key: string) {
+  return /(?:pass|password|secret|token|api[_-]?key|access[_-]?key)/i.test(key);
+}
+
+function redactedConfig(config: Partial<Env>) {
+  return Object.fromEntries(
+    Object.entries(config).map(([key, value]) => [
+      key,
+      isSensitiveConfigKey(key) && value != null ? REDACTED_CONFIG_VALUE : value,
+    ])
+  );
+}
+
+export function driverTestName(name: string, config: Partial<Env>) {
+  return `${name}_${JSON.stringify(redactedConfig(config))}`;
+}
+
+export function executeTestSuite({ type, tests, config = {}, skip = false }: TestSuite) {
   const testSchemas = uniq(tests.flatMap(t => t.schemas));
 
   const apiSecret = 'mysupersecret';
@@ -40,7 +60,9 @@ export function executeTestSuite({ type, tests, config = {} }: TestSuite) {
     ...config,
   };
 
-  describe(`${type} driver tests`, () => {
+  const describeIf = skip ? describe.skip : describe;
+
+  describeIf(`${type} driver tests`, () => {
     jest.setTimeout(60 * 5 * 1000);
 
     let box: BirdBox;
@@ -68,8 +90,7 @@ export function executeTestSuite({ type, tests, config = {} }: TestSuite) {
     });
 
     for (const t of tests) {
-      const jsonConfig = JSON.stringify(overridedConfig);
-      const testNameWithHash = `${t.name}_${jsonConfig}`;
+      const testNameWithHash = driverTestName(t.name, overridedConfig);
 
       if (t.type === 'basic') {
         // eslint-disable-next-line no-loop-func

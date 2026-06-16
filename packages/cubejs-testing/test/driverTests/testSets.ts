@@ -1,3 +1,5 @@
+// eslint-disable-next-line import/no-extraneous-dependencies
+import { expect } from '@jest/globals';
 import {
   queryingCustomersDimensions,
   queryingCustomersDimensionsAndOrder,
@@ -64,7 +66,7 @@ import {
   preAggsCustomersRunningTotal,
   queryingECommerceCompareDateRangesByCustomerOverProductNameByMonth,
 } from './tests';
-import { testSet } from './driverTest';
+import { DriverTest, testSet } from './driverTest';
 
 const skippedTestSet = testSet([
   queryingEcommerceTotalQuantifyAvgDiscountTotal,
@@ -148,6 +150,26 @@ export const mainTestSet = testSet([
   ...withoutOrderingTestSet,
   viewMetaExposed
 ]);
+
+export function withUnsupportedCountDistinctApprox(tests: DriverTest[]) {
+  return tests.map((driverTest) => {
+    if (!driverTest.name.includes('count distinct approx') || driverTest.type !== 'basic') {
+      return driverTest;
+    }
+
+    return {
+      name: driverTest.name,
+      query: driverTest.query,
+      schemas: driverTest.schemas,
+      expectArray: [
+        (error: Error) => expect(error.message).toMatch(
+          /Approximate distinct count is not supported by this DB|function hll_hash_any\(text\) does not exist/
+        ),
+      ],
+      type: 'withError',
+    } as DriverTest;
+  });
+}
 
 export const preAggsTestSet = testSet([
   preAggsCustomersRunningTotal,

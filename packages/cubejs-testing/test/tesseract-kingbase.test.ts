@@ -119,10 +119,7 @@ function runKingbaseTesseractSuite({
       ]);
     });
 
-    // Kingbase Oracle path currently errors with: Date range is required for time series.
-    const rollingWithoutDateRangeTest = type === 'kingbase-oracle' ? test.skip : test;
-
-    rollingWithoutDateRangeTest('evaluates rolling windows without date ranges', async () => {
+    test('evaluates rolling windows without date ranges', async () => {
       await expect(loadRows(client, {
         measures: ['Orders.rollingTwoDayAmount'],
         timeDimensions: [{
@@ -221,10 +218,7 @@ function runKingbaseTesseractSuite({
       ]);
     });
 
-    // Kingbase Oracle path currently renders Oracle-style timestamp placeholders that fail after PG-wire normalization.
-    const oracleBoundFilterTest = type === 'kingbase-oracle' ? test.skip : test;
-
-    oracleBoundFilterTest('applies bound filters on time shift measures', async () => {
+    test('applies bound filters on time shift measures', async () => {
       await expect(loadRows(client, {
         measures: ['Orders.totalAmount', 'Orders.amountPriorYear'],
         timeDimensions: [{

@@ -24,6 +24,10 @@ _Avoid_: Driver dialect, SQL mode
 The SQL semantics Cube uses when generating queries for a database target.
 _Avoid_: Driver transport, protocol
 
+**Generated Time Series**:
+A SQL Dialect capability where a database target can produce a time series from query-derived time bounds when a request has no explicit date range.
+_Avoid_: Static time series fixture, placeholder normalization
+
 **Kingbase Oracle Placeholder Normalization**:
 The Kingbase Oracle Target's binding boundary where Oracle-style placeholders are converted into placeholders accepted by the Postgres-compatible Driver Transport.
 _Avoid_: Global Oracle placeholder rewrite, Postgres driver placeholder rewrite
@@ -41,3 +45,7 @@ Domain expert: No. The **Kingbase PG Target** is a first-class **Kingbase Target
 Developer: Should we change all Oracle placeholders to Postgres placeholders?
 
 Domain expert: No. **Kingbase Oracle Placeholder Normalization** belongs only to the **Kingbase Oracle Target** because true Oracle and true Postgres keep their existing binding behavior.
+
+Developer: Is missing date-range support in a rolling-window query a placeholder problem?
+
+Domain expert: No. That belongs to **Generated Time Series** in the **SQL Dialect**; placeholder normalization only concerns values crossing into the **Driver Transport**.

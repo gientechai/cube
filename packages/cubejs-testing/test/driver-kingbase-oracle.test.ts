@@ -1,4 +1,9 @@
-import { mainTestSet, multiQueryTestSet, preAggsTestSet } from './driverTests/testSets';
+import {
+  mainTestSet,
+  multiQueryTestSet,
+  preAggsTestSet,
+  withUnsupportedCountDistinctApprox,
+} from './driverTests/testSets';
 import { executeTestSuite } from './driver-test-suite';
 
 const kingbaseOracleConfig = {
@@ -9,16 +14,20 @@ const kingbaseOracleConfig = {
   CUBEJS_DB_PASS: process.env.CUBEJS_DB_PASS,
 };
 
+const skipWithoutPassword = !process.env.CUBEJS_DB_PASS;
+
 executeTestSuite({
   type: 'kingbase-oracle',
-  tests: mainTestSet,
+  tests: withUnsupportedCountDistinctApprox(mainTestSet),
   config: kingbaseOracleConfig,
+  skip: skipWithoutPassword,
 });
 
 executeTestSuite({
   type: 'kingbase-oracle',
   tests: multiQueryTestSet,
   config: kingbaseOracleConfig,
+  skip: skipWithoutPassword,
 });
 
 executeTestSuite({
@@ -28,4 +37,5 @@ executeTestSuite({
     ...kingbaseOracleConfig,
     CUBEJS_EXTERNAL_DEFAULT: 'true',
   },
+  skip: skipWithoutPassword,
 });
