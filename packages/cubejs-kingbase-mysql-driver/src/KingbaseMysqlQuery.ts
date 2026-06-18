@@ -7,12 +7,12 @@ const quoteSimpleInterval = (sql: string) => sql.replace(/INTERVAL (\d+(?:\.\d+)
 
 const GRANULARITY_TO_INTERVAL: Record<string, (date: string) => string> = {
   day: (date: string) => `DATE_FORMAT(${date}, '%Y-%m-%d 00:00:00.000')`,
-  week: (date: string) => `DATE_FORMAT(DATE_ADD('1900-01-01', INTERVAL TIMESTAMPDIFF(WEEK, '1900-01-01', ${date}) WEEK), '%Y-%m-%d 00:00:00.000')`,
+  week: (date: string) => `DATE_FORMAT(DATE_TRUNC('week', ${date}), '%Y-%m-%d 00:00:00.000')`,
   hour: (date: string) => `DATE_FORMAT(${date}, '%Y-%m-%d %H:00:00.000')`,
   minute: (date: string) => `DATE_FORMAT(${date}, '%Y-%m-%d %H:%i:00.000')`,
   second: (date: string) => `DATE_FORMAT(${date}, '%Y-%m-%d %H:%i:%S.000')`,
   month: (date: string) => `DATE_FORMAT(${date}, '%Y-%m-01 00:00:00.000')`,
-  quarter: (date: string) => `DATE_ADD('1900-01-01', INTERVAL TIMESTAMPDIFF(QUARTER, '1900-01-01', ${date}) QUARTER)`,
+  quarter: (date: string) => `DATE_FORMAT(DATE_TRUNC('quarter', ${date}), '%Y-%m-%d 00:00:00.000')`,
   year: (date: string) => `DATE_FORMAT(${date}, '%Y-01-01 00:00:00.000')`,
 };
 

@@ -45,10 +45,18 @@ describe('Kingbase MySQL SQL Dialect', () => {
     expect(query.timeGroupedColumn('day', 'orders.created_at')).toEqual(
       "CAST(DATE_FORMAT(orders.created_at, '%Y-%m-%d 00:00:00.000') AS DATETIME)"
     );
+    expect(query.timeGroupedColumn('week', 'orders.created_at')).toEqual(
+      "CAST(DATE_FORMAT(DATE_TRUNC('week', orders.created_at), '%Y-%m-%d 00:00:00.000') AS DATETIME)"
+    );
+    expect(query.timeGroupedColumn('quarter', 'orders.created_at')).toEqual(
+      "CAST(DATE_FORMAT(DATE_TRUNC('quarter', orders.created_at), '%Y-%m-%d 00:00:00.000') AS DATETIME)"
+    );
     expect(query.timeGroupedColumn('hour', 'orders.created_at')).toEqual(
       "CAST(DATE_FORMAT(orders.created_at, '%Y-%m-%d %H:00:00.000') AS DATETIME)"
     );
     expect(query.timeGroupedColumn('month', 'orders.created_at')).not.toContain('T00:00:00.000');
+    expect(query.timeGroupedColumn('week', 'orders.created_at')).not.toContain('TIMESTAMPDIFF');
+    expect(query.timeGroupedColumn('quarter', 'orders.created_at')).not.toContain('TIMESTAMPDIFF');
   });
 
   test('quotes simple interval values for Kingbase DATE_ADD and DATE_SUB parsing', () => {

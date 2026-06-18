@@ -1,4 +1,4 @@
-import { KingbaseMysqlDriver } from '../src';
+import { KingbaseMysqlDriver, KingbaseMysqlQuery } from '../src';
 import { isDownloadTableMemoryData } from '@cubejs-backend/base-driver';
 
 const config = {
@@ -130,6 +130,24 @@ describeIf('Kingbase MySQL Driver compatibility', () => {
     expect(rows).toEqual([{ value: 'ok' }]);
 
     await driver.dropTable(table);
+  });
+
+  test('executes Kingbase-compatible week and quarter time grouping expressions', async () => {
+    const query = Object.create(KingbaseMysqlQuery.prototype) as KingbaseMysqlQuery;
+    const dimension = "CAST('2024-04-01 12:34:56.789' AS DATETIME)";
+    const rows = await driver.query<any>(
+      `
+        SELECT
+          ${query.timeGroupedColumn('week', dimension)} AS week_bucket,
+          ${query.timeGroupedColumn('quarter', dimension)} AS quarter_bucket
+      `,
+      []
+    );
+
+    expect(rows).toEqual([{
+      week_bucket: '2024-04-01 00:00:00',
+      quarter_bucket: '2024-04-01 00:00:00',
+    }]);
   });
 
   test('propagates actionable database errors', async () => {
