@@ -28,7 +28,8 @@
   "dependencies": {
     "@cubejs-backend/base-driver": "1.6.22",
     "@cubejs-backend/postgres-driver": "1.6.22",
-    "@cubejs-backend/schema-compiler": "1.6.22"
+    "@cubejs-backend/schema-compiler": "1.6.22",
+    "@cubejs-backend/shared": "1.6.22"
   },
   "devDependencies": {
     "@cubejs-backend/linter": "1.6.22",

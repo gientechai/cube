@@ -1,3 +1,4 @@
+import { parseSqlInterval } from '@cubejs-backend/shared';
 import { OracleQuery } from '@cubejs-backend/schema-compiler';
 
 const DATE_SERIES_INCREMENT =
@@ -24,6 +25,49 @@ export class KingbaseOracleQuery extends OracleQuery {
 
   public supportGeneratedSeriesForCustomTd() {
     return true;
+  }
+
+  public addInterval(date: string, interval: string): string {
+    return this.shiftInterval(date, interval, 1);
+  }
+
+  public subtractInterval(date: string, interval: string): string {
+    return this.shiftInterval(date, interval, -1);
+  }
+
+  private shiftInterval(date: string, interval: string, direction: 1 | -1): string {
+    const intervalParsed = parseSqlInterval(interval);
+    let res = date;
+
+    const totalMonths =
+      (intervalParsed.year || 0) * 12 +
+      (intervalParsed.quarter || 0) * 3 +
+      (intervalParsed.month || 0);
+
+    if (totalMonths !== 0) {
+      res = `ADD_MONTHS(${res}, ${totalMonths * direction})`;
+    }
+
+    const totalDays = (intervalParsed.week || 0) * 7 + (intervalParsed.day || 0);
+    if (totalDays !== 0) {
+      res = this.applyDaySecondInterval(res, totalDays, 'DAY', direction);
+    }
+    if (intervalParsed.hour) {
+      res = this.applyDaySecondInterval(res, intervalParsed.hour, 'HOUR', direction);
+    }
+    if (intervalParsed.minute) {
+      res = this.applyDaySecondInterval(res, intervalParsed.minute, 'MINUTE', direction);
+    }
+    if (intervalParsed.second) {
+      res = this.applyDaySecondInterval(res, intervalParsed.second, 'SECOND', direction);
+    }
+
+    return res;
+  }
+
+  private applyDaySecondInterval(date: string, value: number, unit: string, direction: 1 | -1): string {
+    const operator = direction === 1 ? '+' : '-';
+    return `${date} ${operator} NUMTODSINTERVAL(${value}, '${unit}')`;
   }
 
   public sqlTemplates() {

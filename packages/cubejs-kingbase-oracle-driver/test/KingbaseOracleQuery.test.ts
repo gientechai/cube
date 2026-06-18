@@ -7,6 +7,23 @@ describe('Kingbase Oracle Query dialect', () => {
     expect(query.timeGroupedColumn('quarter', 'created_at')).toEqual("TRUNC(created_at, 'Q')");
   });
 
+  test('supports week interval arithmetic', () => {
+    const query = Object.create(KingbaseOracleQuery.prototype) as KingbaseOracleQuery;
+
+    expect(query.addInterval('created_at', '1 week')).toEqual(
+      "created_at + NUMTODSINTERVAL(7, 'DAY')"
+    );
+    expect(query.subtractInterval('created_at', '1 week')).toEqual(
+      "created_at - NUMTODSINTERVAL(7, 'DAY')"
+    );
+    expect(query.addInterval('created_at', '1 week 2 days')).toEqual(
+      "created_at + NUMTODSINTERVAL(9, 'DAY')"
+    );
+    expect(query.addInterval('created_at', '1 quarter')).toEqual(
+      'ADD_MONTHS(created_at, 3)'
+    );
+  });
+
   test('supports generated time series using recursive CTE templates', () => {
     const query = Object.create(KingbaseOracleQuery.prototype) as KingbaseOracleQuery;
     const templates = query.sqlTemplates();
