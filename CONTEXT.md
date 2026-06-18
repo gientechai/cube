@@ -32,6 +32,10 @@ _Avoid_: Driver transport, protocol
 A SQL Dialect capability where a database target can produce a time series from query-derived time bounds when a request has no explicit date range.
 _Avoid_: Static time series fixture, placeholder normalization
 
+**Time Granularity Support**:
+A SQL Dialect capability set for interpreting time grains such as day, week, month, quarter, and year. It includes time dimension grouping, interval arithmetic, and **Generated Time Series**; support for one does not imply support for all.
+_Avoid_: Date bucket support, time series support
+
 **Kingbase Oracle Placeholder Normalization**:
 The Kingbase Oracle Target's binding boundary where Oracle-style placeholders are converted into placeholders accepted by the Postgres-compatible Driver Transport.
 _Avoid_: Global Oracle placeholder rewrite, Postgres driver placeholder rewrite
@@ -61,3 +65,7 @@ Domain expert: No. The **Kingbase MySQL Target** uses MySQL **SQL Dialect**, but
 Developer: Is missing date-range support in a rolling-window query a placeholder problem?
 
 Domain expert: No. That belongs to **Generated Time Series** in the **SQL Dialect**; placeholder normalization only concerns values crossing into the **Driver Transport**.
+
+Developer: Does quarter support mean the target can group by quarter and generate quarter time series?
+
+Domain expert: Not necessarily. **Time Granularity Support** is a capability set; check grouping, interval arithmetic, and **Generated Time Series** independently for each **Kingbase Target**.

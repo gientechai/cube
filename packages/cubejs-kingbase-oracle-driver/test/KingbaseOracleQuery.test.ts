@@ -1,6 +1,12 @@
 import { KingbaseOracleQuery } from '../src';
 
 describe('Kingbase Oracle Query dialect', () => {
+  test('supports quarter time dimension grouping', () => {
+    const query = Object.create(KingbaseOracleQuery.prototype) as KingbaseOracleQuery;
+
+    expect(query.timeGroupedColumn('quarter', 'created_at')).toEqual("TRUNC(created_at, 'Q')");
+  });
+
   test('supports generated time series using recursive CTE templates', () => {
     const query = Object.create(KingbaseOracleQuery.prototype) as KingbaseOracleQuery;
     const templates = query.sqlTemplates();

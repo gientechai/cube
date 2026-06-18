@@ -14,6 +14,14 @@ const DATE_SERIES_INCREMENT =
   '{% endif %}';
 
 export class KingbaseOracleQuery extends OracleQuery {
+  public timeGroupedColumn(granularity: string, dimension: string) {
+    if (granularity === 'quarter') {
+      return `TRUNC(${dimension}, 'Q')`;
+    }
+
+    return super.timeGroupedColumn(granularity, dimension);
+  }
+
   public supportGeneratedSeriesForCustomTd() {
     return true;
   }
