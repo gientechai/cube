@@ -141,6 +141,60 @@ cubes:
     });
   });
 
+  describe('multi-stage measure with filters referencing base dimensions', () => {
+    const compilers = prepareYamlCompiler(`
+cubes:
+  - name: score
+    sql: "SELECT 1 AS score_id, 85 AS score, '语文' AS subject, '2024-01-10'::timestamp AS exam_date
+         UNION ALL SELECT 2, 90, '数学', '2024-01-10'
+         UNION ALL SELECT 3, 78, '语文', '2024-01-11'"
+
+    dimensions:
+      - name: subject
+        sql: subject
+        type: string
+      - name: exam_date
+        sql: exam_date
+        type: time
+      - name: score
+        sql: score
+        type: number
+
+    measures:
+      - name: ptscore
+        type: sum
+        sql: score
+      - name: scoreglyuwen
+        type: sum
+        sql: "{ptscore}"
+        multi_stage: true
+        filters:
+          - sql: "{CUBE}.subject = '语文'"
+`);
+
+    it('stage with measure filters queries base table, not previous CTE', async () => {
+      await compilers.compiler.compile();
+
+      const query = new PostgresQuery(compilers, {
+        measures: ['score.scoreglyuwen'],
+        timeDimensions: [{
+          dimension: 'score.exam_date',
+          granularity: 'second',
+          dateRange: ['2024-01-01', '2024-12-31'],
+        }],
+        timezone: 'UTC',
+        filters: [],
+      });
+      const [sql] = query.buildSqlAndParams();
+
+      expect(sql).toMatch(/^\s*WITH\s+/i);
+      expect(sql).toContain('AS "score"');
+      expect(sql).toMatch(/"score"\.subject\s*=\s*'语文'/);
+      // Must not reference score.subject while FROM is only a prior CTE (no base table join)
+      expect(sql).not.toMatch(/FROM\s+\(SELECT\s+\*\s+FROM\s+cte_\d+[^)]*\)\s+AS\s+"fk_aggregate"[\s\S]*"score"\.subject/);
+    });
+  });
+
   describe('no regression: simple multi-stage without time_shift', () => {
     const compilers = prepareYamlCompiler(`
 cubes:

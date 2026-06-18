@@ -1860,11 +1860,45 @@ export class BaseQuery {
           return false;
         }
       });
+    // Multi-stage measures with schema-level filters (e.g. subject = '语文') must aggregate
+    // from base-table rows. A prior CTE only has pre-aggregated measure columns, so filter
+    // dimensions like subject are not in scope and Postgres reports "missing FROM clause item".
+    const stageHasMeasureDefinitionFilters =
+      withQuery.measures &&
+      withQuery.measures.length > 0 &&
+      withQuery.measures.some((measurePath) => {
+        try {
+          const bm = this.newMeasure(measurePath);
+          const def = bm.definition();
+          return def.filters?.length > 0;
+        } catch (e) {
+          return false;
+        }
+      });
     const useFromSubQuery =
-      fromSql && fromMeasures && fromMeasures.length > 0 && !stageHasSemiAdditiveMeasure;
+      fromSql &&
+      fromMeasures &&
+      fromMeasures.length > 0 &&
+      !stageHasSemiAdditiveMeasure &&
+      !stageHasMeasureDefinitionFilters;
     // When querying from base table, do not remap dimensions to previous CTE aliases
     // (e.g. score__subject); use actual column refs (e.g. "score".subject) so the SQL is valid.
     const effectiveRenderedReference = useFromSubQuery ? renderedReferenceContext.renderedReference : undefined;
+
+    if (stageHasMeasureDefinitionFilters) {
+      const measures = withQuery.measures.map((m) => this.newMeasure(m));
+      return {
+        query: this.evaluateSymbolSqlWithContext(
+          () => this.regularMeasuresSubQuery(measures),
+          {
+            ...renderedReferenceContext,
+            renderedReference: undefined,
+          },
+        ),
+        alias: withQuery.alias,
+      };
+    }
+
     const subQueryOptions = {
       measures: withQuery.measures,
       dimensions: withQuery.dimensions,
