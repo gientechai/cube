@@ -1270,7 +1270,16 @@ export class BaseQuery {
    * @returns {string}
    */
   fullKeyQueryAggregate() {
-    if (this.from && !this.queryReferencesSemiAdditiveMeasures()) {
+    // Multi-stage CTE layers from renderWithQuery() set disableExternalPreAggregations.
+    // When FROM is a prior CTE, semi-additive base measures are already aggregated upstream;
+    // re-entering fullKeyQueryAggregateMeasures() would rebuild the same WITH chain and recurse.
+    if (
+      this.from
+      && (
+        !this.queryReferencesSemiAdditiveMeasures()
+        || this.options.disableExternalPreAggregations
+      )
+    ) {
       return this.simpleQuery();
     }
     const {
