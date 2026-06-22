@@ -369,6 +369,19 @@ export class BaseQuery {
 
   // Temporary workaround to avoid checking for multistage in CubeStoreQuery, since that could lead to errors when HLL functions are present in the query.
   neverUseSqlPlannerPreaggregation() {
+    // The native planner determines a matching pre-aggregation by building the full
+    // query SQL, which for a rolling-window measure includes its time series and
+    // therefore requires a date range. The pre-aggregation refresh/metadata path
+    // (e.g. the `/pre-aggregations` API) builds such a query with no date range, so
+    // the native build throws "Date range is required for time series". Fall back to
+    // the legacy planner for that case — it matches pre-aggregations structurally,
+    // exactly as it did before Tesseract became the default.
+    if (
+      this.cumulativeMeasures().length > 0 &&
+      !this.timeDimensions.some(td => td.dateRange)
+    ) {
+      return true;
+    }
     return false;
   }
 
