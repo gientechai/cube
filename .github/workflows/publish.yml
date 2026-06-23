@@ -74,11 +74,15 @@ jobs:
           echo "Packed $(ls npm-packages/*.tgz | wc -l) packages"
       - name: Verify packed artifacts
         run: |
-          test "$(ls npm-packages/*.tgz | wc -l)" -gt 20
-          tar tzf npm-packages/cubejs-cli-*.tgz | grep -q 'package/dist/src/index.js'
-          tar tzf npm-packages/cubejs-backend-server-*.tgz | grep -q 'package/dist/src'
-          tar tzf npm-packages/cubejs-backend-server-*.tgz | grep -q 'package/index.js'
-          tar tzf npm-packages/cubejs-backend-dm-driver-*.tgz | grep -q 'package/dist/src'
+          VERSION=$(node -p "require('./lerna.json').version")
+          PKG_COUNT=$(ls npm-packages/*.tgz | wc -l)
+          echo "Packed ${PKG_COUNT} packages (version ${VERSION})"
+          test "${PKG_COUNT}" -gt 20
+          # Use exact tarball names — globs like cubejs-backend-server-*.tgz also match server-core.
+          tar tzf "npm-packages/cubejs-cli-${VERSION}.tgz" | grep -q 'package/dist/src/index.js'
+          tar tzf "npm-packages/cubejs-backend-server-${VERSION}.tgz" | grep -q 'package/dist/src'
+          tar tzf "npm-packages/cubejs-backend-server-${VERSION}.tgz" | grep -q 'package/index.js'
+          tar tzf "npm-packages/cubejs-backend-dm-driver-${VERSION}.tgz" | grep -q 'package/dist/src'
       - name: Create npm packages archive
         run: |
           cd npm-packages
