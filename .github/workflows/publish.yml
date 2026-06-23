@@ -65,14 +65,24 @@ jobs:
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-      - name: Pack npm packages
+      - name: Pack built npm packages
         run: |
           mkdir -p npm-packages
-          # Get all publishable packages and pack them
-          yarn lerna exec -- "npm pack --pack-destination ../../npm-packages" || true
+          # Pack all non-private packages built from source (overlays npm in Docker image).
+          yarn lerna exec --no-private -- "npm pack --pack-destination ../../npm-packages"
+          ls -la npm-packages/ | head -30
+          echo "Packed $(ls npm-packages/*.tgz | wc -l) packages"
+      - name: Verify packed artifacts
+        run: |
+          test "$(ls npm-packages/*.tgz | wc -l)" -gt 20
+          tar tzf npm-packages/cubejs-cli-*.tgz | grep -q 'package/dist/src/index.js'
+          tar tzf npm-packages/cubejs-backend-server-*.tgz | grep -q 'package/dist/src'
+          tar tzf npm-packages/cubejs-backend-server-*.tgz | grep -q 'package/index.js'
+          tar tzf npm-packages/cubejs-backend-dm-driver-*.tgz | grep -q 'package/dist/src'
       - name: Create npm packages archive
         run: |
           cd npm-packages
+          ls -la
           tar czf ../npm-packages.tar.gz *.tgz
       - name: Upload npm packages to Release
         uses: svenstaro/upload-release-action@v2

@@ -1,9 +1,8 @@
-FROM node:22.20.0-bookworm-slim AS builder
+FROM node:22.22.0-bookworm-slim AS builder
 
 WORKDIR /cube
 COPY . .
 
-# Add build-arg for npm packages version
 ARG NPM_PACKAGES_VERSION
 
 RUN yarn policies set-version v1.22.22
@@ -17,49 +16,31 @@ RUN apt-get update \
     && apt-get install -y python3 python3.11 libpython3.11-dev gcc g++ make cmake ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install npm packages from local tarballs or download from GitHub Releases
-# First, save npm-packages to a temp location for later re-installation
+# All @cubejs-backend/* and cubejs-cli packages are built from source in CI and published
+# as tarballs. Stage them before install so we can overlay npm registry copies later.
 RUN if [ -d "npm-packages" ] && [ "$(ls -A npm-packages/*.tgz 2>/dev/null)" ]; then \
-      cp -r npm-packages /tmp/npm-packages-backup; \
+      cp -r npm-packages /tmp/built-packages; \
     elif [ -n "$NPM_PACKAGES_VERSION" ] && [ "$NPM_PACKAGES_VERSION" != "noop" ]; then \
-      echo "Downloading npm packages from GitHub Releases..." && \
-      curl -fL -o npm-packages.tar.gz "https://github.com/gientechai/cube/releases/download/${NPM_PACKAGES_VERSION}/npm-packages-${NPM_PACKAGES_VERSION}.tar.gz" && \
-      mkdir -p /tmp/npm-packages-backup && \
-      tar xzf npm-packages.tar.gz -C /tmp/npm-packages-backup && \
-      rm -f npm-packages.tar.gz; \
+      echo "Downloading built packages from GitHub Releases..." && \
+      curl -fL -o built-packages.tar.gz "https://github.com/gientechai/cube/releases/download/${NPM_PACKAGES_VERSION}/npm-packages-${NPM_PACKAGES_VERSION}.tar.gz" && \
+      mkdir -p /tmp/built-packages && \
+      tar xzf built-packages.tar.gz -C /tmp/built-packages && \
+      rm -f built-packages.tar.gz; \
     fi
 
-# We are copying root yarn.lock file to the context folder during the Publish GH
-# action. So, a process will use the root lock file here.
-RUN yarn install --prod \
-    # Remove unnecessary files to reduce image size
+# yarn install only pulls third-party transitive dependencies. All Cube packages are
+# replaced with CI-built tarballs in the next step (custom forks must not use npm code).
+# dm-driver is not on public npm — drop it here so yarn install succeeds in Docker;
+# it is restored from built tarballs below. (In the monorepo, yarn workspaces still
+# link packages/cubejs-dm-driver via package.json.)
+RUN node -e "const p=require('./package.json'); delete p.dependencies['@cubejs-backend/dm-driver']; require('fs').writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')" \
+    && yarn install --prod \
     && rm -rf /cube/node_modules/duckdb/src \
-    && find /cube/node_modules -name "*.md" -type f -delete \
-    && find /cube/node_modules -name "test" -type d -exec rm -rf {} + 2>/dev/null || true \
-    && find /cube/node_modules -name "*.test.js" -o -name "*.test.ts" | xargs rm -f 2>/dev/null || true \
-    && find /cube/node_modules -name "*.map" -type f -delete 2>/dev/null || true \
     && yarn cache clean
 
-# Re-install our custom packages from npm-packages-backup to override npm registry versions
-RUN if [ -d "/tmp/npm-packages-backup" ]; then \
-      echo "Re-installing custom packages from GitHub Releases..." && \
-      for pkg in /tmp/npm-packages-backup/*.tgz; do \
-        temp_dir=$(mktemp -d) && \
-        tar xzf "$pkg" -C "$temp_dir" && \
-        pkg_name=$(cat "$temp_dir"/package/package.json | grep -m1 '"name"' | cut -d'"' -f4) && \
-        if [ -n "$pkg_name" ]; then \
-          rm -rf "/cube/node_modules/$pkg_name" && \
-          mv "$temp_dir/package" "/cube/node_modules/$pkg_name"; \
-        fi && \
-        rm -rf "$temp_dir"; \
-      done; \
-      rm -rf /tmp/npm-packages-backup; \
-    fi
-
-# Fix file permissions for executables and clean up npm-packages directory
-RUN chmod +x /cube/node_modules/cubejs-cli/dist/src/index.js \
-    && chmod +x /cube/node_modules/.bin/cubejs \
-    && rm -rf /cube/npm-packages
+RUN chmod +x /cube/install-built-packages.sh \
+    && /cube/install-built-packages.sh /tmp/built-packages true \
+    && rm -rf /tmp/built-packages /cube/npm-packages
 
 # Copy or download native binaries based on architecture
 RUN ARCH=$(uname -m) && \
@@ -106,7 +87,7 @@ RUN ARCH=$(uname -m) && \
       echo "No native binaries found and no NPM_PACKAGES_VERSION specified"; \
     fi
 
-FROM node:22.20.0-bookworm-slim
+FROM node:22.22.0-bookworm-slim
 
 ARG IMAGE_VERSION=unknown
 
