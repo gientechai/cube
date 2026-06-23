@@ -3,7 +3,6 @@ FROM node:22.22.0-bookworm-slim AS builder
 
 WORKDIR /cube
 COPY . .
-COPY install-built-packages.sh /cube/install-built-packages.sh
 
 ARG NPM_PACKAGES_VERSION
 
@@ -40,9 +39,33 @@ RUN node -e "const p=require('./package.json'); delete p.dependencies['@cubejs-b
     && rm -rf /cube/node_modules/duckdb/src \
     && yarn cache clean
 
-RUN chmod +x /cube/install-built-packages.sh \
-    && /cube/install-built-packages.sh /tmp/built-packages true \
-    && rm -rf /tmp/built-packages /cube/npm-packages
+RUN set -eu && \
+    PACKAGES_DIR=/tmp/built-packages && \
+    if [ ! -d "${PACKAGES_DIR}" ] || ! ls "${PACKAGES_DIR}"/*.tgz >/dev/null 2>&1; then \
+      echo "ERROR: Built packages are required but not found in ${PACKAGES_DIR}"; \
+      exit 1; \
+    fi && \
+    installed=0 && \
+    echo "Overlaying built packages from ${PACKAGES_DIR}..." && \
+    for pkg_tgz in "${PACKAGES_DIR}"/*.tgz; do \
+      [ -f "${pkg_tgz}" ] || continue; \
+      temp_dir=$(mktemp -d); \
+      tar xzf "${pkg_tgz}" -C "${temp_dir}"; \
+      pkg_name=$(node -p "require('${temp_dir}/package/package.json').name"); \
+      dest="node_modules/${pkg_name}"; \
+      echo "Installing ${pkg_name} -> ${dest}"; \
+      rm -rf "${dest}"; \
+      mkdir -p "$(dirname "${dest}")"; \
+      mv "${temp_dir}/package" "${dest}"; \
+      rm -rf "${temp_dir}"; \
+      installed=$((installed + 1)); \
+    done && \
+    test "${installed}" -gt 0 && \
+    test -f node_modules/cubejs-cli/dist/src/index.js && \
+    test -f node_modules/@cubejs-backend/server/index.js && \
+    test -f node_modules/@cubejs-backend/dm-driver/dist/src/index.js && \
+    echo "Installed ${installed} built packages successfully" && \
+    rm -rf /tmp/built-packages /cube/npm-packages
 
 # Download and install native binaries based on target architecture
 RUN if [ -n "$NPM_PACKAGES_VERSION" ] && [ "$NPM_PACKAGES_VERSION" != "noop" ]; then \
