@@ -3,6 +3,7 @@ FROM node:22.22.0-bookworm-slim AS builder
 
 WORKDIR /cube
 COPY . .
+COPY install-built-packages.sh /cube/install-built-packages.sh
 
 ARG NPM_PACKAGES_VERSION
 
