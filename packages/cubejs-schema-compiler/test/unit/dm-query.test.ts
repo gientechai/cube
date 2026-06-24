@@ -84,6 +84,8 @@ describe('DmQuery', () => {
     expect(templates.statements.time_series_select).not.toContain('VALUES');
     expect(templates.statements.time_series_select).not.toContain('::timestamp');
     expect(templates.functions.PERCENTILECONT).toBeUndefined();
+    expect(templates.join_types.full).toBeUndefined();
+    expect(templates.tesseract?.join_types_full).toBeUndefined();
   });
 
   it('Tesseract planner does not emit ordinal GROUP BY for rolling multi-stage measures', async () => {
@@ -129,6 +131,7 @@ describe('DmQuery', () => {
     expect(sql).toMatch(/FROM DUAL/);
     expect(sql).not.toMatch(/\bVALUES\b/);
     expect(sql).toMatch(/TRUNC.*YYYY/);
+    expect(sql).not.toMatch(/\bFULL\s+(OUTER\s+)?JOIN\b/i);
   });
 
   it('JS planner rolling window uses UNION ALL FROM DUAL instead of VALUES', async () => {
@@ -216,6 +219,7 @@ describe('DmQuery', () => {
     const cteSection = sql.replace(/\s*SELECT\s+\*\s+FROM\s+cte_\d+[\s\S]*$/i, '');
     expect(cteSection).not.toMatch(/FETCH\s+NEXT/i);
     expect(sql).toMatch(/FETCH\s+NEXT\s+10000\s+ROWS\s+ONLY\s*$/i);
+    expect(sql).not.toMatch(/\bFULL\s+(OUTER\s+)?JOIN\b/i);
   });
 
   it('promotes inDateRange filter to timeDimensions.dateRange for Tesseract rolling window', async () => {

@@ -272,6 +272,12 @@ export class DmQuery extends OracleQuery {
     const templates = super.sqlTemplates();
     // 达梦不支持 PERCENTILE_CONT 生成的语句类型，中位数走应用层或其它实现
     delete templates.functions.PERCENTILECONT;
+    // 达梦对 FULL JOIN 有限制（仅合并/哈希连接场景），与 MySQL 一样禁用 FULL OUTER JOIN，
+    // 让 Tesseract 走 KeysFullKeyAggregateStrategy（LEFT JOIN 链）而非 FullJoin 策略。
+    delete templates.join_types.full;
+    if (templates.tesseract?.join_types_full) {
+      delete templates.tesseract.join_types_full;
+    }
     // Tesseract 默认 GROUP BY/ORDER BY 使用列序号（1,2,3），达梦不支持，改用完整列表达式（同 MssqlQuery）
     templates.statements.group_by_exprs = '{{ group_by | map(attribute=\'expr\') | join(\', \') }}';
     templates.expressions.order_by = '{{ expr }} {% if asc %}ASC NULLS FIRST{% else %}DESC NULLS LAST{% endif %}';
