@@ -317,6 +317,96 @@ module.exports = {
         },
       };
     }
+    // User with no matching policy on datart_default_allow_test (default allow)
+    if (user === 'datart_unrestricted') {
+      if (password && password !== 'datart_unrestricted_password') {
+        throw new Error(`Password doesn't match for ${user}`);
+      }
+      return {
+        password,
+        superuser: false,
+        securityContext: {
+          auth: {
+            username: 'datart_unrestricted',
+            userAttributes: {},
+            roles: [],
+            groups: [],
+          },
+        },
+      };
+    }
+    // User matching restricted column policy only
+    if (user === 'datart_restricted') {
+      if (password && password !== 'datart_restricted_password') {
+        throw new Error(`Password doesn't match for ${user}`);
+      }
+      return {
+        password,
+        superuser: false,
+        securityContext: {
+          auth: {
+            username: 'datart_restricted',
+            userAttributes: {},
+            roles: ['datart_restricted_role'],
+            groups: [],
+          },
+        },
+      };
+    }
+    // User with decoupled column + row roles
+    if (user === 'datart_decoupled') {
+      if (password && password !== 'datart_decoupled_password') {
+        throw new Error(`Password doesn't match for ${user}`);
+      }
+      return {
+        password,
+        superuser: false,
+        securityContext: {
+          auth: {
+            username: 'datart_decoupled',
+            userAttributes: {},
+            roles: ['datart_col_role', 'datart_row_role'],
+            groups: [],
+          },
+        },
+      };
+    }
+    // User with two column policies (OR merge, deny union)
+    if (user === 'datart_col_merge') {
+      if (password && password !== 'datart_col_merge_password') {
+        throw new Error(`Password doesn't match for ${user}`);
+      }
+      return {
+        password,
+        superuser: false,
+        securityContext: {
+          auth: {
+            username: 'datart_col_merge',
+            userAttributes: {},
+            roles: ['datart_col_role_a', 'datart_col_role_b'],
+            groups: [],
+          },
+        },
+      };
+    }
+    // User with two row policies (AND merge via cube meta)
+    if (user === 'datart_row_and') {
+      if (password && password !== 'datart_row_and_password') {
+        throw new Error(`Password doesn't match for ${user}`);
+      }
+      return {
+        password,
+        superuser: false,
+        securityContext: {
+          auth: {
+            username: 'datart_row_and',
+            userAttributes: {},
+            roles: ['datart_row_low_role', 'datart_row_high_role'],
+            groups: [],
+          },
+        },
+      };
+    }
     throw new Error(`User "${user}" doesn't exist`);
   }
 };

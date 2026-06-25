@@ -1764,6 +1764,39 @@ describe('Cube Validation', () => {
       expect(result.error).toBeFalsy();
     });
 
+    it('should allow rowLevelMerge and memberLevelMerge on cube', () => {
+      const cube = {
+        name: 'TestCube',
+        fileName: 'test.js',
+        sql: () => 'SELECT * FROM test',
+        rowLevelMerge: 'and',
+        memberLevelMerge: 'or',
+        accessPolicy: [{
+          role: 'admin',
+          rowLevel: { allowAll: true }
+        }]
+      };
+
+      const result = cubeValidator.validate(cube, new ConsoleErrorReporter());
+      expect(result.error).toBeFalsy();
+    });
+
+    it('should reject invalid rowLevelMerge value', () => {
+      const cube = {
+        name: 'TestCube',
+        fileName: 'test.js',
+        sql: () => 'SELECT * FROM test',
+        rowLevelMerge: 'xor',
+        accessPolicy: [{
+          role: 'admin',
+          rowLevel: { allowAll: true }
+        }]
+      };
+
+      const result = cubeValidator.validate(cube, new ConsoleErrorReporter());
+      expect(result.error).toBeTruthy();
+    });
+
     it('should allow group: "*" syntax', () => {
       const cube = {
         name: 'TestCube',

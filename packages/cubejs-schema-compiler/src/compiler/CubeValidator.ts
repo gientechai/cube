@@ -1207,6 +1207,8 @@ const baseSchema = {
   segments: SegmentsSchema,
   preAggregations: PreAggregationsAlternatives,
   accessPolicy: Joi.array().items(RolePolicySchema.required()),
+  rowLevelMerge: Joi.string().valid('and', 'or'),
+  memberLevelMerge: Joi.string().valid('and', 'or'),
   hierarchies: hierarchySchema,
 };
 

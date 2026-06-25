@@ -75,6 +75,7 @@ describe('Cube RBAC Engine', () => {
         CUBEJS_DB_PASS: 'test',
         //
         CUBEJS_PG_SQL_PORT: `${PG_PORT}`,
+        CUBEJS_ACCESS_POLICY_DEFAULT_ALLOW_WHEN_NO_MATCH: 'true',
       },
       {
         schemaDir: 'rbac/model',
@@ -433,6 +434,99 @@ describe('Cube RBAC Engine', () => {
       // Both policies are allow-all (no row_level filter), so the member-level
       // access is the union: the cross-group query must return rows.
       expect(res.rows.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('Datart-style RBAC (default allow + decoupled policies)', () => {
+    let unrestrictedConn: PgClient;
+    let restrictedConn: PgClient;
+    let decoupledConn: PgClient;
+
+    beforeAll(async () => {
+      unrestrictedConn = await createPostgresClient('datart_unrestricted', 'datart_unrestricted_password');
+      restrictedConn = await createPostgresClient('datart_restricted', 'datart_restricted_password');
+      decoupledConn = await createPostgresClient('datart_decoupled', 'datart_decoupled_password');
+    });
+
+    afterAll(async () => {
+      await unrestrictedConn.end();
+      await restrictedConn.end();
+      await decoupledConn.end();
+    }, JEST_AFTER_ALL_DEFAULT_TIMEOUT);
+
+    test('user without matching policy sees all columns (default allow)', async () => {
+      const res = await unrestrictedConn.query(
+        'SELECT secret_col, public_col FROM datart_default_allow_test LIMIT 5'
+      );
+      expect(res.rows.length).toBeGreaterThan(0);
+      expect(res.rows[0].secret_col).not.toBeNull();
+    });
+
+    test('user with matching policy is restricted on columns', async () => {
+      let failed = false;
+      try {
+        await restrictedConn.query(
+          'SELECT secret_col FROM datart_default_allow_test LIMIT 1'
+        );
+      } catch (e) {
+        failed = true;
+      }
+      expect(failed).toBe(true);
+
+      const res = await restrictedConn.query(
+        'SELECT public_col FROM datart_default_allow_test LIMIT 5'
+      );
+      expect(res.rows.length).toBeGreaterThan(0);
+    });
+
+    test('decoupled column and row policies both apply', async () => {
+      const res = await decoupledConn.query(
+        'SELECT id, region_col, masked_col FROM datart_decoupled_test LIMIT 1000'
+      );
+      expect(res.rows.length).toBeGreaterThan(0);
+      expect(res.rows.length).toBeLessThan(1000);
+      for (const row of res.rows) {
+        expect(Number(row.id)).toBeLessThan(100);
+        expect(Number(row.masked_col)).toBe(-1);
+      }
+    });
+
+    test('column AND merge denies columns forbidden by any role', async () => {
+      const colMergeConn = await createPostgresClient('datart_col_merge', 'datart_col_merge_password');
+      let secretAFailed = false;
+      let secretBFailed = false;
+      try {
+        await colMergeConn.query('SELECT secret_a FROM datart_column_merge_test LIMIT 1');
+      } catch (e) {
+        secretAFailed = true;
+      }
+      try {
+        await colMergeConn.query('SELECT secret_b FROM datart_column_merge_test LIMIT 1');
+      } catch (e) {
+        secretBFailed = true;
+      }
+      expect(secretAFailed).toBe(true);
+      expect(secretBFailed).toBe(true);
+
+      const res = await colMergeConn.query(
+        'SELECT public_col FROM datart_column_merge_test LIMIT 5'
+      );
+      expect(res.rows.length).toBeGreaterThan(0);
+      await colMergeConn.end();
+    });
+
+    test('row AND merge intersects row filters from multiple roles', async () => {
+      const rowAndConn = await createPostgresClient('datart_row_and', 'datart_row_and_password');
+      const res = await rowAndConn.query(
+        'SELECT id, value_col FROM datart_row_and_test LIMIT 1000'
+      );
+      expect(res.rows.length).toBeGreaterThan(0);
+      for (const row of res.rows) {
+        const id = Number(row.id);
+        expect(id).toBeGreaterThanOrEqual(10);
+        expect(id).toBeLessThan(50);
+      }
+      await rowAndConn.end();
     });
   });
 

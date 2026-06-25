@@ -234,6 +234,8 @@ export type EvaluatedCube = {
   sql?: (...args: any[]) => string;
   sqlTable?: (...args: any[]) => string;
   accessPolicy?: AccessPolicyDefinition[];
+  rowLevelMerge?: 'and' | 'or';
+  memberLevelMerge?: 'and' | 'or';
   isView?: boolean;
   includedMembers?: ViewIncludedMember[];
   defaultFilters?: ViewDefaultValueFilter[];

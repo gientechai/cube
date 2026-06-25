@@ -219,6 +219,12 @@ export interface CubeDefinition {
   accessPolicy?: AccessPolicyDefinition[];
   // eslint-disable-next-line camelcase
   access_policy?: any[];
+  rowLevelMerge?: 'and' | 'or';
+  // eslint-disable-next-line camelcase
+  row_level_merge?: 'and' | 'or';
+  memberLevelMerge?: 'and' | 'or';
+  // eslint-disable-next-line camelcase
+  member_level_merge?: 'and' | 'or';
   folders?: Folder[];
   includes?: any;
   excludes?: any;

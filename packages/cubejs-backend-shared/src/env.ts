@@ -2085,6 +2085,9 @@ const variables: Record<string, (...args: any) => any> = {
     .asString(),
   accessPolicyMaskNumber: () => get('CUBEJS_ACCESS_POLICY_MASK_NUMBER')
     .asString(),
+  accessPolicyDefaultAllowWhenNoMatch: () => get('CUBEJS_ACCESS_POLICY_DEFAULT_ALLOW_WHEN_NO_MATCH')
+    .default('true')
+    .asBoolStrict(),
 };
 
 type Vars = typeof variables;

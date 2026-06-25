@@ -12,9 +12,77 @@ class CompilerApiTestable extends CompilerApi {
   public getQueryFactoryProperty(): QueryFactory | any {
     return this.queryFactory;
   }
+
+  public mergeColumnAccessLevelsPublic(
+    levels: Array<'plain' | 'masked' | 'denied'>,
+    mode: 'and' | 'or'
+  ) {
+    return this.mergeColumnAccessLevels(levels, mode);
+  }
+
+  public resolvePermissionMergeModePublic(
+    context: any,
+    cube: any,
+    key: 'rowMergeMode' | 'columnMergeMode',
+    defaultMode: 'and' | 'or'
+  ) {
+    return this.resolvePermissionMergeMode(context, cube, key, defaultMode);
+  }
 }
 
 describe('CompilerApi', () => {
+  describe('Datart RBAC merge helpers', () => {
+    let compilerApi: CompilerApiTestable;
+    const mockRepository: SchemaFileRepository = {
+      localPath: () => '/mock/path',
+      dataSchemaFiles: () => Promise.resolve([]),
+    };
+    const mockDbType: DbTypeInternalFn = async () => 'postgres';
+
+    beforeEach(() => {
+      compilerApi = new CompilerApiTestable(mockRepository, mockDbType, {
+        logger: () => {},
+      });
+    });
+
+    afterEach(() => {
+      compilerApi.dispose();
+    });
+
+    test('column OR merge denies when any role denies', () => {
+      expect(compilerApi.mergeColumnAccessLevelsPublic(['plain', 'denied'], 'or')).toBe('denied');
+      expect(compilerApi.mergeColumnAccessLevelsPublic(['plain', 'masked'], 'or')).toBe('plain');
+    });
+
+    test('column AND merge requires all roles to grant plain', () => {
+      expect(compilerApi.mergeColumnAccessLevelsPublic(['plain', 'plain'], 'and')).toBe('plain');
+      expect(compilerApi.mergeColumnAccessLevelsPublic(['plain', 'masked'], 'and')).toBe('masked');
+      expect(compilerApi.mergeColumnAccessLevelsPublic(['plain', 'denied'], 'and')).toBe('denied');
+    });
+
+    test('resolvePermissionMergeMode prefers cube schema over security context and meta', () => {
+      const context = { securityContext: { variables: { rowMergeMode: 'or' } } };
+      const cube = {
+        rowLevelMerge: 'and',
+        meta: { datartPermission: { rowMergeMode: 'or' } },
+      };
+      expect(compilerApi.resolvePermissionMergeModePublic(context, cube, 'rowMergeMode', 'or')).toBe('and');
+    });
+
+    test('resolvePermissionMergeMode falls back to security context when cube schema is unset', () => {
+      const context = { securityContext: { variables: { rowMergeMode: 'and' } } };
+      const cube = { meta: { datartPermission: { rowMergeMode: 'or' } } };
+      expect(compilerApi.resolvePermissionMergeModePublic(context, cube, 'rowMergeMode', 'or')).toBe('and');
+      expect(compilerApi.resolvePermissionMergeModePublic({}, cube, 'columnMergeMode', 'and')).toBe('and');
+    });
+
+    test('resolvePermissionMergeMode reads snake_case cube schema fields', () => {
+      const cube = { row_level_merge: 'and', member_level_merge: 'or' };
+      expect(compilerApi.resolvePermissionMergeModePublic({}, cube, 'rowMergeMode', 'or')).toBe('and');
+      expect(compilerApi.resolvePermissionMergeModePublic({}, cube, 'columnMergeMode', 'and')).toBe('or');
+    });
+  });
+
   describe('dispose', () => {
     let compilerApi: CompilerApiTestable;
 
