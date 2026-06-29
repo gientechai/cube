@@ -2595,109 +2595,11 @@ export class BaseQuery {
 
     // 如果有半累加指标，构建未聚合的内部查询
     if (hasSemiAdditive) {
-      // 选择所有维度和原始数据列（不聚合）
-      // 注意：selectColumns() 返回 string[] | null，需要展平
-      const unaggregatedColumns = [];
-      const pushedDimensionPaths = new Set();
-      const dimensionsForSemiAdditiveRemap = [];
-
-      const pushDimensionColumns = (d) => {
-        const path = d.expressionPath && d.expressionPath();
-        if (!path || pushedDimensionPaths.has(path)) {
-          return;
-        }
-        pushedDimensionPaths.add(path);
-        const cols = d.selectColumns && d.selectColumns();
-        if (cols) {
-          cols.forEach(col => unaggregatedColumns.push(col));
-        }
-        dimensionsForSemiAdditiveRemap.push(d);
-      };
-
-      this.dimensionsForSelect().forEach(pushDimensionColumns);
-
-      // measure / filter 中引用的维度必须进入 base_data，并在 windowed_data 外层用列别名解析。
-      // collectSubQueryDimensionsFor 仅在维度定义 subQuery:true 时才会记录，measure filters（如 yzzbgl 的 subject）
-      // 里的维度会被完全漏掉；collectMemberNamesFor 会随 evaluateSymbolSql 收集所有引用成员。
-      const implicitDimensionPaths = R.uniq(
-        this.collectFrom(
-          measures.concat(semiAdditiveMeasuresForCte).concat(filters),
-          this.collectMemberNamesFor.bind(this),
-          'collectMemberNamesFor',
-        ).filter((p) => this.cubeEvaluator.isDimension(p))
-      );
-      implicitDimensionPaths.forEach((p) => {
-        pushDimensionColumns(this.newDimension(p));
-      });
-
-      // 添加半累加指标的原始列（使用下划线前缀避免命名冲突）
-      semiAdditiveMeasuresForCte.forEach(measure => {
-        const baseSql = this.semiAdditiveMeasureRawSql(measure);
-        // 不使用双引号，让 PostgreSQL 自动处理为小写
-        const rawColumnName = `_${measure.unescapedAliasName()}_raw`;
-        unaggregatedColumns.push(`${baseSql} as ${rawColumnName}`);
-      });
-
-      // 添加原始时间维度列（用于 ORDER BY）
-      // 收集所有半累加指标使用的非可加时间维度名称
-      const timeDimensionsForOrdering = new Set();
-
-      semiAdditiveMeasuresForCte.forEach(measure => {
-        const config = measure.nonAdditiveConfig;
-        if (config && config.name) {
-          timeDimensionsForOrdering.add(config.name);
-        }
-      });
-
-      // 为每个时间维度添加原始列（用于 ORDER BY）
-      // 使用第一个半累加指标的 cube 作为上下文
-      if (semiAdditiveMeasuresForCte.length > 0) {
-        const contextMeasure = semiAdditiveMeasuresForCte[0];
-        timeDimensionsForOrdering.forEach(dimensionName => {
-          const cubeName = contextMeasure.cube().name;
-          const dimensionPath = dimensionName.includes('.') ? dimensionName : `${cubeName}.${dimensionName}`;
-          const dimension = this.newDimension(dimensionPath);
-          // 使用 dimensionSql() 获取维度 SQL
-          const dimensionSql = this.dimensionSql(dimension);
-          // 获取不带引号的别名
-          const unescapedAlias = dimension.unescapedAliasName();
-          const columnAlias = `_${unescapedAlias}_for_ordering`;
-          // 添加原始时间列，带特殊后缀以避免冲突
-          unaggregatedColumns.push(`${dimensionSql} as ${columnAlias}`);
-        });
-      }
-
-      // 非半累加指标的外层聚合仍引用主表限定列（如 "main__score".score），需投影到 CTE 列别名并在下游替换。
-      measures.filter(m => !(m.isSemiAdditive && m.isSemiAdditive())).forEach((measure) => {
-        const def = measure.measureDefinition();
-        const baseSql = def && def.sql;
-        if (baseSql == null || baseSql === '') {
-          return;
-        }
-        const evaluatedBase = this.evaluateSql(measure.cube().name, baseSql);
-        if (evaluatedBase == null) {
-          return;
-        }
-        const rawStr = String(evaluatedBase).trim();
-        if (!/^[_a-zA-Z][_a-zA-Z0-9]*$/.test(rawStr)) {
-          return;
-        }
-        const prefixed = `${this.cubeAlias(measure.cube().name)}.${rawStr}`;
-        const colAlias = `_${measure.unescapedAliasName()}_measure_base`;
-        unaggregatedColumns.push(`${prefixed} as ${this.escapeColumnName(colAlias)}`);
-      });
-
-      const innerSelect = unaggregatedColumns.join(', ');
-      const innerQuery = `SELECT ${innerSelect} FROM ${baseQuery} ${this.baseWhere(filters.concat(inlineWhereConditions))}`;
-
-      // 使用 CTE 包装，传递列名列表和完整的时间维度信息（包含粒度）
-      return this.buildSemiAdditiveCTEQuery(
-        innerQuery,
+      return this.buildSemiAdditiveMeasuresQuery(
         measures,
-        unaggregatedColumns,
-        timeDimensionsForOrdering,
-        dimensionsForSemiAdditiveRemap,
-        semiAdditiveMeasuresForCte,
+        filters,
+        baseQuery,
+        { inlineWhereConditions },
       );
     }
 
@@ -2769,10 +2671,11 @@ export class BaseQuery {
 
     const subQueryJoins =
       shouldBuildJoinForMeasureSelect ? [] : measureSubQueryDimensions.map(d => this.subQueryJoin(d));
+    const keysAlias = this.escapeColumnName(QueryAlias.AGG_SUB_QUERY_KEYS);
     const joinSql = this.joinSql([
       {
         sql: `(${this.keysQuery(primaryKeyDimensions, filters)})`,
-        alias: this.escapeColumnName(QueryAlias.AGG_SUB_QUERY_KEYS),
+        alias: keysAlias,
       },
       {
         sql: keyCubeSql,
@@ -2782,6 +2685,20 @@ export class BaseQuery {
       },
       ...subQueryJoins
     ]);
+
+    const semiAdditiveMeasuresForCte = this.collectReferencedSemiAdditiveMeasures(measures, filters);
+    if (semiAdditiveMeasuresForCte.length > 0) {
+      return this.buildSemiAdditiveMeasuresQuery(
+        measures,
+        filters,
+        joinSql,
+        {
+          skipBaseWhere: true,
+          dimensionSourceAlias: keysAlias,
+        },
+      );
+    }
+
     return `SELECT ${columnsForSelect} FROM ${joinSql}` +
       (!this.safeEvaluateSymbolContext().ungrouped && this.aggregateSubQueryGroupByClause() || '');
   }
@@ -5972,6 +5889,138 @@ export class BaseQuery {
         return false;
       }
     });
+  }
+
+  /**
+   * 在半累加 CTE（base_data / windowed_data）上构建指标查询。
+   * regularMeasuresSubQuery 与 aggregateSubQuery（multiplied + 跨 cube 过滤）共用。
+   *
+   * @param {BaseMeasure[]} measures
+   * @param {Array<BaseFilter>} filters
+   * @param {string} baseFromSql
+   * @param {{
+   *   skipBaseWhere?: boolean,
+   *   inlineWhereConditions?: string[],
+   *   dimensionSourceAlias?: string,
+   * }} [options]
+   * @returns {string}
+   */
+  buildSemiAdditiveMeasuresQuery(measures, filters, baseFromSql, options = {}) {
+    const {
+      skipBaseWhere = false,
+      inlineWhereConditions = [],
+      dimensionSourceAlias,
+    } = options;
+
+    const semiAdditiveMeasuresForCte = this.collectReferencedSemiAdditiveMeasures(measures, filters);
+
+    const unaggregatedColumns = [];
+    const pushedDimensionPaths = new Set();
+    const dimensionsForSemiAdditiveRemap = [];
+
+    const pushDimensionColumns = (d) => {
+      const path = d.expressionPath && d.expressionPath();
+      if (!path || pushedDimensionPaths.has(path)) {
+        return;
+      }
+      pushedDimensionPaths.add(path);
+      const cols = d.selectColumns && d.selectColumns();
+      if (cols) {
+        cols.forEach(col => unaggregatedColumns.push(col));
+      }
+      dimensionsForSemiAdditiveRemap.push(d);
+    };
+
+    if (dimensionSourceAlias) {
+      this.dimensionsForSelect().forEach((d) => {
+        const path = d.expressionPath && d.expressionPath();
+        if (!path || pushedDimensionPaths.has(path)) {
+          return;
+        }
+        pushedDimensionPaths.add(path);
+        unaggregatedColumns.push(`${dimensionSourceAlias}.${d.aliasName()}`);
+        dimensionsForSemiAdditiveRemap.push(d);
+      });
+    } else {
+      this.dimensionsForSelect().forEach(pushDimensionColumns);
+    }
+
+    // aggregateSubQuery 的 keys 子查询已应用跨 cube 过滤；filter 维度不在 keys+fact join 中，勿注入 base_data。
+    const implicitDimensionPaths = dimensionSourceAlias
+      ? []
+      : R.uniq(
+        this.collectFrom(
+          measures.concat(semiAdditiveMeasuresForCte).concat(filters),
+          this.collectMemberNamesFor.bind(this),
+          'collectMemberNamesFor',
+        ).filter((p) => this.cubeEvaluator.isDimension(p))
+      );
+    implicitDimensionPaths.forEach((p) => {
+      if (!pushedDimensionPaths.has(p)) {
+        pushDimensionColumns(this.newDimension(p));
+      }
+    });
+
+    semiAdditiveMeasuresForCte.forEach(measure => {
+      const baseSql = this.semiAdditiveMeasureRawSql(measure);
+      const rawColumnName = `_${measure.unescapedAliasName()}_raw`;
+      unaggregatedColumns.push(`${baseSql} as ${rawColumnName}`);
+    });
+
+    const timeDimensionsForOrdering = new Set();
+
+    semiAdditiveMeasuresForCte.forEach(measure => {
+      const config = measure.nonAdditiveConfig;
+      if (config && config.name) {
+        timeDimensionsForOrdering.add(config.name);
+      }
+    });
+
+    if (semiAdditiveMeasuresForCte.length > 0) {
+      const contextMeasure = semiAdditiveMeasuresForCte[0];
+      timeDimensionsForOrdering.forEach(dimensionName => {
+        const cubeName = contextMeasure.cube().name;
+        const dimensionPath = dimensionName.includes('.') ? dimensionName : `${cubeName}.${dimensionName}`;
+        const dimension = this.newDimension(dimensionPath);
+        const dimensionSql = this.dimensionSql(dimension);
+        const unescapedAlias = dimension.unescapedAliasName();
+        const columnAlias = `_${unescapedAlias}_for_ordering`;
+        unaggregatedColumns.push(`${dimensionSql} as ${columnAlias}`);
+      });
+    }
+
+    measures.filter(m => !(m.isSemiAdditive && m.isSemiAdditive())).forEach((measure) => {
+      const def = measure.measureDefinition();
+      const baseSql = def && def.sql;
+      if (baseSql == null || baseSql === '') {
+        return;
+      }
+      const evaluatedBase = this.evaluateSql(measure.cube().name, baseSql);
+      if (evaluatedBase == null) {
+        return;
+      }
+      const rawStr = String(evaluatedBase).trim();
+      if (!/^[_a-zA-Z][_a-zA-Z0-9]*$/.test(rawStr)) {
+        return;
+      }
+      const prefixed = `${this.cubeAlias(measure.cube().name)}.${rawStr}`;
+      const colAlias = `_${measure.unescapedAliasName()}_measure_base`;
+      unaggregatedColumns.push(`${prefixed} as ${this.escapeColumnName(colAlias)}`);
+    });
+
+    const whereClause = skipBaseWhere
+      ? ''
+      : ` ${this.baseWhere(filters.concat(inlineWhereConditions))}`;
+    const innerQuery = `SELECT ${unaggregatedColumns.join(', ')} FROM ${baseFromSql}${whereClause}`;
+
+    return this.buildSemiAdditiveCTEQuery(
+      innerQuery,
+      measures,
+      unaggregatedColumns,
+      timeDimensionsForOrdering,
+      dimensionsForSemiAdditiveRemap,
+      semiAdditiveMeasuresForCte,
+    );
   }
 
   /**
