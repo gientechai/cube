@@ -133,6 +133,7 @@ fn build_request(
         row_limit: None,
         order: None,
         query_type: Some(QueryType::RegularQuery),
+        masked_members: None,
     };
 
     TransformDataRequest {

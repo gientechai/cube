@@ -284,6 +284,18 @@ pub enum QueryFilterOrLogicalFilter {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MaskedMemberPivotItem {
+    pub member: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NormalizedQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub measures: Option<Vec<MemberOrMemberExpression>>,
@@ -317,6 +329,8 @@ pub struct NormalizedQuery {
     pub order: Option<Vec<Order>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query_type: Option<QueryType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub masked_members: Option<Vec<MaskedMemberPivotItem>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

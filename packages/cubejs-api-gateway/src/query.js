@@ -13,6 +13,41 @@ const getQueryGranularity = (queries) => R.pipe(
   R.uniq
 )(queries);
 
+const getQueryMemberPaths = (query) => {
+  const members = new Set();
+  (query.measures || []).forEach((member) => {
+    if (typeof member === 'string') {
+      members.add(member);
+    }
+  });
+  (query.dimensions || []).forEach((member) => {
+    if (typeof member === 'string') {
+      members.add(member);
+    }
+  });
+  (query.timeDimensions || []).forEach(({ dimension }) => {
+    if (dimension) {
+      members.add(dimension);
+    }
+  });
+  return members;
+};
+
+const collectPivotMaskedMembers = (queries, pivotQuery) => {
+  const queryMembers = getQueryMemberPaths(pivotQuery);
+  const byMember = new Map();
+
+  queries.forEach((query) => {
+    (query.maskedMembers || []).forEach((item) => {
+      if (queryMembers.has(item.member) && !byMember.has(item.member)) {
+        byMember.set(item.member, item);
+      }
+    });
+  });
+
+  return byMember.size ? Array.from(byMember.values()) : undefined;
+};
+
 const getPivotQuery = (queryType, queries) => {
   let [pivotQuery] = queries;
 
@@ -34,6 +69,7 @@ const getPivotQuery = (queryType, queries) => {
   }
 
   pivotQuery.queryType = queryType;
+  pivotQuery.maskedMembers = collectPivotMaskedMembers(queries, pivotQuery);
 
   return pivotQuery;
 };

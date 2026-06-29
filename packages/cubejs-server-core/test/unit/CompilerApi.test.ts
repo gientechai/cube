@@ -28,6 +28,10 @@ class CompilerApiTestable extends CompilerApi {
   ) {
     return this.resolvePermissionMergeMode(context, cube, key, defaultMode);
   }
+
+  public resolveDeniedMemberInfoPublic(compilers: Compiler, memberPath: string) {
+    return this.resolveDeniedMemberInfo(compilers, memberPath);
+  }
 }
 
 describe('CompilerApi', () => {
@@ -80,6 +84,54 @@ describe('CompilerApi', () => {
       const cube = { row_level_merge: 'and', member_level_merge: 'or' };
       expect(compilerApi.resolvePermissionMergeModePublic({}, cube, 'rowMergeMode', 'or')).toBe('and');
       expect(compilerApi.resolvePermissionMergeModePublic({}, cube, 'columnMergeMode', 'and')).toBe('or');
+    });
+
+    test('resolveDeniedMemberInfo prefers schema title over auto-generated meta title', () => {
+      const compilers = {
+        cubeEvaluator: {
+          cubeNameFromPath: () => 'score_test',
+          memberShortNameFromPath: () => 'subject',
+          cubeFromPath: () => ({ title: 'score_test', dimensions: { subject: { title: 'fffff' } } }),
+          cubeList: [{
+            name: 'score_test',
+            dimensions: {
+              subject: {
+                sql: 'subject',
+                type: 'string',
+                title: 'fffff',
+              },
+            },
+          }],
+          cubeDefinitions: {
+            score_test: {
+              dimensions: {
+                subject: { title: 'fffff' },
+              },
+            },
+          },
+          byPathAnyType: () => ({ title: 'fffff' }),
+        },
+        metaTransformer: {
+          cubes: [{
+            config: {
+              name: 'score_test',
+              dimensions: [{
+                name: 'score_test.subject',
+                title: 'score_test subject',
+                shortTitle: 'subject',
+              }],
+            },
+          }],
+        },
+      } as unknown as Compiler;
+
+      expect(
+        compilerApi.resolveDeniedMemberInfoPublic(compilers, 'score_test.subject')
+      ).toEqual({
+        member: 'score_test.subject',
+        title: 'score_test fffff',
+        displayTitle: 'fffff',
+      });
     });
   });
 

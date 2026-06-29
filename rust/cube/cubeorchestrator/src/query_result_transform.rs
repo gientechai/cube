@@ -1,8 +1,8 @@
 use crate::{
     query_message_parser::QueryResult,
     transport::{
-        AnnotatedConfigItem, ConfigItem, MemberOrMemberExpression, MembersMap, NormalizedQuery,
-        QueryTimeDimension, QueryType, ResultType, TransformDataRequest,
+        AnnotatedConfigItem, ConfigItem, MaskedMemberPivotItem, MemberOrMemberExpression,
+        MembersMap, NormalizedQuery, QueryTimeDimension, QueryType, ResultType, TransformDataRequest,
     },
 };
 use anyhow::{bail, Context, Result};
@@ -905,6 +905,60 @@ pub fn get_query_granularities(queries: &[&NormalizedQuery]) -> Vec<String> {
 }
 
 /// Get Pivot Query for a list of queries
+pub fn collect_query_member_paths(query: &NormalizedQuery) -> HashSet<String> {
+    let mut members = HashSet::new();
+
+    if let Some(measures) = &query.measures {
+        for measure in measures {
+            if let Some(member) = member_name(measure) {
+                members.insert(member.to_string());
+            }
+        }
+    }
+
+    if let Some(dimensions) = &query.dimensions {
+        for dimension in dimensions {
+            if let Some(member) = member_name(dimension) {
+                members.insert(member.to_string());
+            }
+        }
+    }
+
+    if let Some(time_dimensions) = &query.time_dimensions {
+        for time_dimension in time_dimensions {
+            members.insert(time_dimension.dimension.clone());
+        }
+    }
+
+    members
+}
+
+fn collect_pivot_masked_members(
+    queries: &[&NormalizedQuery],
+    pivot_query: &NormalizedQuery,
+) -> Option<Vec<MaskedMemberPivotItem>> {
+    let query_members = collect_query_member_paths(pivot_query);
+    let mut by_member: HashMap<String, MaskedMemberPivotItem> = HashMap::new();
+
+    for query in queries {
+        if let Some(masked_members) = &query.masked_members {
+            for item in masked_members {
+                if query_members.contains(&item.member) {
+                    by_member
+                        .entry(item.member.clone())
+                        .or_insert_with(|| item.clone());
+                }
+            }
+        }
+    }
+
+    if by_member.is_empty() {
+        None
+    } else {
+        Some(by_member.into_values().collect())
+    }
+}
+
 pub fn get_pivot_query(
     query_type: &QueryType,
     queries: &Vec<&NormalizedQuery>,
@@ -965,6 +1019,7 @@ pub fn get_pivot_query(
     }
 
     pivot_query.query_type = Option::from(query_type.clone());
+    pivot_query.masked_members = collect_pivot_masked_members(queries, &pivot_query);
 
     Ok(pivot_query)
 }
@@ -3498,7 +3553,35 @@ mod tests {
             row_limit: None,
             order: None,
             query_type: None,
+            masked_members: None,
         }
+    }
+
+    #[test]
+    fn test_get_pivot_query_includes_masked_members() -> Result<()> {
+        let mut query = make_query_with_dims(Some(vec![MemberOrMemberExpression::Member(
+            "score1.subject".to_string(),
+        )]));
+        query.masked_members = Some(vec![MaskedMemberPivotItem {
+            member: "score1.subject".to_string(),
+            title: Some("score1 学科".to_string()),
+            display_title: Some("学科".to_string()),
+            filter: None,
+        }]);
+
+        let pivot = get_pivot_query(&QueryType::RegularQuery, &vec![&query])?;
+
+        assert_eq!(
+            pivot.masked_members,
+            Some(vec![MaskedMemberPivotItem {
+                member: "score1.subject".to_string(),
+                title: Some("score1 学科".to_string()),
+                display_title: Some("学科".to_string()),
+                filter: None,
+            }])
+        );
+
+        Ok(())
     }
 
     #[test]

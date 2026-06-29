@@ -708,11 +708,194 @@ export class CompilerApi {
    * - combining all filters for different roles with OR
    * - combining cube and view filters with AND
   */
+  protected findMemberInMeta(compilers: Compiler, memberPath: string): any | null {
+    const cubeName = memberPath.split('.')[0];
+    const memberShortName = memberPath.slice(cubeName.length + 1);
+    const metaCube = compilers.metaTransformer?.cubes?.find(
+      (cube: any) => cube.config?.name === cubeName || cube.name === cubeName
+    );
+    const config: any = metaCube?.config ?? metaCube;
+    if (!config) {
+      return null;
+    }
+
+    const members = [
+      ...(config.dimensions || []),
+      ...(config.measures || []),
+      ...(config.segments || []),
+      ...(config.hierarchies || []),
+    ];
+    return members.find(
+      (m: any) => m.name === memberPath || m.name === `${cubeName}.${memberShortName}`
+    ) || null;
+  }
+
+  protected findMemberTitleInMeta(compilers: Compiler, memberPath: string): string | null {
+    const member = this.findMemberInMeta(compilers, memberPath);
+    return member?.title || null;
+  }
+
+  protected findMemberDefInCubeList(
+    cubeEvaluator: Compiler['cubeEvaluator'],
+    cubeName: string,
+    memberShortName: string
+  ): any | null {
+    const cubeDef = cubeEvaluator.cubeList?.find((c: any) => c.name === cubeName);
+    if (!cubeDef) {
+      return null;
+    }
+
+    for (const collection of ['dimensions', 'measures', 'segments'] as const) {
+      const memberDef = cubeDef[collection]?.[memberShortName];
+      if (memberDef) {
+        return memberDef;
+      }
+    }
+
+    return null;
+  }
+
+  protected findMemberDefInCubeDefinitions(
+    cubeEvaluator: Compiler['cubeEvaluator'],
+    cubeName: string,
+    memberShortName: string
+  ): any | null {
+    const rawCube = cubeEvaluator.cubeDefinitions?.[cubeName];
+    if (!rawCube) {
+      return null;
+    }
+
+    for (const collection of ['dimensions', 'measures', 'segments'] as const) {
+      const memberDef = rawCube[collection]?.[memberShortName];
+      if (memberDef) {
+        return memberDef;
+      }
+    }
+
+    return null;
+  }
+
+  protected pickCustomMemberTitle(memberDef: any, metaMember: any): string | null {
+    const candidates = [
+      memberDef?.title,
+      memberDef?.meta?.title,
+      memberDef?.meta?.label,
+      memberDef?.meta?.displayName,
+      memberDef?.meta?.name,
+      metaMember?.meta?.title,
+      metaMember?.meta?.label,
+      metaMember?.meta?.displayName,
+      metaMember?.meta?.name,
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.trim()) {
+        return candidate.trim();
+      }
+    }
+
+    return null;
+  }
+
+  protected resolveDeniedMemberInfo(
+    compilers: Compiler,
+    memberPath: string
+  ): { member: string; title: string; displayTitle: string } {
+    const { cubeEvaluator } = compilers;
+    const cubeName = cubeEvaluator.cubeNameFromPath(memberPath);
+    const memberShortName = cubeEvaluator.memberShortNameFromPath(memberPath);
+    const cube = cubeEvaluator.cubeFromPath(cubeName) as any;
+    const cubeTitle = cube.title || cubeName;
+    const metaMember = this.findMemberInMeta(compilers, memberPath);
+
+    let memberDef: any;
+    try {
+      memberDef = cubeEvaluator.byPathAnyType(memberPath);
+    } catch {
+      memberDef = undefined;
+    }
+
+    if (!memberDef?.title) {
+      const cubeListMemberDef = this.findMemberDefInCubeList(
+        cubeEvaluator,
+        cubeName,
+        memberShortName
+      );
+      const cubeDefinitionsMemberDef = this.findMemberDefInCubeDefinitions(
+        cubeEvaluator,
+        cubeName,
+        memberShortName
+      );
+      memberDef = {
+        ...cubeDefinitionsMemberDef,
+        ...cubeListMemberDef,
+        ...memberDef,
+      };
+    }
+
+    const customTitle = this.pickCustomMemberTitle(memberDef, metaMember);
+    if (customTitle) {
+      return {
+        member: memberPath,
+        title: `${cubeTitle} ${customTitle}`.trim(),
+        displayTitle: customTitle,
+      };
+    }
+
+    const titleFromMeta = metaMember?.title || this.findMemberTitleInMeta(compilers, memberPath);
+    if (titleFromMeta) {
+      const metaShortTitle = typeof metaMember?.shortTitle === 'string'
+        ? metaMember.shortTitle.trim()
+        : null;
+      return {
+        member: memberPath,
+        title: titleFromMeta,
+        displayTitle: metaShortTitle || titleFromMeta,
+      };
+    }
+
+    return {
+      member: memberPath,
+      title: `${cubeTitle} ${memberShortName}`.trim(),
+      displayTitle: memberShortName,
+    };
+  }
+
+  protected denyQueryAccess(
+    query: NormalizedQuery,
+    cube: { name: string },
+    deniedMembers: string[],
+    compilers: Compiler
+  ): {
+    query: NormalizedQuery;
+    denied: true;
+    deniedMembers: Array<{ member: string; title: string; displayTitle: string }>;
+  } {
+    query.segments = query.segments || [];
+    query.segments.push({
+      expression: () => '1 = 0',
+      cubeName: cube.name,
+      name: 'rlsAccessDenied',
+    } as unknown as MemberExpression);
+    const uniqueMembers = [...new Set(deniedMembers)].sort();
+    return {
+      query,
+      denied: true,
+      deniedMembers: uniqueMembers.map(memberPath => (
+        this.resolveDeniedMemberInfo(compilers, memberPath)
+      )),
+    };
+  }
+
   public async applyRowLevelSecurity(
     query: NormalizedQuery,
     evaluatedQuery: NormalizedQuery,
     context: Context
-  ): Promise<{ query: NormalizedQuery; denied: boolean }> {
+  ): Promise<{
+    query: NormalizedQuery;
+    denied: boolean;
+    deniedMembers?: Array<{ member: string; title: string; displayTitle: string }>;
+  }> {
     const compilers = await this.getCompilers({ requestId: context.requestId });
     const { cubeEvaluator } = compilers;
 
@@ -753,17 +936,15 @@ export class CompilerApi {
       if (cubeEvaluator.isRbacEnabledForCube(cube)) {
         const userPolicies = await this.getApplicablePolicies(cube, context, compilers);
 
+        const cubeMembersInQuery = Array.from(queryMemberNames).filter(
+          memberName => memberName.startsWith(`${cubeName}.`)
+        );
+
         if (userPolicies.length === 0) {
           if (this.isAccessPolicyDefaultAllowWhenNoMatch()) {
             continue;
           }
-          query.segments = query.segments || [];
-          query.segments.push({
-            expression: () => '1 = 0',
-            cubeName: cube.name,
-            name: 'rlsAccessDenied',
-          } as unknown as MemberExpression);
-          return { query, denied: true };
+          return this.denyQueryAccess(query, cube, cubeMembersInQuery, compilers);
         }
 
         const decoupledMode = this.isDecoupledAccessPolicyMode(userPolicies);
@@ -773,10 +954,6 @@ export class CompilerApi {
         const rowPolicies = decoupledMode
           ? userPolicies.filter((policy: any) => this.policyHasRowLevelFilter(policy))
           : [];
-
-        const cubeMembersInQuery = Array.from(queryMemberNames).filter(
-          memberName => memberName.startsWith(`${cubeName}.`)
-        );
 
         const policyGrantsMember = (policy: any, memberName: string): boolean => (
           decoupledMode
@@ -795,7 +972,7 @@ export class CompilerApi {
 
         const memberRowConstraints: any[] = [];
         const seenRowConstraints = new Set<string>();
-        let cubeAccessDenied = false;
+        const deniedMembersInCube: string[] = [];
 
         const policiesForMemberAccess = decoupledMode ? memberPolicies : userPolicies;
         const columnMergeMode = decoupledMode
@@ -817,8 +994,8 @@ export class CompilerApi {
             );
 
             if (mergedAccess === 'denied') {
-              cubeAccessDenied = true;
-              break;
+              deniedMembersInCube.push(memberName);
+              continue;
             }
 
             if (mergedAccess === 'masked') {
@@ -833,8 +1010,8 @@ export class CompilerApi {
           );
 
           if (grantingPolicies.length === 0) {
-            cubeAccessDenied = true;
-            break;
+            deniedMembersInCube.push(memberName);
+            continue;
           }
 
           const hasUnconditionalFullAccess = grantingPolicies.some((policy: any) => {
@@ -884,14 +1061,8 @@ export class CompilerApi {
           }
         }
 
-        if (cubeAccessDenied) {
-          query.segments = query.segments || [];
-          query.segments.push({
-            expression: () => '1 = 0',
-            cubeName: cube.name,
-            name: 'rlsAccessDenied',
-          } as unknown as MemberExpression);
-          return { query, denied: true };
+        if (deniedMembersInCube.length > 0) {
+          return this.denyQueryAccess(query, cube, deniedMembersInCube, compilers);
         }
 
         if (decoupledMode && rowPolicies.length > 0) {

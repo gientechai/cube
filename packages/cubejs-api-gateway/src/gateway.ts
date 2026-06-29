@@ -1403,16 +1403,29 @@ class ApiGateway {
           }
 
           // First apply cube/view level security policies
-          const { query: queryWithRlsFilters, denied } = await compilerApi.applyRowLevelSecurity(
+          const { query: queryWithRlsFilters, denied, deniedMembers } = await compilerApi.applyRowLevelSecurity(
             normalizedQuery,
             evaluatedQuery,
             context
           );
+          if (denied) {
+            const membersList = deniedMembers?.length
+              ? deniedMembers
+                .map(({ member, displayTitle, title }) => `${member} (${displayTitle || title})`)
+                .join(', ')
+              : null;
+            throw new UserError(
+              membersList
+                ? `Access denied: you do not have permission to query the following members: ${membersList}`
+                : 'Access denied: you do not have permission to query one or more requested members.',
+              deniedMembers?.length ? { deniedMembers } : undefined
+            );
+          }
           // Then apply user-supplied queryRewrite
-          let rewrittenQuery = !denied ? await this.queryRewrite(
+          let rewrittenQuery = await this.queryRewrite(
             queryWithRlsFilters,
             context
-          ) : queryWithRlsFilters;
+          ) as NormalizedQuery;
 
           rewrittenQuery.maskedMembers = queryWithRlsFilters.maskedMembers;
 
@@ -1420,8 +1433,8 @@ class ApiGateway {
           // if that's the case, we should run an extra pass of parsing here to make sure
           // nothing breaks down the road
           if (hasExpressionsInQuery || this.hasExpressionsInQuery(rewrittenQuery)) {
-            rewrittenQuery = this.parseMemberExpressionsInQuery(rewrittenQuery);
-            rewrittenQuery = this.evalMemberExpressionsInQuery(rewrittenQuery);
+            rewrittenQuery = this.parseMemberExpressionsInQuery(rewrittenQuery) as NormalizedQuery;
+            rewrittenQuery = this.evalMemberExpressionsInQuery(rewrittenQuery) as NormalizedQuery;
           }
 
           return normalizeQuery(rewrittenQuery, persistent, cacheMode);
@@ -1905,6 +1918,35 @@ class ApiGateway {
    * result object.
    * @internal
    */
+  private enrichMaskedMembersForResponse(
+    normalizedQuery: NormalizedQuery,
+    annotation: {
+      measures: Record<string, any>;
+      dimensions: Record<string, any>;
+      segments: Record<string, any>;
+      timeDimensions: Record<string, any>;
+    }
+  ): NormalizedQuery['maskedMembers'] {
+    if (!normalizedQuery.maskedMembers?.length) {
+      return undefined;
+    }
+
+    return normalizedQuery.maskedMembers.map(({ member, filter }) => {
+      const meta = annotation.dimensions[member]
+        || annotation.measures[member]
+        || annotation.timeDimensions[member];
+      const title = meta?.title;
+      const displayTitle = meta?.shortTitle || title;
+
+      return {
+        member,
+        ...(filter !== undefined ? { filter } : {}),
+        ...(title ? { title } : {}),
+        ...(displayTitle ? { displayTitle } : {}),
+      };
+    });
+  }
+
   private prepareResultTransformData(
     context: RequestContext,
     queryType: QueryType,
@@ -1928,6 +1970,10 @@ class ApiGateway {
     responseType?: ResultType,
   ): ResultWrapper {
     const resultWrapper = response.data;
+    const maskedMembers = this.enrichMaskedMembersForResponse(normalizedQuery, annotation);
+    const queryForResponse = maskedMembers
+      ? { ...normalizedQuery, maskedMembers }
+      : normalizedQuery;
 
     const transformDataParams = {
       aliasToMemberNameMap: sqlQuery.aliasNameToMember,
@@ -1936,13 +1982,13 @@ class ApiGateway {
         ...annotation.dimensions,
         ...annotation.timeDimensions
       } as { [member: string]: ConfigItem },
-      query: normalizedQuery,
+      query: queryForResponse,
       queryType,
       resType: responseType,
     };
 
     const resObj = {
-      query: normalizedQuery,
+      query: queryForResponse,
       lastRefreshTime: response.lastRefreshTime?.toISOString(),
       ...(
         getEnv('devMode') ||
@@ -2408,7 +2454,7 @@ class ApiGateway {
         error: e.message,
         duration: this.duration(requestStarted)
       }, context);
-      res({ error: e.message, stack, requestId, plainError }, { status: e.status });
+      res({ error: e.message, stack, requestId, plainError, ...(e.extensions || {}) }, { status: e.status });
     } else if (e.error === 'Continue wait') {
       this.log({
         type: 'Continue wait',

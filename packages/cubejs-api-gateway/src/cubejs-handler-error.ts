@@ -3,7 +3,8 @@ export class CubejsHandlerError extends Error {
     public readonly status: number,
     public readonly type: string,
     message: string,
-    public readonly originalError?: Error
+    public readonly originalError?: Error,
+    public readonly extensions?: Record<string, unknown>
   ) {
     super(message || type);
   }
