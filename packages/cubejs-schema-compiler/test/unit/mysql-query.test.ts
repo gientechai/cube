@@ -104,4 +104,49 @@ describe('ORDER BY on multi-stage JOIN (ambiguous dimension alias)', () => {
       /FROM cte_0 AS q_0 LEFT JOIN cte_2 AS q_1[\s\S]*ORDER BY q_0\.`loan_debt__distr_date_day` ASC/
     );
   });
+
+  it('MysqlQuery uses dimension expressions in GROUP BY for measure-filter queries', async () => {
+    const { compiler, joinGraph, cubeEvaluator } = prepareYamlCompiler(`
+cubes:
+  - name: mymetrics_facts
+    sql: "SELECT 'North' AS region, 100 AS amount UNION ALL SELECT 'South', 200 UNION ALL SELECT 'East', 75"
+    dimensions:
+      - name: region
+        sql: region
+        type: string
+    measures:
+      - name: filtered_ns_amount
+        type: sum
+        sql: amount
+        filters:
+          - sql: "{CUBE}.region IN ('North', 'South')"
+`);
+
+    await compiler.compile();
+
+    const queryOptions = {
+      measures: ['mymetrics_facts.filtered_ns_amount'],
+      dimensions: ['mymetrics_facts.region'],
+    };
+
+    const tesseractQuery = new MysqlQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      { ...queryOptions, useNativeSqlPlanner: true }
+    );
+    const [tesseractSql] = tesseractQuery.buildSqlAndParams();
+    expect(tesseractSql).not.toMatch(/GROUP BY\s+1\b/);
+    expect(tesseractSql).toMatch(/GROUP BY\s+`mymetrics_facts`\.region\b/);
+    expect(tesseractSql).not.toMatch(/ORDER BY\s+`mymetrics_facts__filtered_ns_amount`\s+IS NULL/);
+
+    const jsQuery = new MysqlQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      { ...queryOptions, useNativeSqlPlanner: false }
+    );
+    const [jsSql] = jsQuery.buildSqlAndParams();
+    expect(jsSql).not.toMatch(/GROUP BY\s+1\b/);
+    expect(jsSql).toMatch(/GROUP BY\s+`mymetrics_facts`\.region\b/);
+    expect(jsSql).toMatch(
+      /ORDER BY sum\(CASE WHEN \(`mymetrics_facts`\.region IN \('North', 'South'\)\) THEN `mymetrics_facts`\.amount END\) IS NULL ASC, sum\(CASE WHEN \(`mymetrics_facts`\.region IN \('North', 'South'\)\) THEN `mymetrics_facts`\.amount END\) DESC/
+    );
+  });
 });

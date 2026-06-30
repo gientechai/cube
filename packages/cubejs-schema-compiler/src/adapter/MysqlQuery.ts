@@ -1,5 +1,6 @@
+import R from 'ramda';
 import moment from 'moment-timezone';
-import { getEnv, parseSqlInterval } from '@cubejs-backend/shared';
+import { getEnv, QueryAlias, parseSqlInterval } from '@cubejs-backend/shared';
 import { BaseQuery } from './BaseQuery';
 import { BaseFilter } from './BaseFilter';
 import { UserError } from '../compiler/UserError';
@@ -37,9 +38,28 @@ export class MysqlQuery extends BaseQuery {
    * MySQL cannot use SELECT-list position in `expr IS NULL` patterns: `ORDER BY 1 IS NULL`
    * treats `1` as a literal, not the first column. Use column aliases instead (see
    * `orderHashToString`); `getFieldOrderExpr` adds `q_0.` when JOINs would make aliases ambiguous.
+   *
+   * Aggregate measures must repeat the full expression in ORDER BY — MySQL rejects
+   * `ORDER BY <aggregate_alias>` even when GROUP BY uses column expressions.
    */
   protected usePositionalOrderBy() {
     return false;
+  }
+
+  public getFieldOrderExpr(id: string) {
+    const equalIgnoreCase = (a: string, b: string) => (
+      typeof a === 'string' && typeof b === 'string' && a.toUpperCase() === b.toUpperCase()
+    );
+
+    const measure = this.measures.find(
+      (d) => equalIgnoreCase(d.measure, id) || equalIgnoreCase(d.expressionName, id),
+    );
+
+    if (measure) {
+      return measure.measureSql();
+    }
+
+    return super.getFieldOrderExpr(id);
   }
 
   /**
@@ -65,6 +85,25 @@ export class MysqlQuery extends BaseQuery {
 
   public newFilter(filter) {
     return new MysqlFilter(this, filter);
+  }
+
+  /**
+   * MySQL rejects `ORDER BY <aggregate_alias>` when `GROUP BY` uses positional
+   * indexes (`GROUP BY 1`). Use dimension expressions instead (same approach as MSSQL).
+   */
+  public groupByClause() {
+    if (this.ungrouped) {
+      return '';
+    }
+    const dimensionColumns = R.flatten(
+      this.dimensionsForSelect().map((s) => s.selectColumns() && s.dimensionSql())
+    ).filter((s) => !!s);
+    return dimensionColumns.length ? ` GROUP BY ${dimensionColumns.join(', ')}` : '';
+  }
+
+  public aggregateSubQueryGroupByClause() {
+    const dimensionColumns = this.dimensionColumns(this.escapeColumnName(QueryAlias.AGG_SUB_QUERY_KEYS));
+    return dimensionColumns.length ? ` GROUP BY ${dimensionColumns.join(', ')}` : '';
   }
 
   public castToString(sql: string) {
@@ -220,8 +259,9 @@ export class MysqlQuery extends BaseQuery {
     // NOTE: this template contains a comma; two order expressions are being generated
     templates.expressions.sort = '{{ expr }} IS NULL {% if nulls_first %}DESC{% else %}ASC{% endif %}, {{ expr }} {% if asc %}ASC{% else %}DESC{% endif %}';
     // MySQL: avoid unconditional NULLS FIRST/LAST from BaseQuery (support varies); keep deterministic NULL ordering via JS `orderHashToString`.
-    templates.expressions.order_by =
-      '{% if index %} {{ index }} {% else %} {{ expr }} {% endif %} {% if asc %}ASC{% else %}DESC{% endif %}';
+    // Tesseract: avoid GROUP BY 1,2,3 and positional ORDER BY (MySQL treats `1` in `1 IS NULL` as literal).
+    templates.statements.group_by_exprs = '{{ group_by | map(attribute=\'expr\') | join(\', \') }}';
+    templates.expressions.order_by = '{{ expr }} {% if asc %}ASC{% else %}DESC{% endif %}';
     delete templates.expressions.ilike;
     templates.types.string = 'CHAR';
     templates.types.boolean = 'TINYINT';
