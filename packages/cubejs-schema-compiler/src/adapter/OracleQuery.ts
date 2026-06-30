@@ -76,15 +76,28 @@ export class OracleQuery extends BaseQuery {
     return field;
   }
 
+  private oracleBindExpr(value: string | number): string {
+    const v = String(value);
+    // 已是完整 Oracle 绑定名
+    if (v.startsWith(':"')) {
+      return v;
+    }
+    // Tesseract 内部占位 $_N_$，最终由 params.param 模板统一替换为 :"?'
+    if (/^\$_\d+_\$$/.test(v)) {
+      return v;
+    }
+    return `:"${v}"`;
+  }
+
   public dateTimeCast(value) {
     // Use timezone-aware parsing for ISO 8601 with milliseconds and trailing 'Z', then cast to DATE
     // to preserve index-friendly comparisons against DATE columns.
-    return `CAST(TO_TIMESTAMP_TZ(:"${value}", 'YYYY-MM-DD"T"HH24:MI:SS.FF"Z"') AS DATE)`;
+    return `CAST(TO_TIMESTAMP_TZ(${this.oracleBindExpr(value)}, 'YYYY-MM-DD"T"HH24:MI:SS.FF"Z"') AS DATE)`;
   }
 
   public timeStampCast(value) {
     // Return timezone-aware timestamp for TIMESTAMP comparisons
-    return `TO_TIMESTAMP_TZ(:"${value}", 'YYYY-MM-DD"T"HH24:MI:SS.FF"Z"')`;
+    return `TO_TIMESTAMP_TZ(${this.oracleBindExpr(value)}, 'YYYY-MM-DD"T"HH24:MI:SS.FF"Z"')`;
   }
 
   public timeStampParam(timeDimension) {
@@ -182,6 +195,49 @@ export class OracleQuery extends BaseQuery {
 
   public newFilter(filter) {
     return new OracleFilter(this, filter);
+  }
+
+  /**
+   * Tesseract 模板定制（同 DmQuery 思路）：Oracle 不支持表/子查询别名的 AS、GROUP BY 序号、VALUES、LIMIT。
+   */
+  public sqlTemplates() {
+    const templates = super.sqlTemplates();
+
+    templates.statements.group_by_exprs = '{{ group_by | map(attribute=\'expr\') | join(\', \') }}';
+    templates.expressions.order_by = '{{ expr }} {% if asc %}ASC NULLS FIRST{% else %}DESC NULLS LAST{% endif %}';
+    templates.expressions.query_aliased = '{{ query }} {{ quoted_alias }}';
+    templates.statements.select = '{% if ctes %} WITH \n' +
+      '{{ ctes | join(\',\n\') }}\n' +
+      '{% endif %}' +
+      'SELECT {% if distinct %}DISTINCT {% endif %}' +
+      '{{ select_concat | map(attribute=\'aliased\') | join(\', \') }} {% if from %}\n' +
+      'FROM (\n' +
+      '{{ from | indent(2, true) }}\n' +
+      ') {{ from_alias }}{% elif from_prepared %}\n' +
+      'FROM {{ from_prepared }}' +
+      '{% endif %}' +
+      '{% for join in joins %}\n{{ join }}{% endfor %}' +
+      '{% if filter %}\nWHERE {{ filter }}{% endif %}' +
+      '{% if group_by %}\nGROUP BY {{ group_by }}{% endif %}' +
+      '{% if having %}\nHAVING {{ having }}{% endif %}' +
+      '{% if order_by %}\nORDER BY {{ order_by | map(attribute=\'expr\') | join(\', \') }}' +
+      '{% if limit is not none or offset is not none %}\nOFFSET {% if offset is not none %}{{ offset }}{% else %}0{% endif %} ROWS' +
+      '{% if limit is not none %}\nFETCH NEXT {{ limit }} ROWS ONLY{% endif %}{% endif %}' +
+      '{% else %}{% if limit is not none %}\nFETCH FIRST {{ limit }} ROWS ONLY{% endif %}{% endif %}';
+    templates.statements.calc_groups_join = templates.statements.calc_groups_join.replace(
+      ') AS {{ group.alias }}',
+      ') {{ group.alias }}',
+    );
+    templates.statements.time_series_select = '{% for time_item in seria %}'
+      + 'SELECT CAST(TO_TIMESTAMP_TZ(\'{{ time_item[0] }}\', \'YYYY-MM-DD"T"HH24:MI:SS.FF"Z"\') AS DATE) AS "date_from", '
+      + 'CAST(TO_TIMESTAMP_TZ(\'{{ time_item[1] }}\', \'YYYY-MM-DD"T"HH24:MI:SS.FF"Z"\') AS DATE) AS "date_to" FROM DUAL'
+      + '{% if not loop.last %} UNION ALL {% endif %}'
+      + '{% endfor %}';
+    templates.tesseract.ilike = '{{ expr }} {% if negated %}NOT {% endif %}LIKE {{ pattern }}';
+    // Tesseract 默认 `?` 占位符；Oracle/oracledb 需要与 JS 路径一致的命名绑定
+    templates.params.param = ':"?"';
+
+    return templates;
   }
 
   public unixTimestampSql() {

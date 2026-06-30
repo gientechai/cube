@@ -306,6 +306,97 @@ describe('OracleQuery', () => {
     expect(sql).not.toMatch(/GROUP BY\s+\d+/);
   });
 
+  it('sqlTemplates use column expressions for Tesseract GROUP BY/ORDER BY and Oracle time_series', async () => {
+    await compiler.compile();
+
+    const query = new OracleQuery({ joinGraph, cubeEvaluator, compiler }, {
+      measures: ['visitors.count'],
+      timezone: 'UTC',
+    });
+    const templates = query.sqlTemplates();
+
+    expect(templates.statements.group_by_exprs).toContain("attribute='expr'");
+    expect(templates.statements.group_by_exprs).not.toContain("attribute='index'");
+    expect(templates.expressions.order_by).toContain('{{ expr }}');
+    expect(templates.expressions.order_by).not.toContain('index');
+    expect(templates.expressions.query_aliased).not.toContain(' AS ');
+    expect(templates.statements.select).not.toContain(') AS {{ from_alias }}');
+    expect(templates.statements.select).not.toMatch(/\bLIMIT\b/);
+    expect(templates.statements.select).toContain('FETCH NEXT');
+    expect(templates.statements.select).toContain('FETCH FIRST');
+    expect(templates.statements.select).toContain('OFFSET');
+    expect(templates.params.param).toBe(':"?"');
+    expect(templates.statements.time_series_select).toContain('FROM DUAL');
+    expect(templates.statements.time_series_select).toContain('UNION ALL');
+    expect(templates.statements.time_series_select).not.toContain('VALUES');
+  });
+
+  it('Tesseract planner does not emit AS table alias or ordinal GROUP BY', async () => {
+    await compiler.compile();
+
+    const query = new OracleQuery({ joinGraph, cubeEvaluator, compiler }, {
+      useNativeSqlPlanner: true,
+      measures: ['visitors.count'],
+      timeDimensions: [{
+        dimension: 'visitors.createdAt',
+        granularity: 'day',
+        dateRange: ['2020-01-01', '2020-01-31'],
+      }],
+      timezone: 'UTC',
+    });
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).not.toMatch(/\bFROM\s+\S+\s+AS\s+"/i);
+    expect(sql).not.toMatch(/\)\s+AS\s+"/i);
+    expect(sql).not.toMatch(/GROUP BY\s+\d+/);
+    expect(sql).toMatch(/GROUP BY.*created_at/i);
+  });
+
+  it('Tesseract planner uses Oracle bind placeholders in filters', async () => {
+    await compiler.compile();
+
+    const query = new OracleQuery({ joinGraph, cubeEvaluator, compiler }, {
+      useNativeSqlPlanner: true,
+      measures: ['visitors.count'],
+      filters: [{
+        member: 'visitors.id',
+        operator: 'lt',
+        values: ['30'],
+      }],
+      timezone: 'UTC',
+    });
+
+    const [sql, params] = query.buildSqlAndParams();
+
+    expect(sql).toMatch(/<\s*:"\?"/);
+    expect(sql).not.toMatch(/<\s*\?(?!")/);
+    expect(sql).not.toMatch(/:\s*":\s*"\?"/);
+    expect(params).toEqual(['30']);
+  });
+
+  it('Tesseract planner does not double-wrap timestamp bind placeholders', async () => {
+    await compiler.compile();
+
+    const query = new OracleQuery({ joinGraph, cubeEvaluator, compiler }, {
+      useNativeSqlPlanner: true,
+      measures: ['visitors.count'],
+      timeDimensions: [{
+        dimension: 'visitors.createdAt',
+        granularity: 'day',
+        dateRange: ['2020-01-01', '2020-01-31'],
+      }],
+      timezone: 'UTC',
+    });
+
+    const [sql, params] = query.buildSqlAndParams();
+
+    expect(sql).toMatch(/TO_TIMESTAMP_TZ\(:"\?",/);
+    expect(sql).not.toMatch(/TO_TIMESTAMP_TZ\(:"\?"",/);
+    expect(sql).not.toMatch(/:\s*":\s*"\?"/);
+    expect(params.length).toBeGreaterThanOrEqual(2);
+  });
+
   it('handles time dimension without granularity in filter', async () => {
     await compiler.compile();
 
