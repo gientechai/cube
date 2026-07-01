@@ -14,6 +14,7 @@
  * - overTimeSeriesSelect：用 WITH DM_BASE AS (...) 替代子查询别名，避免达梦解析错误。
  * - addInterval/subtractInterval：仅「整天」且无时分秒偏移时改用 DATE±N，避免 NUMTODSINTERVAL 升为 TIMESTAMP后与 TO_TIMESTAMP_TZ比较在 DM 上报类型不匹配。
  * - withTimeDimensionDateRangeFromFilters：将 filters.inDateRange 提升到 timeDimensions.dateRange，供 Tesseract rolling window 使用。
+ * - generated_time_series_*：DUAL 上 CONNECT BY 生成 gen.lv，再 CROSS JOIN bounds 展开时间轴；无 dateRange 时从 GetDateRange 的 MIN/MAX 推断范围。
  */
 import { parseSqlInterval } from '@cubejs-backend/shared';
 import { OracleQuery } from './OracleQuery';
@@ -67,7 +68,6 @@ export class DmQuery extends OracleQuery {
   }
 
   /**
-   * Tesseract rolling window on DM requires dateRange on timeDimensions (no generate_series fallback).
    * Frontends often send the range only as filters.inDateRange — promote it for time series planning.
    */
   static withTimeDimensionDateRangeFromFilters(options: QueryOptions): QueryOptions {
@@ -258,6 +258,114 @@ export class DmQuery extends OracleQuery {
     return `CAST(TO_TIMESTAMP_TZ('${isoTimestamp}', 'YYYY-MM-DD"T"HH24:MI:SS.FF"Z"') AS TIMESTAMP)`;
   }
 
+  /** Tesseract 自定义粒度 rolling window 也走 generated time series。 */
+  public supportGeneratedSeriesForCustomTd(): boolean {
+    return true;
+  }
+
+  /**
+   * 达梦 RECURSIVE WITH 受 CTE_MAXRECURSION 限制；在业务 CTE 上 CONNECT BY 会触发 -4030 循环检测。
+   * 仅在 DUAL 上 CONNECT BY 生成 LEVEL，再 CROSS JOIN bounds（Oracle 标准写法）。
+   *
+   * ADD_MONTHS 必须作用在 DATE 上再 CAST 为 TIMESTAMP；直接对 TIMESTAMP 做 ADD_MONTHS 后减 NUMTODSINTERVAL
+   * 会在 rolling join 中与 TRUNC(..., 'MM') 的 DATE 比较时触发 DM [-6105] 数据类型不匹配。
+   */
+  private static generatedTimeSeriesDateAnchor(column: string): string {
+    return `CAST(${column} AS DATE)`;
+  }
+
+  private static generatedTimeSeriesTimestampAnchor(column: string): string {
+    return `CAST(CAST(${column} AS DATE) AS TIMESTAMP)`;
+  }
+
+  private static generatedTimeSeriesDateFromAtLevel(
+    anchorDate: string,
+    anchorTs: string,
+    levelExpr = 'LEVEL',
+  ): string {
+    return '{% set g = granularity | replace("\'", "") | trim %}'
+      + `{% if g == '1 second' %}${anchorTs} + NUMTODSINTERVAL(${levelExpr} - 1, 'SECOND')`
+      + `{% elif g == '1 minute' %}${anchorTs} + NUMTODSINTERVAL(${levelExpr} - 1, 'MINUTE')`
+      + `{% elif g == '1 hour' %}${anchorTs} + NUMTODSINTERVAL(${levelExpr} - 1, 'HOUR')`
+      + `{% elif g == '1 day' %}${anchorTs} + NUMTODSINTERVAL(${levelExpr} - 1, 'DAY')`
+      + `{% elif g == '1 week' %}${anchorTs} + NUMTODSINTERVAL((${levelExpr} - 1) * 7, 'DAY')`
+      + `{% elif g == '1 month' %}CAST(ADD_MONTHS(${anchorDate}, ${levelExpr} - 1) AS TIMESTAMP)`
+      + `{% elif g == '3 month' %}CAST(ADD_MONTHS(${anchorDate}, (${levelExpr} - 1) * 3) AS TIMESTAMP)`
+      + `{% elif g == '1 quarter' %}CAST(ADD_MONTHS(${anchorDate}, (${levelExpr} - 1) * 3) AS TIMESTAMP)`
+      + `{% elif g == '1 year' %}CAST(ADD_MONTHS(${anchorDate}, (${levelExpr} - 1) * 12) AS TIMESTAMP)`
+      + `{% else %}${anchorTs} + NUMTODSINTERVAL(${levelExpr} - 1, 'DAY'){% endif %}`;
+  }
+
+  private static generatedTimeSeriesDateToAtLevel(
+    anchorDate: string,
+    anchorTs: string,
+    levelExpr = 'LEVEL',
+  ): string {
+    return '{% set g = granularity | replace("\'", "") | trim %}'
+      + `{% if g == '1 second' %}${anchorTs} + NUMTODSINTERVAL(${levelExpr}, 'SECOND') - NUMTODSINTERVAL(1, 'SECOND')`
+      + `{% elif g == '1 minute' %}${anchorTs} + NUMTODSINTERVAL(${levelExpr}, 'MINUTE') - NUMTODSINTERVAL(1, 'SECOND')`
+      + `{% elif g == '1 hour' %}${anchorTs} + NUMTODSINTERVAL(${levelExpr}, 'HOUR') - NUMTODSINTERVAL(1, 'SECOND')`
+      + `{% elif g == '1 day' %}${anchorTs} + NUMTODSINTERVAL(${levelExpr}, 'DAY') - NUMTODSINTERVAL(1, 'SECOND')`
+      + `{% elif g == '1 week' %}${anchorTs} + NUMTODSINTERVAL(${levelExpr} * 7, 'DAY') - NUMTODSINTERVAL(1, 'SECOND')`
+      + `{% elif g == '1 month' %}CAST(ADD_MONTHS(${anchorDate}, ${levelExpr}) AS TIMESTAMP) - NUMTODSINTERVAL(1, 'SECOND')`
+      + `{% elif g == '3 month' %}CAST(ADD_MONTHS(${anchorDate}, ${levelExpr} * 3) AS TIMESTAMP) - NUMTODSINTERVAL(1, 'SECOND')`
+      + `{% elif g == '1 quarter' %}CAST(ADD_MONTHS(${anchorDate}, ${levelExpr} * 3) AS TIMESTAMP) - NUMTODSINTERVAL(1, 'SECOND')`
+      + `{% elif g == '1 year' %}CAST(ADD_MONTHS(${anchorDate}, ${levelExpr} * 12) AS TIMESTAMP) - NUMTODSINTERVAL(1, 'SECOND')`
+      + `{% else %}${anchorTs} + NUMTODSINTERVAL(${levelExpr}, 'DAY') - NUMTODSINTERVAL(1, 'SECOND'){% endif %}`;
+  }
+
+  private static generatedTimeSeriesConnectByLevelLimit(minCol: string, maxCol: string): string {
+    const minDate = `CAST(${minCol} AS DATE)`;
+    const maxDate = `CAST(${maxCol} AS DATE)`;
+    return '{% set g = granularity | replace("\'", "") | trim %}'
+      + `{% if g == '1 week' %}TRUNC((${maxDate} - ${minDate} + 7) / 7)`
+      + `{% elif g == '1 month' %}FLOOR(MONTHS_BETWEEN(${maxDate}, ${minDate})) + 1`
+      + `{% elif g == '3 month' %}FLOOR(MONTHS_BETWEEN(${maxDate}, ${minDate}) / 3) + 1`
+      + `{% elif g == '1 quarter' %}FLOOR(MONTHS_BETWEEN(${maxDate}, ${minDate}) / 3) + 1`
+      + `{% elif g == '1 year' %}FLOOR(MONTHS_BETWEEN(${maxDate}, ${minDate}) / 12) + 1`
+      + `{% elif g == '1 hour' %}(${maxDate} - ${minDate} + 1) * 24`
+      + `{% else %}(${maxDate} - ${minDate} + 1){% endif %}`;
+  }
+
+  /** CONNECT BY 只作用于 DUAL，避免达梦 -4030「用户数据中的 CONNECT BY 循环」。 */
+  private static generatedTimeSeriesDualLevelJoin(levelLimitSql: string): string {
+    return 'CROSS JOIN (\n'
+      + '  SELECT LEVEL AS lv\n'
+      + '  FROM DUAL\n'
+      + `  CONNECT BY LEVEL <= ${levelLimitSql}\n`
+      + ') gen';
+  }
+
+  private static generatedTimeSeriesSelectTemplate(): string {
+    const anchorDate = DmQuery.generatedTimeSeriesDateAnchor('{{ start }}');
+    const anchorTs = DmQuery.generatedTimeSeriesTimestampAnchor('{{ start }}');
+    const levelLimit = DmQuery.generatedTimeSeriesConnectByLevelLimit('{{ start }}', '{{ end }}');
+    return 'SELECT\n'
+      + `  ${DmQuery.generatedTimeSeriesDateFromAtLevel(anchorDate, anchorTs, 'gen.lv')} AS "date_from",\n`
+      + `  ${DmQuery.generatedTimeSeriesDateToAtLevel(anchorDate, anchorTs, 'gen.lv')} AS "date_to"\n`
+      + 'FROM DUAL\n'
+      + `${DmQuery.generatedTimeSeriesDualLevelJoin(levelLimit)}`;
+  }
+
+  private static generatedTimeSeriesWithCteRangeSourceTemplate(): string {
+    const boundsMin = 'bounds."{{ min_name }}"';
+    const anchorDate = DmQuery.generatedTimeSeriesDateAnchor(boundsMin);
+    const anchorTs = DmQuery.generatedTimeSeriesTimestampAnchor(boundsMin);
+    const levelLimit = `(\n`
+      + '    SELECT '
+      + `${DmQuery.generatedTimeSeriesConnectByLevelLimit('{{ range_source }}.{{ min_name }}', '{{ range_source }}.{{ max_name }}')}\n`
+      + '    FROM {{ range_source }}\n'
+      + '  )';
+    return 'SELECT\n'
+      + `  ${DmQuery.generatedTimeSeriesDateFromAtLevel(anchorDate, anchorTs, 'gen.lv')} AS "date_from",\n`
+      + `  ${DmQuery.generatedTimeSeriesDateToAtLevel(anchorDate, anchorTs, 'gen.lv')} AS "date_to"\n`
+      + 'FROM (\n'
+      + '  SELECT {{ range_source }}.{{ min_name }} AS "{{ min_name }}", {{ range_source }}.{{ max_name }} AS "{{ max_name }}"\n'
+      + '  FROM {{ range_source }}\n'
+      + ') bounds\n'
+      + `${DmQuery.generatedTimeSeriesDualLevelJoin(levelLimit)}`;
+  }
+
   /**
    * 达梦不支持 `FROM (VALUES ...) AS t` 语法；与 Oracle 一样用 UNION ALL + DUAL 生成时间序列。
    */
@@ -287,6 +395,9 @@ export class DmQuery extends OracleQuery {
       + 'CAST(TO_TIMESTAMP_TZ(\'{{ time_item[1] }}\', \'YYYY-MM-DD"T"HH24:MI:SS.FF"Z"\') AS TIMESTAMP) AS "date_to" FROM DUAL'
       + '{% if not loop.last %} UNION ALL {% endif %}'
       + '{% endfor %}';
+    templates.statements.generated_time_series_select = DmQuery.generatedTimeSeriesSelectTemplate();
+    templates.statements.generated_time_series_with_cte_range_source =
+      DmQuery.generatedTimeSeriesWithCteRangeSourceTemplate();
     return templates;
   }
 
@@ -352,7 +463,7 @@ export class DmQuery extends OracleQuery {
       // DM: TRUNC(date, 'ss') 会报「无效的时间格式掩码」，用“格式化到秒再解析”实现秒级截断
       return `TO_DATE(TO_CHAR(${dimension}, 'YYYY-MM-DD HH24:MI:SS'), 'YYYY-MM-DD HH24:MI:SS')`;
     }
-    return `TRUNC(${dimension}, '${GRANULARITY_VALUE[granularity]}')`;
+    return `CAST(TRUNC(${dimension}, '${GRANULARITY_VALUE[granularity]}') AS TIMESTAMP)`;
   }
   public supportsFilterClause() {
     return true;
