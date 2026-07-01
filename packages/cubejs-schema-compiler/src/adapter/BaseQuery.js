@@ -5938,7 +5938,9 @@ export class BaseQuery {
           return;
         }
         pushedDimensionPaths.add(path);
-        unaggregatedColumns.push(`${dimensionSourceAlias}.${d.aliasName()}`);
+        // Project keys columns under flat aliases so windowed_data can reference them
+        // (base_data has no `keys` table alias — only the projected column names).
+        unaggregatedColumns.push(`${dimensionSourceAlias}.${d.aliasName()} as ${d.aliasName()}`);
         dimensionsForSemiAdditiveRemap.push(d);
       });
     } else {
