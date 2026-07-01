@@ -56,6 +56,12 @@ export class MysqlQuery extends BaseQuery {
     );
 
     if (measure) {
+      // Semi-additive measures are aggregated inside a CTE subquery (q_0). The outer
+      // ORDER BY only sees projected aliases — repeating measureSql() references
+      // windowed_data-only columns such as `_…_for_ordering` and fails on MySQL.
+      if (measure.isSemiAdditive && measure.isSemiAdditive()) {
+        return measure.aliasName();
+      }
       return measure.measureSql();
     }
 
