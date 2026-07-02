@@ -54,7 +54,7 @@ describe('semi-additive measure schema filters', () => {
     const [sql] = query.buildSqlAndParams();
 
     expect(sql).toMatch(/CASE WHEN .*subject.*=.*'语文'.*THEN.*score/i);
-    // 窗口 MAX 仍对所有行取最晚日期，不按 filter 收窄
+    // 期初/期末时点在同一时间桶内全局统一；filter 只收窄 raw 取值，窗口 min/max 仍看全部分区行
     expect(sql).toMatch(/MAX\("_score1__exam_date_for_ordering"\) OVER/i);
     expect(sql).not.toMatch(/MAX\(CASE WHEN.*_raw IS NOT NULL/i);
   });
@@ -179,6 +179,107 @@ describe('semi-additive calculated measure references', () => {
     expect(sql).toMatch(/WITH base_data AS/i);
     expect(sql).toMatch(/(?:AS )?q_0[\s\S]*ORDER BY "score1__fuhezhibiao" DESC NULLS LAST/i);
     expect(sql).not.toMatch(/ORDER BY[\s\S]*sum\("score1"\.score\)/i);
+  });
+});
+
+describe('semi-additive multiple time granularities in base_data', () => {
+  const { compiler, joinGraph, cubeEvaluator } = prepareJsCompiler(`
+    cube(\`loan_detail_1\`, {
+      sql_table: \`loan_stand_book_detail_list_320\`,
+
+      dimensions: {
+        distr_date: {
+          sql: \`\${CUBE}.distr_date\`,
+          type: 'time',
+        },
+        cust_type: {
+          sql: \`\${CUBE}.cust_type\`,
+          type: 'string',
+        },
+      },
+
+      measures: {
+        loan_bal1: {
+          type: 'sum',
+          sql: 'loan_bal',
+          filters: [{ sql: \`\${CUBE}.cust_type = '民营企业'\` }],
+          nonAdditiveDimension: {
+            name: 'distr_date',
+            windowChoice: 'min',
+          },
+        },
+        xxsxaw: {
+          type: 'sum',
+          sql: 'loan_bal',
+          filters: [{ sql: \`\${CUBE}.cust_type = '外资企业'\` }],
+          nonAdditiveDimension: {
+            name: 'distr_date',
+            windowChoice: 'min',
+          },
+        },
+        fu_11: {
+          type: 'number',
+          sql: \`(\${loan_bal1} + \${xxsxaw}) / 2\`,
+        },
+      },
+    })
+  `);
+
+  it('projects all time granularities into base_data for composite semi-additive measures', async () => {
+    await compiler.compile();
+
+    const query = new MysqlQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['loan_detail_1.fu_11'],
+        filters: [{
+          member: 'loan_detail_1.distr_date',
+          operator: 'inDateRange',
+          values: ['2026-06-01', '2026-07-02'],
+        }],
+        timeDimensions: [
+          { dimension: 'loan_detail_1.distr_date', granularity: 'day' },
+          { dimension: 'loan_detail_1.distr_date', granularity: 'month' },
+        ],
+        order: [{ id: 'loan_detail_1.distr_date', desc: false }],
+        limit: 100,
+        timezone: 'UTC',
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).toMatch(/WITH base_data AS/i);
+    expect(sql).toMatch(/`loan_detail_1__distr_date_day`/i);
+    expect(sql).toMatch(/`loan_detail_1__distr_date_month`/i);
+    expect(sql).toMatch(/SELECT `loan_detail_1__distr_date_day`, `loan_detail_1__distr_date_month`/i);
+    expect(sql).not.toMatch(/Unknown column/i);
+  });
+
+  it('partitions semi-additive window by finest granularity when year and month are both queried', async () => {
+    await compiler.compile();
+
+    const query = new MysqlQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['loan_detail_1.fu_11'],
+        filters: [{
+          member: 'loan_detail_1.distr_date',
+          operator: 'inDateRange',
+          values: ['2026-03-01', '2026-04-03'],
+        }],
+        timeDimensions: [
+          { dimension: 'loan_detail_1.distr_date', granularity: 'year' },
+          { dimension: 'loan_detail_1.distr_date', granularity: 'month' },
+        ],
+        timezone: 'UTC',
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).toMatch(/PARTITION BY[\s\S]*%Y-%m-01/i);
+    expect(sql).not.toMatch(/PARTITION BY[\s\S]*%Y-01-01T00:00:00\.000/i);
   });
 });
 

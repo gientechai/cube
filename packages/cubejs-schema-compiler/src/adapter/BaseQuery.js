@@ -5932,6 +5932,23 @@ export class BaseQuery {
   }
 
   /**
+   * Unique key for projecting a dimension into semi-additive base_data/windowed_data.
+   * Time dimensions with different granularities share expressionPath() but need
+   * separate columns (e.g. distr_date day + month).
+   *
+   * @param {*} dimension
+   * @returns {string|null}
+   */
+  semiAdditiveDimensionProjectionKey(dimension) {
+    const path = dimension.expressionPath && dimension.expressionPath();
+    if (!path) {
+      return null;
+    }
+    const granularity = dimension.granularity;
+    return granularity ? `${path}.${granularity}` : path;
+  }
+
+  /**
    * 在半累加 CTE（base_data / windowed_data）上构建指标查询。
    * regularMeasuresSubQuery 与 aggregateSubQuery（multiplied + 跨 cube 过滤）共用。
    *
@@ -5959,7 +5976,7 @@ export class BaseQuery {
     const dimensionsForSemiAdditiveRemap = [];
 
     const pushDimensionColumns = (d) => {
-      const path = d.expressionPath && d.expressionPath();
+      const path = this.semiAdditiveDimensionProjectionKey(d);
       if (!path || pushedDimensionPaths.has(path)) {
         return;
       }
@@ -5973,7 +5990,7 @@ export class BaseQuery {
 
     if (dimensionSourceAlias) {
       this.dimensionsForSelect().forEach((d) => {
-        const path = d.expressionPath && d.expressionPath();
+        const path = this.semiAdditiveDimensionProjectionKey(d);
         if (!path || pushedDimensionPaths.has(path)) {
           return;
         }
@@ -6013,7 +6030,7 @@ export class BaseQuery {
       config.windowGroupings.forEach((grouping) => {
         const groupingPath = grouping.includes('.') ? grouping : `${cubeName}.${grouping}`;
         const dim = this.newDimension(groupingPath);
-        const path = dim.expressionPath && dim.expressionPath();
+        const path = this.semiAdditiveDimensionProjectionKey(dim);
         if (!path || pushedDimensionPaths.has(path)) {
           return;
         }
@@ -6189,6 +6206,7 @@ export class BaseQuery {
       // 根据 windowChoice 选择窗口函数类型
       // first/min: 使用 MIN(ds) - 找最早时间
       // last/max: 使用 MAX(ds) - 找最晚时间
+      // 期初/期末时点在同一时间桶内全局统一（不按 measure.filters 子集分别取 min/max）
       const ascendingChoices = ['first', 'min'];
       const descendingChoices = ['last', 'max'];
 
@@ -6298,24 +6316,28 @@ SELECT ${selectColumns} FROM windowed_data${semiAdditiveGroupByClause}`;
     // 在 regularMeasuresSubQuery 的上下文中，this.timeDimensions 应该包含查询的时间维度
     const queryTimeDimensions = this.timeDimensions || [];
 
-    // 查找匹配的时间维度
-    const matchingTimeDim = queryTimeDimensions.find(td => {
+    const matchingTimeDims = queryTimeDimensions.filter(td => {
       const tdPath = td.dimension || `${td.cube ? td.cube().name : cubeName}.${td.name}`;
       return tdPath === dimensionPath || tdPath.endsWith(`.${config.name}`);
     });
 
-    if (matchingTimeDim && matchingTimeDim.granularity) {
-      // 找到了粒度信息，构建 PARTITION BY 子句
-      // 在 windowed_data CTE 中，需要使用 base_data 中已经选择的日期列
-      // 获取该日期列在 windowed_data 中的别名
+    let finestGranularity = null;
+    matchingTimeDims.forEach((td) => {
+      if (td.granularity) {
+        finestGranularity = finestGranularity
+          ? this.minGranularity(finestGranularity, td.granularity)
+          : td.granularity;
+      }
+    });
+
+    if (finestGranularity) {
+      // 多粒度联查时窗口按最细粒度分区（如 year+month → month；day+month → day）
       const dimension = this.newDimension(dimensionPath);
       const unescapedAlias = dimension.unescapedAliasName();
       const columnAlias = `_${unescapedAlias}_for_ordering`;
       const escapedColumnAlias = this.escapeColumnName(columnAlias);
 
-      // 使用 timeGroupedColumn() 生成时间分组表达式
-      // 将其应用到 windowed_data 中的日期列
-      const timeGroupedSql = this.timeGroupedColumn(matchingTimeDim.granularity, escapedColumnAlias);
+      const timeGroupedSql = this.timeGroupedColumn(finestGranularity, escapedColumnAlias);
       clauses.push(timeGroupedSql);
     }
 
