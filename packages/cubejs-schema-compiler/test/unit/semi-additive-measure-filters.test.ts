@@ -1,4 +1,6 @@
 /* eslint-disable no-restricted-syntax */
+import { DmQuery } from '../../src/adapter/DmQuery';
+import { MysqlQuery } from '../../src/adapter/MysqlQuery';
 import { PostgresQuery } from '../../src/adapter/PostgresQuery';
 import { prepareJsCompiler } from './PrepareCompiler';
 
@@ -117,5 +119,119 @@ describe('semi-additive calculated measure references', () => {
     expect(sql).toMatch(/MAX\("_score1__exam_date_for_ordering"\) OVER/i);
     expect(sql).toMatch(/MIN\("_score1__exam_date_for_ordering"\) OVER/i);
     expect(sql).not.toMatch(/sum\("score1"\.score\)\s*\/\s*count\(distinct "score1"\.score\)/i);
+  });
+
+  it('orders calculated semi-additive measure by alias on MySQL (q_0 wrap)', async () => {
+    await compiler.compile();
+
+    const query = new MysqlQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['score1.fuhezhibiao'],
+        dimensions: ['score1.subject'],
+        order: [{ id: 'score1.fuhezhibiao', desc: true }],
+        limit: 100,
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).toMatch(/WITH base_data AS/i);
+    expect(sql).toMatch(/AS q_0[\s\S]*ORDER BY `score1__fuhezhibiao` IS NULL ASC, `score1__fuhezhibiao` DESC/i);
+    expect(sql).not.toMatch(/ORDER BY[\s\S]*sum\("score1"\.score\)/i);
+  });
+
+  it('orders calculated semi-additive measure by alias on Postgres (q_0 wrap)', async () => {
+    await compiler.compile();
+
+    const query = new PostgresQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['score1.fuhezhibiao'],
+        dimensions: ['score1.subject'],
+        order: [{ id: 'score1.fuhezhibiao', desc: true }],
+        limit: 100,
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).toMatch(/WITH base_data AS/i);
+    expect(sql).toMatch(/(?:AS )?q_0[\s\S]*ORDER BY "score1__fuhezhibiao" DESC NULLS LAST/i);
+    expect(sql).not.toMatch(/ORDER BY[\s\S]*sum\("score1"\.score\)/i);
+  });
+
+  it('orders calculated semi-additive measure by alias on DM (q_0 wrap)', async () => {
+    await compiler.compile();
+
+    const query = new DmQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['score1.fuhezhibiao'],
+        dimensions: ['score1.subject'],
+        order: [{ id: 'score1.fuhezhibiao', desc: true }],
+        limit: 100,
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).toMatch(/WITH base_data AS/i);
+    expect(sql).toMatch(/(?:AS )?q_0[\s\S]*ORDER BY "score1__fuhezhibiao" DESC NULLS LAST/i);
+    expect(sql).not.toMatch(/ORDER BY[\s\S]*sum\("score1"\.score\)/i);
+  });
+});
+
+describe('semi-additive windowGroupings dimensions in base_data', () => {
+  const { compiler, joinGraph, cubeEvaluator } = prepareJsCompiler(`
+    cube(\`facts\`, {
+      sql: \`SELECT * FROM xss.cube_metrics_facts\`,
+
+      dimensions: {
+        city: {
+          sql: \`\${CUBE}.city\`,
+          type: 'string',
+        },
+        cityCode: {
+          sql: \`\${CUBE}.city_code\`,
+          type: 'string',
+        },
+        statDt: {
+          sql: \`\${CUBE}.stat_dt\`,
+          type: 'time',
+        },
+      },
+
+      measures: {
+        balanceEnd: {
+          sql: \`\${CUBE}.balance_snapshot\`,
+          type: 'sum',
+          nonAdditiveDimension: {
+            name: 'statDt',
+            windowChoice: 'max',
+            windowGroupings: ['city'],
+          },
+        },
+      },
+    })
+  `);
+
+  it('projects windowGroupings dimensions into base_data even when not in query dimensions', async () => {
+    await compiler.compile();
+
+    const query = new PostgresQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['facts.balanceEnd'],
+        dimensions: ['facts.cityCode'],
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).toMatch(/WITH base_data AS/i);
+    expect(sql).toMatch(/"facts__city"/i);
+    expect(sql).toMatch(/"facts__city_code"/i);
+    expect(sql).toMatch(/PARTITION BY "facts__city"/i);
   });
 });

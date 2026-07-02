@@ -3282,6 +3282,33 @@ export class BaseQuery {
    * @returns {string|null}
    */
   getFieldOrderExpr(id) {
+    const equalIgnoreCase = (a, b) => (
+      typeof a === 'string' && typeof b === 'string' && a.toUpperCase() === b.toUpperCase()
+    );
+
+    const measure = this.measures.find(
+      (d) => equalIgnoreCase(d.measure, id) || equalIgnoreCase(d.expressionName, id),
+    );
+
+    // Semi-additive queries aggregate inside base_data/windowed_data and are often
+    // wrapped as q_0. The outer ORDER BY only sees projected aliases — repeating
+    // measureSql() or a wrong SELECT position references windowed_data-only columns
+    // (MySQL/DM error) or sorts by the wrong column (Postgres positional drift).
+    // Calculated measures (type: number) that reference semi-additive bases always
+    // take the q_0 wrap path for the same reason.
+    //
+    // Safe here because semi-additive queries never use simpleQuery (see buildSqlAndParams
+    // fallback guard). MySQL non-semi-additive aggregates still override below in MysqlQuery.
+    if (
+      measure
+      && (
+        (typeof measure.isSemiAdditive === 'function' && measure.isSemiAdditive())
+        || this.queryReferencesSemiAdditiveMeasures()
+      )
+    ) {
+      return measure.aliasName();
+    }
+
     const index = this.getFieldIndex(id);
     if (index === null) {
       return null;
@@ -5974,6 +6001,24 @@ export class BaseQuery {
       if (!pushedDimensionPaths.has(p)) {
         pushDimensionColumns(this.newDimension(p));
       }
+    });
+
+    // windowGroupings 维度必须出现在 base_data，否则 windowed_data 的 PARTITION BY 引用不存在的列别名
+    semiAdditiveMeasuresForCte.forEach((measure) => {
+      const config = measure.nonAdditiveConfig;
+      if (!config?.windowGroupings?.length) {
+        return;
+      }
+      const cubeName = measure.cube().name;
+      config.windowGroupings.forEach((grouping) => {
+        const groupingPath = grouping.includes('.') ? grouping : `${cubeName}.${grouping}`;
+        const dim = this.newDimension(groupingPath);
+        const path = dim.expressionPath && dim.expressionPath();
+        if (!path || pushedDimensionPaths.has(path)) {
+          return;
+        }
+        pushDimensionColumns(dim);
+      });
     });
 
     semiAdditiveMeasuresForCte.forEach(measure => {
