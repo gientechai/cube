@@ -1,9 +1,9 @@
 # Cube 行列权限（access_policy）方案设计
 
-> **文档版本**：v1.0  
-> **编写日期**：2026-06-25  
-> **适用范围**：GienBI 指标平台（Java 配置端 + Cube 指标引擎 + Datart 权限模型）  
-> **文档目的**：供技术与管理评审，说明行列权限下沉至 Cube 的产品目标、架构设计、核心语义及与 Datart 的对接方式  
+> **文档版本**：v1.0
+> **编写日期**：2026-06-25
+> **适用范围**：GienBI 指标平台（Java 配置端 + Cube 指标引擎 + Datart 权限模型）
+> **文档目的**：供技术与管理评审，说明行列权限下沉至 Cube 的产品目标、架构设计、核心语义及与 Datart 的对接方式
 > **实现基线**：Cube fork `v1.6.61`（`@cubejs-backend/server-core` / `schema-compiler`）
 
 ---
@@ -173,18 +173,21 @@ Meta API 中 `plain` 与 `masked` 均为 `isVisible: true`；查询时 `masked` 
 
 ### 3.4 脱敏设计
 
-脱敏分两层配置，不可混淆：
+脱敏分 **授权** 与 **表达式** 两层；表达式又分 **SQL 层** 与 **结果层** 两种（详见 [脱敏 mask 与 result_mask 说明](./Cube行列权限-脱敏mask与result_mask说明.md)）：
 
 | 层级 | 配置位置 | 作用 |
 |------|----------|------|
-| **脱敏表达式** | 维度/指标的 `mask` 或 `mask.sql` | 定义脱敏后的值（如 `-1`、`***`、自定义 SQL） |
-| **脱敏授权** | `access_policy.member_masking` | 定义哪个角色对该列走脱敏 |
+| **脱敏授权** | `access_policy.member_masking` | 定义哪个角色对该列走脱敏（写入 `maskedMembers`） |
+| **SQL 脱敏** | 维度/指标的 `mask` 或 `mask.sql` | SQL 编译阶段替换表达式（Cube 原生，可选） |
+| **结果脱敏** | 维度/指标的 `result_mask`（`type` + `config`） | 查询执行后在 `data` 中脱敏，不影响 GROUP BY |
 
 **关键规则**：
 
 1. 启用脱敏时，`member_level` 必须 **exclude** 该列，再用 `member_masking.includes` 包含，否则 `includes: '*'` 会先判为 plain，脱敏不触发。
-2. 同一维度只有 **一份** `mask` 定义；不同角色需要不同脱敏值时，在 `mask.sql` 中按 `SECURITY_CONTEXT.roles` 或 `userAttributes` 分支（见 5.3）。
-3. 多角色并存时列合并默认为 **AND**，避免某角色的 `includes: '*'` 盖掉其他角色的脱敏。
+2. **对谁脱敏**只看 `member_masking`；`mask` / `result_mask` 只定义怎么脱敏。
+3. 需要按真实值聚合、仅展示脱敏时，推荐 **仅配置 `result_mask`**，不配置 `mask`。
+4. 同一维度只有 **一份** `mask` / `result_mask`；不同角色需要不同脱敏值时，可用 `mask.sql` 分支、多 View，或后续扩展策略。
+5. 多角色并存时列合并默认为 **AND**，避免某角色的 `includes: '*'` 盖掉其他角色的脱敏。
 
 ---
 
@@ -230,7 +233,7 @@ Meta API 中 `plain` 与 `masked` 均为 `isVisible: true`；查询时 `masked` 
 
 ### 4.4 行列组合
 
-解耦模式下：**最终可见数据 = 行权限过滤后的行集 ∩ 列权限允许的成员集**。  
+解耦模式下：**最终可见数据 = 行权限过滤后的行集 ∩ 列权限允许的成员集**。
 查询同时引用禁用列时，整查询拒绝（`denied: true` 或 `1 = 0` segment）。
 
 ---
@@ -424,6 +427,8 @@ Meta 请求走 `metaConfig` → `patchVisibilityByAccessPolicy`，按合并后�
 | 类型 | 路径 |
 |------|------|
 | 设计文档（本文） | `docs/internal/Cube行列权限-access_policy-方案设计.md` |
+| 脱敏 mask / result_mask | `docs/internal/Cube行列权限-脱敏mask与result_mask说明.md` |
+| Load 接口响应 | `docs/internal/Cube行列权限-Load接口响应说明.md` |
 | 集成测试说明 | `cubejs/doc/rbac-access-policy-integration-test.md` |
 | 集成测试用例 | `cubejs/test/rbac-access-policy.integration.test.js` |
 | 核心实现 | `packages/cubejs-server-core/src/core/CompilerApi.ts` |

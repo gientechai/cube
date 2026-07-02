@@ -1,9 +1,9 @@
 # Cube 行列权限 — Load 接口响应说明
 
-> **文档版本**：v1.0  
-> **编写日期**：2026-06-29  
-> **适用接口**：REST (JSON) API `GET/POST /cubejs-api/v1/load`  
-> **实现版本**：Cube fork `v1.6.61`（`@cubejs-backend/api-gateway` + `@cubejs-backend/server-core` + `@cubejs-backend/native`）  
+> **文档版本**：v1.0
+> **编写日期**：2026-06-29
+> **适用接口**：REST (JSON) API `GET/POST /cubejs-api/v1/load`
+> **实现版本**：Cube fork `v1.6.61`（`@cubejs-backend/api-gateway` + `@cubejs-backend/server-core` + `@cubejs-backend/native`）
 > **对接方**：GienBI / Java 后端、前端图表渲染
 
 ---
@@ -383,4 +383,5 @@ Content-Type: application/json
 ## 8. 相关文档
 
 - [Cube 行列权限 access_policy 方案设计](./Cube行列权限-access_policy-方案设计.md)
+- [Cube 行列权限 — 脱敏 mask 与 result_mask 说明](./Cube行列权限-脱敏mask与result_mask说明.md)
 - Cube 官方 Load API：[REST (JSON) API — Load](https://cube.dev/docs/reference/core-data-apis/rest-api#load)
