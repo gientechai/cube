@@ -38,7 +38,11 @@ const collectPivotMaskedMembers = (queries, pivotQuery) => {
   const byMember = new Map();
 
   queries.forEach((query) => {
-    (query.maskedMembers || []).forEach((item) => {
+    const maskedItems = [
+      ...(query.maskedMembers || []),
+      ...(query.resultMaskedMembers || []).map(({ member, filter }) => ({ member, filter })),
+    ];
+    maskedItems.forEach((item) => {
       if (queryMembers.has(item.member) && !byMember.has(item.member)) {
         byMember.set(item.member, item);
       }
@@ -234,6 +238,16 @@ const querySchema = Joi.object().keys({
   maskedMembers: Joi.array().items(Joi.object().keys({
     member: Joi.string().required(),
     filter: Joi.object(),
+  })),
+  resultMaskedMembers: Joi.array().items(Joi.object().keys({
+    member: Joi.string().required(),
+    filter: Joi.object(),
+    result_mask: Joi.object().keys({
+      type: Joi.string().required(),
+      desensitize_type: Joi.string(),
+      desensitizeType: Joi.string(),
+      config: Joi.object(),
+    }).unknown(true),
   })),
 });
 

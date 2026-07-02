@@ -256,10 +256,17 @@ export class BaseQuery {
       ...this.options.contextSymbols,
     };
     this.maskedMembers = new Set();
+    this.resultMaskedMembers = new Set();
     this.memberMaskFilters = {};
     for (const item of this.options.maskedMembers || []) {
       this.maskedMembers.add(item.member);
       if (item.filter) {
+        this.memberMaskFilters[item.member] = item.filter;
+      }
+    }
+    for (const item of this.options.resultMaskedMembers || []) {
+      this.resultMaskedMembers.add(item.member);
+      if (item.filter && !this.memberMaskFilters[item.member]) {
         this.memberMaskFilters[item.member] = item.filter;
       }
     }
@@ -295,6 +302,7 @@ export class BaseQuery {
       subqueryJoins: this.options.subqueryJoins,
       joinHints: this.options.joinHints,
       maskedMembers: this.options.maskedMembers,
+      resultMaskedMembers: this.options.resultMaskedMembers,
     });
     this.from = this.options.from;
     this.multiStageQuery = this.options.multiStageQuery;
@@ -1007,6 +1015,7 @@ export class BaseQuery {
       disableExternalPreAggregations: !!this.options.disableExternalPreAggregations,
       convertTzForRawTimeDimension: !!this.options.convertTzForRawTimeDimension,
       maskedMembers: this.options.maskedMembers,
+      resultMaskedMembers: this.options.resultMaskedMembers,
       memberToAlias: this.options.memberToAlias,
     };
 
@@ -3618,8 +3627,11 @@ export class BaseQuery {
 
     this.safeEvaluateSymbolContext().currentMember = memberPath;
     try {
+      const isResultStageMember = this.resultMaskedMembers &&
+        this.resultMaskedMembers.size > 0 &&
+        this.resultMaskedMembers.has(memberPath);
       if (this.maskedMembers && this.maskedMembers.has(memberPath) && !memberExpressionType &&
-          !this.safeEvaluateSymbolContext().skipMasking) {
+          !this.safeEvaluateSymbolContext().skipMasking && !isResultStageMember) {
         // In ungrouped queries, only apply static masks to measures.
         // SQL masks (mask.sql) reference columns that don't apply per-row.
         const isMeasure = type === 'measure';

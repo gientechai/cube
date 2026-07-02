@@ -160,29 +160,59 @@ if (response.status === 400 && body.deniedMembers?.length) {
 
 用户对某 cube 命中 `access_policy`，且查询涉及的列成员在 `member_masking.includes` 中。
 
-常见 Schema 配置示例：
+#### SQL 阶段脱敏（默认，历史兼容）
 
-```javascript
+```js
 access_policy: [
   {
-    role: 'student',
+    role: `student`,
     member_level: {
-      includes: '*',
-      excludes: ['subject'],
+      includes: `*`,
+      excludes: [`subject`],
     },
     member_masking: {
-      includes: ['subject'],  // subject 可查询但脱敏
+      includes: [`subject`],
     },
   },
-]
+],
 
 // score1 cube 成员定义
 subject: {
-  type: 'string',
-  title: '学科',
-  mask: ({ value }) => (value ? `***${value.slice(-1)}` : '***'),
-}
+  type: `string`,
+  title: `学科`,
+  mask: ({ value }) => (value ? `***${value.slice(-1)}` : `***`),
+},
 ```
+
+#### 结果阶段脱敏（`mode: "result"`）
+
+```js
+access_policy: [
+  {
+    role: `student`,
+    member_level: {
+      includes: `*`,
+      excludes: [`name`],
+    },
+    member_masking: {
+      mode: `result`,
+      includes: [`name`],
+      rules: [
+        {
+          member: `users.name`,
+          result_mask: {
+            type: `NAME`,
+            desensitize_type: `NO_DESENSITIZE`,
+            config: {},
+          },
+        },
+      ],
+    },
+  },
+],
+```
+
+详见 [脱敏 mask 与 result_mask 说明](./Cube行列权限-脱敏mask与result_mask说明.md)。
 
 ### 4.2 HTTP 响应
 
@@ -301,8 +331,9 @@ subject: {
 
 ### 4.5 `data` 中的脱敏值
 
-- 脱敏逻辑由 Schema 成员 `mask` 函数定义，Cube 在 SQL 编译阶段替换表达式
-- `data` 中对应 key 仍为原始成员名（如 `score1.subject`），值为 mask 后的字符串
+- **SQL 阶段**（无 `member_masking.mode: "result"`）：脱敏由成员 `mask` / `mask.sql` 在 SQL 编译阶段完成，`data` 中为 SQL 返回值
+- **结果阶段**（`mode: "result"` + `rules[].result_mask`）：SQL 返回原始值，Gateway 在返回前按 `type` / `desensitize_type` / `config` 改写 `data`
+- `data` 中对应 key 仍为原始成员名（如 `score1.subject`）
 - 非脱敏字段（如 `score1.count`）返回真实值
 
 ### 4.6 前端处理建议
@@ -336,7 +367,7 @@ for (const col of columns) {
 | HTTP 状态 | `400` | `200` |
 | 是否有 `data` | 否 | 是 |
 | 关键扩展字段 | `deniedMembers` | `query.maskedMembers` / `pivotQuery.maskedMembers` |
-| Schema 配置 | `member_level.excludes`（无 `member_masking`） | `member_masking.includes` + 成员 `mask` |
+| Schema 配置 | `member_level.excludes`（无 `member_masking`） | `member_masking.includes` + 成员 `mask` | `member_masking.mode: "result"` + `rules[].result_mask` |
 | 用户感知 | 无权限，应提示并阻止展示 | 有数据但敏感字段已遮盖 |
 
 ---

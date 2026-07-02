@@ -109,43 +109,66 @@ flowchart LR
 
 每个 Cube 可定义多条 `access_policy`，每条绑定一个 **role**（或 group），描述该角色对本 Cube 成员的访问规则：
 
-```yaml
-cubes:
-  - name: sales
-    sql_table: public.sales
+```js
+cube(`sales`, {
+  sql_table: `public.sales`,
 
-    # 多角色合并策略（与 access_policy 同级，per-cube）
-    row_level_merge: and      # 行：多 policy 取交集（默认 or）
-    member_level_merge: and   # 列：多 policy 取交集（默认 and）
+  // 多角色合并策略（与 access_policy 同级，per-cube）
+  row_level_merge: `and`,      // 行：多 policy 取交集（默认 or）
+  member_level_merge: `and`,   // 列：多 policy 取交集（默认 and）
 
-    dimensions:
-      - name: amount
-        sql: amount
-        type: number
-        mask: -1              # 脱敏表达式（见 3.4）
+  dimensions: {
+    amount: {
+      sql: `amount`,
+      type: `number`,
+      mask: -1,               // SQL 阶段脱敏表达式（见 3.4）
+    },
+  },
 
-    access_policy:
-      # 列权限：ROLE_A 禁止查看 secret_col
-      - role: ROLE_A
-        member_level:
-          includes: "*"
-          excludes: [secret_col]
+  access_policy: [
+    // 列权限：ROLE_A 禁止查看 secret_col
+    {
+      role: `ROLE_A`,
+      member_level: {
+        includes: `*`,
+        excludes: [`secret_col`],
+      },
+    },
 
-      # 行权限：ROLE_B 仅可见 id < 100 的行
-      - role: ROLE_B
-        row_level:
-          filters:
-            - member: id
-              operator: lt
-              values: ["100"]
+    // 行权限：ROLE_B 仅可见 id < 100 的行
+    {
+      role: `ROLE_B`,
+      row_level: {
+        filters: [
+          { member: `id`, operator: `lt`, values: [`100`] },
+        ],
+      },
+    },
 
-      # 列脱敏：ROLE_C 对 masked_col 脱敏访问
-      - role: ROLE_C
-        member_level:
-          includes: "*"
-          excludes: [masked_col]
-        member_masking:
-          includes: [masked_col]
+    // 列脱敏：ROLE_C 对 masked_col 脱敏访问（结果阶段示例）
+    {
+      role: `ROLE_C`,
+      member_level: {
+        includes: `*`,
+        excludes: [`masked_col`],
+      },
+      member_masking: {
+        mode: `result`,
+        includes: [`masked_col`],
+        rules: [
+          {
+            member: `sales.masked_col`,
+            result_mask: {
+              type: `FULL`,
+              desensitize_type: `NO_DESENSITIZE`,
+              config: { desensitizeDisplay: `-1` },
+            },
+          },
+        ],
+      },
+    },
+  ],
+});
 ```
 
 ### 3.2 列访问三级语义
@@ -173,20 +196,20 @@ Meta API 中 `plain` 与 `masked` 均为 `isVisible: true`；查询时 `masked` 
 
 ### 3.4 脱敏设计
 
-脱敏分 **授权** 与 **表达式** 两层；表达式又分 **SQL 层** 与 **结果层** 两种（详见 [脱敏 mask 与 result_mask 说明](./Cube行列权限-脱敏mask与result_mask说明.md)）：
+脱敏分 **授权**、**SQL 阶段**、**结果阶段** 三层（详见 [脱敏 mask 与 result_mask 说明](./Cube行列权限-脱敏mask与result_mask说明.md)）：
 
 | 层级 | 配置位置 | 作用 |
 |------|----------|------|
-| **脱敏授权** | `access_policy.member_masking` | 定义哪个角色对该列走脱敏（写入 `maskedMembers`） |
-| **SQL 脱敏** | 维度/指标的 `mask` 或 `mask.sql` | SQL 编译阶段替换表达式（Cube 原生，可选） |
-| **结果脱敏** | 维度/指标的 `result_mask`（`type` + `config`） | 查询执行后在 `data` 中脱敏，不影响 GROUP BY |
+| **脱敏授权** | `access_policy.member_masking.includes` | 定义哪个角色对该 member 走脱敏 |
+| **SQL 脱敏** | 成员 `mask` / `mask.sql` + `member_masking`（无 `mode: "result"`） | SQL 编译阶段替换表达式（历史兼容） |
+| **结果脱敏** | `member_masking.mode: "result"` + `rules[].result_mask` | 查询后在 `data` 中脱敏；规则含 `type`、`desensitize_type`、`config` |
 
 **关键规则**：
 
-1. 启用脱敏时，`member_level` 必须 **exclude** 该列，再用 `member_masking.includes` 包含，否则 `includes: '*'` 会先判为 plain，脱敏不触发。
-2. **对谁脱敏**只看 `member_masking`；`mask` / `result_mask` 只定义怎么脱敏。
-3. 需要按真实值聚合、仅展示脱敏时，推荐 **仅配置 `result_mask`**，不配置 `mask`。
-4. 同一维度只有 **一份** `mask` / `result_mask`；不同角色需要不同脱敏值时，可用 `mask.sql` 分支、多 View，或后续扩展策略。
+1. 启用脱敏时，`member_level` 必须 **exclude** 该 member，再用 `member_masking.includes` 包含，否则 `includes: '*'` 会先判为 plain，脱敏不触发。
+2. **对谁脱敏**只看 `member_masking`；`rules[].result_mask` 或 `mask` 只定义怎么脱敏。
+3. 结果阶段脱敏推荐配置 `member_masking.mode: "result"`，规则挂在 `member_masking.rules` 下（同一 member 在不同 policy 可有不同规则）。
+4. `mask.sql` **不**自动转换为 `result_mask`；需要复杂规则（姓名/手机/正则等）时使用结果阶段协议。
 5. 多角色并存时列合并默认为 **AND**，避免某角色的 `includes: '*'` 盖掉其他角色的脱敏。
 
 ---

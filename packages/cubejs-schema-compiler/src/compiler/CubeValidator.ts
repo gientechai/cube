@@ -29,6 +29,8 @@ export const nonStringFields = new Set([
   'readOnly',
   'prefix',
   'mask',
+  'result_mask',
+  'resultMask',
 ]);
 
 const identifierRegex = /^[_a-zA-Z][_a-zA-Z0-9]*$/;
@@ -304,6 +306,19 @@ const currencySchema = Joi.string().custom((value, helper) => {
   });
 });
 
+const ResultMaskSchema = Joi.object().keys({
+  type: Joi.string().required(),
+  desensitize_type: Joi.string(),
+  desensitizeType: Joi.string(),
+  config: Joi.object().unknown(true).default({}),
+});
+
+const MemberMaskingRuleSchema = Joi.object().keys({
+  member: Joi.string().required(),
+  result_mask: ResultMaskSchema,
+  resultMask: ResultMaskSchema,
+}).or('result_mask', 'resultMask');
+
 const MaskSchema = Joi.alternatives([
   Joi.object().keys({ sql: Joi.func().required() }),
   Joi.number(),
@@ -355,6 +370,8 @@ const BaseDimensionWithoutSubQuery = {
   enableSuggestions: Joi.boolean().strict(),
   links: LinksSchema,
   mask: MaskSchema,
+  result_mask: ResultMaskSchema,
+  resultMask: ResultMaskSchema,
   format: Joi.when('type', {
     switch: [
       { is: 'time', then: timeFormatSchema },
@@ -495,6 +512,8 @@ const BaseMeasure = {
   shown: Joi.boolean().strict(),
   cumulative: Joi.boolean().strict(),
   mask: MaskSchema,
+  result_mask: ResultMaskSchema,
+  resultMask: ResultMaskSchema,
   filters: Joi.array().items(
     Joi.object().keys({
       sql: Joi.func().required()
@@ -1120,6 +1139,7 @@ const MemberLevelPolicySchema = Joi.object().keys({
 });
 
 const MemberMaskingPolicySchema = Joi.object().keys({
+  mode: Joi.string().valid('result', 'sql'),
   includes: Joi.alternatives([
     Joi.string().valid('*'),
     Joi.array().items(Joi.string())
@@ -1130,6 +1150,7 @@ const MemberMaskingPolicySchema = Joi.object().keys({
   ]),
   includesMembers: Joi.array().items(Joi.string().required()),
   excludesMembers: Joi.array().items(Joi.string().required()),
+  rules: Joi.array().items(MemberMaskingRuleSchema),
 });
 
 const RowLevelPolicySchema = Joi.object().keys({

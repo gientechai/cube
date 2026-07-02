@@ -167,6 +167,7 @@ interface NormalizedQuery extends Query {
   rowLimit?: null | number;
   order?: { id: string; desc: boolean }[];
   maskedMembers?: { member: string; filter?: any; title?: string; displayTitle?: string }[];
+  resultMaskedMembers?: { member: string; filter?: any; result_mask: any }[];
 }
 
 export {

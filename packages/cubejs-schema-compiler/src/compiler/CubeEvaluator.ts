@@ -452,6 +452,16 @@ export class CubeEvaluator extends CubeSymbols {
           cube,
           policy.memberMasking.excludes || []
         ).map(memberMapper('a masking excludes member'));
+        if (policy.memberMasking.rules?.length) {
+          policy.memberMasking.rules = policy.memberMasking.rules.map((rule: any) => {
+            const memberPath = memberMapper('a masking rule member')(rule.member);
+            const resultMask = rule.result_mask || rule.resultMask;
+            return {
+              member: memberPath,
+              ...(resultMask ? { result_mask: resultMask } : {}),
+            };
+          });
+        }
       }
     }
   }

@@ -698,6 +698,106 @@ export class CompilerApi {
     return false;
   }
 
+  protected memberMaskingGrantsMember(policy: any, memberName: string): boolean {
+    return Boolean(
+      policy.memberMasking &&
+      policy.memberMasking.includesMembers.includes(memberName) &&
+      !policy.memberMasking.excludesMembers.includes(memberName)
+    );
+  }
+
+  protected normalizeResultMaskRule(raw: any): any | null {
+    if (!raw || typeof raw !== 'object' || typeof raw.type !== 'string') {
+      return null;
+    }
+    return {
+      type: raw.type,
+      desensitize_type: raw.desensitize_type ?? raw.desensitizeType ?? 'NO_DESENSITIZE',
+      config: raw.config && typeof raw.config === 'object' && !Array.isArray(raw.config)
+        ? raw.config
+        : {},
+    };
+  }
+
+  protected resolveResultMaskRuleFromPolicies(
+    policies: any[],
+    memberName: string,
+    cubeEvaluator: any,
+  ): any | null {
+    for (const policy of policies) {
+      if (!this.memberMaskingGrantsMember(policy, memberName)) {
+        continue;
+      }
+      if (policy.memberMasking?.mode !== 'result') {
+        continue;
+      }
+      for (const rule of policy.memberMasking.rules || []) {
+        if (rule.member === memberName) {
+          const normalized = this.normalizeResultMaskRule(rule.result_mask || rule.resultMask);
+          if (normalized) {
+            return normalized;
+          }
+        }
+      }
+    }
+
+    const hasResultMode = policies.some(
+      (policy) => this.memberMaskingGrantsMember(policy, memberName) &&
+        policy.memberMasking?.mode === 'result'
+    );
+    if (hasResultMode) {
+      try {
+        const memberDef = cubeEvaluator.byPathAnyType(memberName);
+        return this.normalizeResultMaskRule(memberDef?.result_mask || memberDef?.resultMask);
+      } catch {
+        return null;
+      }
+    }
+
+    return null;
+  }
+
+  protected registerMaskedMember(
+    memberName: string,
+    maskingPolicies: any[],
+    cubeEvaluator: any,
+    sqlMaskedMembersSet: Set<string>,
+    resultMaskedMembersMap: Record<string, any>,
+    memberMaskFiltersMap: Record<string, any>,
+    conditionalFullAccessPolicies?: any[],
+    policyRowFilter?: (policy: any) => any,
+  ): void {
+    if (conditionalFullAccessPolicies?.length && policyRowFilter) {
+      const policyFilters = conditionalFullAccessPolicies.map(policyRowFilter);
+      memberMaskFiltersMap[memberName] = policyFilters.length === 1
+        ? policyFilters[0]
+        : { or: policyFilters };
+    }
+
+    const resultRule = this.resolveResultMaskRuleFromPolicies(
+      maskingPolicies,
+      memberName,
+      cubeEvaluator,
+    );
+    const useResultStage = maskingPolicies.some(
+      (policy) => this.memberMaskingGrantsMember(policy, memberName) &&
+        policy.memberMasking?.mode === 'result'
+    ) && resultRule;
+
+    if (useResultStage) {
+      resultMaskedMembersMap[memberName] = {
+        member: memberName,
+        result_mask: resultRule,
+        ...(memberMaskFiltersMap[memberName] !== undefined
+          ? { filter: memberMaskFiltersMap[memberName] }
+          : {}),
+      };
+      return;
+    }
+
+    sqlMaskedMembersSet.add(memberName);
+  }
+
   /**
    * This method rewrites the query according to RBAC row level security policies.
    *
@@ -927,7 +1027,8 @@ export class CompilerApi {
     // Per-cube row-level constraints, AND-ed together to form the final RLS
     // filter. Each cube/view contributes a single expression (see below).
     const rlsConstraints: any[] = [];
-    const maskedMembersSet = new Set<string>();
+    const sqlMaskedMembersSet = new Set<string>();
+    const resultMaskedMembersMap: Record<string, any> = {};
     const memberMaskFiltersMap: Record<string, any> = {};
 
     for (const cubeName of queryCubes) {
@@ -999,7 +1100,22 @@ export class CompilerApi {
             }
 
             if (mergedAccess === 'masked') {
-              maskedMembersSet.add(memberName);
+              const maskingPolicies = memberPolicies.filter(
+                (policy: any) => this.getMemberColumnAccessFromPolicy(
+                  policy,
+                  memberName,
+                  cubeName,
+                  cubesAccessedViaView
+                ) === 'masked'
+              );
+              this.registerMaskedMember(
+                memberName,
+                maskingPolicies,
+                cubeEvaluator,
+                sqlMaskedMembersSet,
+                resultMaskedMembersMap,
+                memberMaskFiltersMap,
+              );
             }
 
             continue;
@@ -1029,7 +1145,9 @@ export class CompilerApi {
             );
 
             if (hasMaskingPolicy) {
-              maskedMembersSet.add(memberName);
+              const maskingPolicies = grantingPolicies.filter(
+                (policy: any) => this.memberMaskingGrantsMember(policy, memberName)
+              );
 
               const conditionalFullAccessPolicies = grantingPolicies.filter((policy: any) => {
                 const hasFullMemberAccess = !policy.memberLevel ||
@@ -1038,12 +1156,16 @@ export class CompilerApi {
                 return hasFullMemberAccess && policyHasRowFilter(policy);
               });
 
-              if (conditionalFullAccessPolicies.length > 0) {
-                const policyFilters = conditionalFullAccessPolicies.map(policyRowFilter);
-                memberMaskFiltersMap[memberName] = policyFilters.length === 1
-                  ? policyFilters[0]
-                  : { or: policyFilters };
-              }
+              this.registerMaskedMember(
+                memberName,
+                maskingPolicies,
+                cubeEvaluator,
+                sqlMaskedMembersSet,
+                resultMaskedMembersMap,
+                memberMaskFiltersMap,
+                conditionalFullAccessPolicies,
+                policyRowFilter,
+              );
             }
           }
 
@@ -1090,10 +1212,15 @@ export class CompilerApi {
     // also lets a conditionally-masked aggregate measure render its real value
     // (instead of being fully masked) when the query is already scoped to the
     // filter's rows.
-    for (const member of Array.from(maskedMembersSet)) {
+    const allMaskedMembers = new Set<string>([
+      ...Array.from(sqlMaskedMembersSet),
+      ...Object.keys(resultMaskedMembersMap),
+    ]);
+    for (const member of Array.from(allMaskedMembers)) {
       const maskFilter = memberMaskFiltersMap[member];
       if (maskFilter && this.queryFiltersImplyFilter(query.filters || [], maskFilter)) {
-        maskedMembersSet.delete(member);
+        sqlMaskedMembersSet.delete(member);
+        delete resultMaskedMembersMap[member];
         delete memberMaskFiltersMap[member];
       }
     }
@@ -1105,11 +1232,14 @@ export class CompilerApi {
       query.filters = query.filters || [];
       query.filters.push(rlsFilter);
     }
-    if (maskedMembersSet.size > 0) {
-      query.maskedMembers = Array.from(maskedMembersSet).map(member => ({
+    if (sqlMaskedMembersSet.size > 0) {
+      query.maskedMembers = Array.from(sqlMaskedMembersSet).map(member => ({
         member,
         filter: memberMaskFiltersMap[member],
       }));
+    }
+    if (Object.keys(resultMaskedMembersMap).length > 0) {
+      query.resultMaskedMembers = Object.values(resultMaskedMembersMap);
     }
     return { query, denied: false };
   }

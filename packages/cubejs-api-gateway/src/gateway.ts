@@ -83,6 +83,7 @@ import {
 } from './interfaces';
 import { getRequestIdFromRequest, requestParser } from './request-parser';
 import { UserError } from './user-error';
+import { applyResultMaskedMembersToRows } from './member-response-masking';
 import { CubejsHandlerError } from './cubejs-handler-error';
 import { SubscriptionServer, WebSocketSendMessageFn } from './ws/subscription-server';
 import { LocalSubscriptionStore } from './ws/local-subscription-store';
@@ -1384,6 +1385,9 @@ class ApiGateway {
       if ((currentQuery as any).maskedMembers) {
         throw new UserError('maskedMembers cannot be provided in the query');
       }
+      if ((currentQuery as any).resultMaskedMembers) {
+        throw new UserError('resultMaskedMembers cannot be provided in the query');
+      }
 
       return {
         normalizedQuery: (normalizeQuery(currentQuery, persistent, cacheMode)),
@@ -1428,6 +1432,7 @@ class ApiGateway {
           ) as NormalizedQuery;
 
           rewrittenQuery.maskedMembers = queryWithRlsFilters.maskedMembers;
+          rewrittenQuery.resultMaskedMembers = queryWithRlsFilters.resultMaskedMembers;
 
           // applyRowLevelSecurity may add new filters which may contain raw member expressions
           // if that's the case, we should run an extra pass of parsing here to make sure
@@ -1847,6 +1852,39 @@ class ApiGateway {
   }
 
   /**
+   * Apply access-policy member masks to raw query rows after SQL execution.
+   * @internal
+   */
+  private async applyResponseMasking(
+    context: RequestContext,
+    normalizedQuery: NormalizedQuery,
+    data: Array<Record<string, unknown>>,
+  ): Promise<Array<Record<string, unknown>>> {
+    if (!normalizedQuery.resultMaskedMembers?.length) {
+      return data;
+    }
+    if (!Array.isArray(data) || !data.length) {
+      return data;
+    }
+
+    const compilerApi = await this.getCompilerApi(context);
+    const compilers = await compilerApi.getCompilers({ requestId: context.requestId });
+    const { cubeEvaluator } = compilers;
+
+    return applyResultMaskedMembersToRows(
+      data,
+      normalizedQuery.resultMaskedMembers,
+      (memberPath) => {
+        try {
+          return cubeEvaluator.byPathAnyType(memberPath)?.type;
+        } catch {
+          return undefined;
+        }
+      },
+    );
+  }
+
+  /**
    * Execute query and return adapter's result.
    * @internal
    */
@@ -1898,6 +1936,14 @@ class ApiGateway {
       ? Number(total.data[0][QueryAlias.TOTAL_COUNT])
       : undefined;
 
+    if (Array.isArray(response.data)) {
+      response.data = await this.applyResponseMasking(
+        context,
+        normalizedQuery,
+        response.data,
+      );
+    }
+
     return this.wrapAdapterQueryResultIfNeeded(response);
   }
 
@@ -1927,24 +1973,37 @@ class ApiGateway {
       timeDimensions: Record<string, any>;
     }
   ): NormalizedQuery['maskedMembers'] {
-    if (!normalizedQuery.maskedMembers?.length) {
+    const maskedItems = [
+      ...(normalizedQuery.maskedMembers || []),
+      ...(normalizedQuery.resultMaskedMembers || []).map(({ member, filter }) => ({
+        member,
+        filter,
+      })),
+    ];
+    if (!maskedItems.length) {
       return undefined;
     }
 
-    return normalizedQuery.maskedMembers.map(({ member, filter }) => {
+    const seen = new Set<string>();
+    return maskedItems.reduce<NonNullable<NormalizedQuery['maskedMembers']>>((acc, { member, filter }) => {
+      if (seen.has(member)) {
+        return acc;
+      }
+      seen.add(member);
       const meta = annotation.dimensions[member]
         || annotation.measures[member]
         || annotation.timeDimensions[member];
       const title = meta?.title;
       const displayTitle = meta?.shortTitle || title;
 
-      return {
+      acc.push({
         member,
         ...(filter !== undefined ? { filter } : {}),
         ...(title ? { title } : {}),
         ...(displayTitle ? { displayTitle } : {}),
-      };
-    });
+      });
+      return acc;
+    }, []);
   }
 
   private prepareResultTransformData(
@@ -2260,6 +2319,10 @@ class ApiGateway {
             metaConfigResult, normalizedQueries[0]
           );
 
+          const maskedRows = Array.isArray(response.data)
+            ? await this.applyResponseMasking(context, normalizedQueries[0], response.data)
+            : response.data;
+
           // TODO Can we just pass through data? Ensure hidden members can't be queried
           results = [{
             /**
@@ -2271,7 +2334,7 @@ class ApiGateway {
              *
              * TODO(ovr): You must finish it, move to ResultWrapper after optimizing it.
              */
-            data: rowsToColumnar(response.data),
+            data: rowsToColumnar(maskedRows),
             annotation
           }];
         }

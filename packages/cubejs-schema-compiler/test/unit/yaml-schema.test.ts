@@ -2108,6 +2108,44 @@ cubes:
       expect(sql).toContain('NULL');
     });
 
+    it('does not inject result_mask into generated SQL', async () => {
+      const compilers = prepareYamlCompiler(`
+cubes:
+  - name: users
+    sql_table: public.users
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: name
+        sql: name
+        type: string
+    measures:
+      - name: count
+        type: count
+      `);
+
+      await compilers.compiler.compile();
+
+      const query = new PostgresQuery(compilers, {
+        measures: ['users.count'],
+        dimensions: ['users.name'],
+        resultMaskedMembers: [{
+          member: 'users.name',
+          result_mask: {
+            type: 'NAME',
+            desensitize_type: 'NO_DESENSITIZE',
+            config: {},
+          },
+        }],
+      });
+      const [sql] = query.buildSqlAndParams();
+      expect(sql).toContain('"users".name');
+      expect(sql).not.toMatch(/NAME/);
+      expect(sql).toMatch(/GROUP BY 1/);
+    });
+
     it('renders the mask value (no CASE WHEN) for aggregate measures when the filter member is not in the group by', async () => {
       const compilers = prepareYamlCompiler(`
 cubes:
