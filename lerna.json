@@ -1,14 +1,46 @@
 {
+  "packages": [
+    "packages/*",
+    "rust/*"
+  ],
   "version": "1.6.61",
   "npmClient": "yarn",
   "command": {
     "bootstrap": {
       "npmClient": "yarn",
-      "npmClientArgs": ["--frozen-lockfile"]
+      "npmClientArgs": [
+        "--frozen-lockfile"
+      ]
+    },
+    "publish": {
+      "ignoreChanges": [
+        "ignored-file",
+        "*.md"
+      ],
+      "message": "chore(release): publish",
+      "conventionalCommits": true,
+      "registry": "https://npm.nexus.dev.gientechai.com/repository/npm-hosted/"
     },
     "version": {
-      "allowBranch": ["master", "lts/*"]
+      "message": "chore(release): publish",
+      "allowBranch": [
+        "master",
+        "lts/*"
+      ]
     }
   },
+  "changelog": {
+    "repo": "cube-js/cube",
+    "labels": {
+      "tag: new feature": ":rocket: New Feature",
+      "tag: breaking change": ":boom: Breaking Change",
+      "tag: bug fix": ":bug: Bug Fix",
+      "tag: enhancement": ":nail_care: Enhancement",
+      "tag: documentation": ":memo: Documentation",
+      "tag: internal": ":house: Internal"
+    },
+    "cacheDir": ".changelog"
+  },
+  "changelogPreset": "angular",
   "$schema": "node_modules/lerna/schemas/lerna-schema.json"
 }

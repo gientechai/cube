@@ -1,0 +1,148 @@
+# Datart-style RBAC tests:
+# - default allow when user matches no policy
+# - decoupled column + row policies on separate access_policy entries
+
+cubes:
+  - name: datart_default_allow_test
+    sql_table: public.line_items
+
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+
+      - name: secret_col
+        sql: product_id
+        type: number
+
+      - name: public_col
+        sql: order_id
+        type: number
+
+    measures:
+      - name: count
+        type: count
+
+    access_policy:
+      - role: datart_restricted_role
+        member_level:
+          includes: "*"
+          excludes:
+            - secret_col
+
+  - name: datart_decoupled_test
+    sql_table: public.line_items
+
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+
+      - name: region_col
+        sql: product_id
+        type: number
+
+      - name: masked_col
+        sql: quantity
+        type: number
+        mask: -1
+
+    measures:
+      - name: count
+        type: count
+
+    access_policy:
+      # Column-only policy
+      - role: datart_col_role
+        member_level:
+          includes: "*"
+          excludes:
+            - masked_col
+        member_masking:
+          includes:
+            - masked_col
+
+      # Row-only policy
+      - role: datart_row_role
+        row_level:
+          filters:
+            - member: id
+              operator: lt
+              values:
+                - "100"
+
+  - name: datart_column_merge_test
+    sql_table: public.line_items
+
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+
+      - name: secret_a
+        sql: product_id
+        type: number
+
+      - name: secret_b
+        sql: order_id
+        type: number
+
+      - name: public_col
+        sql: quantity
+        type: number
+
+    measures:
+      - name: count
+        type: count
+
+    access_policy:
+      - role: datart_col_role_a
+        member_level:
+          includes: "*"
+          excludes:
+            - secret_a
+
+      - role: datart_col_role_b
+        member_level:
+          includes: "*"
+          excludes:
+            - secret_b
+
+  - name: datart_row_and_test
+    sql_table: public.line_items
+
+    row_level_merge: and
+
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+
+      - name: value_col
+        sql: product_id
+        type: number
+
+    measures:
+      - name: count
+        type: count
+
+    access_policy:
+      - role: datart_row_low_role
+        row_level:
+          filters:
+            - member: id
+              operator: lt
+              values:
+                - "50"
+
+      - role: datart_row_high_role
+        row_level:
+          filters:
+            - member: id
+              operator: gte
+              values:
+                - "10"
