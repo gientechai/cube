@@ -41,6 +41,22 @@ describe('desensitization-handlers', () => {
 });
 
 describe('member-response-masking', () => {
+  test('applies result_mask using orchestrator row keys (cube__member)', () => {
+    const rows = applyResultMaskedMembersToRows(
+      [{ orders__amount: 1001 }],
+      [{
+        member: 'orders.amount',
+        result_mask: {
+          type: DesensitizationType.FULL,
+          desensitize_type: 'NO_DESENSITIZE',
+          config: { desensitizeDisplay: '-1' },
+        },
+      }],
+    );
+
+    expect(rows[0].orders__amount).toBe(-1);
+  });
+
   test('applies result_mask from resultMaskedMembers rows', () => {
     const rows = applyResultMaskedMembersToRows(
       [

@@ -4,7 +4,11 @@ import {
   type ResultMaskRule,
   type ResultMaskedMemberItem,
 } from './member-result-mask-strategies';
-import { rowMatchesMaskFilter } from './member-mask-filter';
+import {
+  remapFilterMemberToRowKey,
+  resolveRowKey,
+  rowMatchesMaskFilter,
+} from './member-mask-filter';
 
 export {
   DesensitizationType,
@@ -14,7 +18,7 @@ export {
   normalizeResultMaskRule,
   type ResultMaskedMemberItem,
 } from './member-result-mask-strategies';
-export { rowMatchesMaskFilter } from './member-mask-filter';
+export { memberPathToRowKey, remapFilterMemberToRowKey, resolveRowKey, rowMatchesMaskFilter } from './member-mask-filter';
 
 type LegacyMaskedMemberItem = {
   member: string;
@@ -40,7 +44,8 @@ export function applyResultMaskedMembersToRows(
 
     resultMaskedMembers.forEach((item) => {
       const { member, filter } = item;
-      if (!(member in maskedRow)) {
+      const rowKey = resolveRowKey(maskedRow, member);
+      if (!rowKey) {
         return;
       }
 
@@ -51,12 +56,13 @@ export function applyResultMaskedMembersToRows(
         return;
       }
 
-      if (filter && rowMatchesMaskFilter(maskedRow, filter)) {
+      const normalizedFilter = filter ? remapFilterMemberToRowKey(filter) : filter;
+      if (normalizedFilter && rowMatchesMaskFilter(maskedRow, normalizedFilter)) {
         return;
       }
 
-      maskedRow[member] = applyResultMaskRule(resultMask, {
-        value: maskedRow[member],
+      maskedRow[rowKey] = applyResultMaskRule(resultMask, {
+        value: maskedRow[rowKey],
         memberType: resolveMemberType?.(member),
         memberPath: member,
         row: maskedRow,
