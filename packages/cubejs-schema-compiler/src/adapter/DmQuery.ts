@@ -167,6 +167,13 @@ export class DmQuery extends OracleQuery {
       res = `ADD_MONTHS(${res}, ${totalMonths})`;
     }
 
+    if (intervalParsed.week) {
+      // 对于周间隔，需要确保偏移后仍然对齐到 ISO 周的开始（周一）
+      // 使用 7 * week 来进行天数偏移，确保 TRUNC(..., 'IW') 能正确对齐
+      const weekDays = intervalParsed.week * 7;
+      res = `${res} + ${weekDays}`;
+    }
+
     if (intervalParsed.day) {
       if (DmQuery.dmUseNumericDayArithmetic(intervalParsed)) {
         res = `${res} + ${intervalParsed.day}`;
@@ -204,6 +211,13 @@ export class DmQuery extends OracleQuery {
 
     if (totalMonths !== 0) {
       res = `ADD_MONTHS(${res}, -${totalMonths})`;
+    }
+
+    if (intervalParsed.week) {
+      // 对于周间隔，需要确保偏移后仍然对齐到 ISO 周的开始（周一）
+      // 使用 7 * week 来进行天数偏移，确保 TRUNC(..., 'IW') 能正确对齐
+      const weekDays = intervalParsed.week * 7;
+      res = `${res} - ${weekDays}`;
     }
 
     if (intervalParsed.day) {
