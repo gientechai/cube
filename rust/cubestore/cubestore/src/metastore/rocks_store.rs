@@ -635,6 +635,10 @@ pub struct BatchPipe<'a, S = ()> {
     write_batch: WriteBatch,
     events: Vec<MetaStoreEvent>,
     post_commit_callback: Option<PostCommitCallback<S>>,
+    /// PoC Day 4 step 5: when Some, route the batch through Raft instead of
+    /// writing locally. The apply() on every node (this one included) performs
+    /// the actual `db.write`, so the cluster converges.
+    raft_app: Option<std::sync::Arc<crate::metastore::raft::App>>,
 }
 
 impl<'a, S> BatchPipe<'a, S> {
@@ -644,6 +648,7 @@ impl<'a, S> BatchPipe<'a, S> {
             write_batch: WriteBatch::default(),
             events: Vec::new(),
             post_commit_callback: None,
+            raft_app: None,
         }
     }
 
@@ -655,11 +660,36 @@ impl<'a, S> BatchPipe<'a, S> {
         self.events.push(event);
     }
 
+    /// PoC Day 4 step 5: enable Raft routing for this batch. Set by the
+    /// RocksStore when it holds a Raft App (configured via `CUBESTORE_METASTORE_BACKEND=rocksdb-raft`).
+    pub fn with_raft_app(mut self, app: std::sync::Arc<crate::metastore::raft::App>) -> Self {
+        self.raft_app = Some(app);
+        self
+    }
+
     pub fn batch_write_rows(
-        self,
+        mut self,
     ) -> Result<(Vec<MetaStoreEvent>, Option<PostCommitCallback<S>>), CubeError> {
-        let db = self.db;
-        db.write(self.write_batch)?;
+        if let Some(app) = self.raft_app.take() {
+            // Raft mode: replay the WriteBatch into a serializable WriteBatchContainer
+            // (rocksdb WriteBatch::iterate calls WriteBatchIterator::put/delete, which
+            // WriteBatchContainer implements at rocks_store.rs:592), then propose via Raft.
+            // On commit, state_machine::apply() on every node (this one included) calls
+            // db.write(container.write_batch()) — so we do NOT db.write here.
+            let mut container = WriteBatchContainer::new();
+            self.write_batch.iterate(&mut container);
+
+            // Bridge sync write_operation → async client_write. write_operation runs on
+            // the RocksStoreRWLoop's dedicated OS thread, where Handle::current() panics;
+            // step 6 wires a Handle captured at router init into RocksStore and uses it here.
+            let raft_handle = tokio::runtime::Handle::current();
+            raft_handle
+                .block_on(async move { app.client_write(container).await })
+                .map_err(|e| CubeError::internal(format!("Raft client_write failed: {e:?}")))?;
+        } else {
+            let db = self.db;
+            db.write(self.write_batch)?;
+        }
 
         Ok((self.events, self.post_commit_callback))
     }
