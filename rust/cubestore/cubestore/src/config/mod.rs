@@ -2462,6 +2462,23 @@ impl Config {
                 .await;
         }
 
+        // PoC Day 4 step 6: detect Raft backend. Full wiring is follow-up:
+        //   - Construct LogStore (own RocksDB at {data_dir}/raft_log/)
+        //   - Construct StateMachineStore with the metastore RocksDB handle
+        //     (must be exposed by RocksMetaStore/RocksStore)
+        //   - Build Raft + App, inject App into RocksStore so write_operation_impl
+        //     calls BatchPipe::with_raft_app(app) and writes route via Raft
+        //     (step-5 hook is already in place at BatchPipe::batch_write_rows).
+        //   - Capture a tokio Handle at router init for the sync→async bridge.
+        let raft_backend = env::var("CUBESTORE_METASTORE_BACKEND").ok().as_deref() == Some("rocksdb-raft");
+        if raft_backend {
+            tracing::warn!(
+                "CUBESTORE_METASTORE_BACKEND=rocksdb-raft requested; full wiring is not yet \
+                 implemented (step-5 BatchPipe hook is in place). Falling back to local RocksDB \
+                 metastore for this run."
+            );
+        }
+
         if uses_remote_metastore(&self.injector).await {
             self.injector
                 .register_typed::<dyn MetaStore, _, _, _>(async move |i| {
