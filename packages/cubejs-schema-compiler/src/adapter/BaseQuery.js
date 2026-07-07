@@ -6053,7 +6053,7 @@ export class BaseQuery {
     semiAdditiveMeasuresForCte.forEach(measure => {
       const baseSql = this.semiAdditiveMeasureRawSql(measure);
       const rawColumnName = `_${measure.unescapedAliasName()}_raw`;
-      unaggregatedColumns.push(`${baseSql} as ${rawColumnName}`);
+      unaggregatedColumns.push(`${baseSql} as ${this.escapeColumnName(rawColumnName)}`);
     });
 
     const timeDimensionsForOrdering = new Set();
@@ -6074,7 +6074,7 @@ export class BaseQuery {
         const dimensionSql = this.dimensionSql(dimension);
         const unescapedAlias = dimension.unescapedAliasName();
         const columnAlias = `_${unescapedAlias}_for_ordering`;
-        unaggregatedColumns.push(`${dimensionSql} as ${columnAlias}`);
+        unaggregatedColumns.push(`${dimensionSql} as ${this.escapeColumnName(columnAlias)}`);
       });
     }
 
@@ -6243,14 +6243,16 @@ export class BaseQuery {
     const baseColumnAliases = baseColumns.map(colExpr => {
       // 匹配 "expression as alias" 格式
       const asMatch = colExpr.match(/ as\s+(\S+?)$/i);
+      let alias;
       if (asMatch) {
-        return asMatch[1].trim();
+        alias = asMatch[1].trim();
+      } else {
+        // 匹配 "expression alias" 格式（无 as 关键字）
+        const parts = colExpr.split(/\s+/);
+        alias = parts[parts.length - 1];
       }
-      // 匹配 "expression alias" 格式（无 as 关键字）
-      const parts = colExpr.split(/\s+/);
-      const lastPart = parts[parts.length - 1];
-      // 去掉可能的尾随双引号
-      return lastPart.replace(/^"|"$/g, '');
+      alias = this.unquotedColumnName(alias);
+      return alias ? this.escapeColumnName(alias) : null;
     }).filter(alias => alias);
 
     const renderedRefFromDims = R.fromPairs(

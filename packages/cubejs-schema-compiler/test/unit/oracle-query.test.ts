@@ -995,4 +995,30 @@ describe('OracleQuery', () => {
     expect(sql).toMatch(/GROUP BY\s+TRUNC/);
     expect(params).toEqual(['2024-01-01T00:00:00.000Z', '2024-12-31T23:59:59.999Z']);
   });
+
+  it('generates TRUNC function for quarter granularity grouping', async () => {
+    await compiler.compile();
+
+    const query = new OracleQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['visitors.count'],
+        timeDimensions: [
+          {
+            dimension: 'visitors.createdAt',
+            dateRange: ['2024-01-01', '2024-12-31'],
+            granularity: 'quarter'
+          }
+        ],
+        timezone: 'UTC'
+      }
+    );
+
+    const [sql, params] = query.buildSqlAndParams();
+
+    expect(sql).toContain('TRUNC("visitors".created_at, \'Q\')');
+    expect(sql).not.toContain('\'undefined\'');
+    expect(sql).toMatch(/GROUP BY\s+TRUNC/);
+    expect(params).toEqual(['2024-01-01T00:00:00.000Z', '2024-12-31T23:59:59.999Z']);
+  });
 });

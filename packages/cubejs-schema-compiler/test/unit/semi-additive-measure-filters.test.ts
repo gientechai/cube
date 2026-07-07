@@ -1,6 +1,7 @@
 /* eslint-disable no-restricted-syntax */
 import { DmQuery } from '../../src/adapter/DmQuery';
 import { MysqlQuery } from '../../src/adapter/MysqlQuery';
+import { OracleQuery } from '../../src/adapter/OracleQuery';
 import { PostgresQuery } from '../../src/adapter/PostgresQuery';
 import { prepareJsCompiler } from './PrepareCompiler';
 
@@ -178,6 +179,28 @@ describe('semi-additive calculated measure references', () => {
 
     expect(sql).toMatch(/WITH base_data AS/i);
     expect(sql).toMatch(/(?:AS )?q_0[\s\S]*ORDER BY "score1__fuhezhibiao" DESC NULLS LAST/i);
+    expect(sql).not.toMatch(/ORDER BY[\s\S]*sum\("score1"\.score\)/i);
+  });
+
+  it('orders calculated semi-additive measure by alias on Oracle (hoists WITH above q_0)', async () => {
+    await compiler.compile();
+
+    const query = new OracleQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['score1.fuhezhibiao'],
+        dimensions: ['score1.subject'],
+        order: [{ id: 'score1.fuhezhibiao', desc: true }],
+        limit: 100,
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).toMatch(/^WITH base_data AS/i);
+    expect(sql).toMatch(/windowed_data AS/i);
+    expect(sql).not.toMatch(/FROM\s*\(\s*WITH/i);
+    expect(sql).toMatch(/q_0[\s\S]*ORDER BY "score1__fuhezhibiao" DESC NULLS LAST/i);
     expect(sql).not.toMatch(/ORDER BY[\s\S]*sum\("score1"\.score\)/i);
   });
 });

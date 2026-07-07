@@ -11,8 +11,54 @@ const GRANULARITY_VALUE = {
   minute: 'mm',
   second: 'ss',
   month: 'MM',
+  quarter: 'Q',
   year: 'YYYY'
 };
+
+/**
+ * Splits `WITH cte AS (...), ... SELECT ...` into the WITH prefix and main SELECT.
+ * Oracle rejects WITH inside subquery parentheses (ORA-32034 / ORA-00911).
+ */
+function splitLeadingWithClause(sql: string): { withClause: string; mainSql: string } | null {
+  const trimmed = sql.trim();
+  if (!/^WITH\s+/i.test(trimmed)) {
+    return null;
+  }
+
+  let depth = 0;
+  let inSingleQuote = false;
+
+  for (let i = 0; i < trimmed.length; i++) {
+    const c = trimmed[i];
+
+    if (inSingleQuote) {
+      if (c === '\'' && trimmed[i + 1] === '\'') {
+        i += 1;
+      } else if (c === '\'') {
+        inSingleQuote = false;
+      }
+      continue;
+    }
+
+    if (c === '\'') {
+      inSingleQuote = true;
+      continue;
+    }
+
+    if (c === '(') {
+      depth += 1;
+    } else if (c === ')') {
+      depth -= 1;
+    } else if (depth === 0 && /^SELECT\b/i.test(trimmed.slice(i))) {
+      return {
+        withClause: trimmed.slice(0, i).trim(),
+        mainSql: trimmed.slice(i).trim(),
+      };
+    }
+  }
+
+  return null;
+}
 
 class OracleFilter extends BaseFilter {
   public castParameter() {
@@ -39,6 +85,25 @@ export class OracleQuery extends BaseQuery {
     const limitClause = this.rowLimit === null ? '' : ` FETCH NEXT ${this.rowLimit && parseInt(this.rowLimit, 10) || 10000} ROWS ONLY`;
     const offsetClause = this.offset ? ` OFFSET ${parseInt(this.offset, 10)} ROWS` : '';
     return `${offsetClause}${limitClause}`;
+  }
+
+  /**
+   * Hoist leading WITH when wrapping semi-additive CTEs as q_0 — Oracle forbids WITH in parentheses.
+   */
+  public outerMeasuresJoinFullKeyQueryAggregate(innerMembers, outerMembers, toJoin, joinOptions = {}) {
+    if (toJoin.length === 1) {
+      const split = splitLeadingWithClause(toJoin[0]);
+      if (split) {
+        const inner = super.outerMeasuresJoinFullKeyQueryAggregate(
+          innerMembers,
+          outerMembers,
+          [split.mainSql],
+          joinOptions,
+        );
+        return `${split.withClause}\n${inner}`;
+      }
+    }
+    return super.outerMeasuresJoinFullKeyQueryAggregate(innerMembers, outerMembers, toJoin, joinOptions);
   }
 
   /**
