@@ -28,6 +28,9 @@ cubezetasketch = { path = "../cubezetasketch" }
 cubedatasketches = { path = "../cubedatasketches" }
 cubeshared = { path = "../../cube/cubeshared" }
 cuberpc = { path = "../cuberpc" }
+# PoC Day 4: openraft for metastore HA (active-active via Raft-replicated WriteBatch).
+# Pinned to v0.9.24 (stable, matches local checkout). Validates toolchain compat with cube's nightly.
+openraft = "=0.9.24"
 datafusion = { git = "https://github.com/cube-js/arrow-datafusion", branch = "cube-46.0.1", features = ["serde"] }
 datafusion-datasource = { git = "https://github.com/cube-js/arrow-datafusion", branch = "cube-46.0.1" }
 datafusion-proto = { git = "https://github.com/cube-js/arrow-datafusion", branch = "cube-46.0.1" }
