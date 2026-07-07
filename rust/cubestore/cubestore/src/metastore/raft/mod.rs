@@ -60,14 +60,19 @@ pub type CubeStoreRaft = Raft<CubeStoreRaftTypeConfig>;
 /// Alias matching openraft example's `typ::Entry` (avoids a separate typ module).
 pub type Entry = openraft::Entry<CubeStoreRaftTypeConfig>;
 
+pub mod app;
 pub mod log_store;
+pub mod network;
+pub mod raft;
 pub mod state_machine;
 
+pub use app::App;
 pub use log_store::LogStore;
+pub use network::{Network, NetworkConnection};
+pub use raft::RaftService;
 pub use state_machine::StateMachineStore;
 
-// TODO(PoC Day 4 next steps):
-//   - network.rs:          RaftNetwork impl (toy_rpc WebSocket, separate port, as in example).
-//   - api.rs:              App + initialize / add_learner / change_membership / client_write.
+// TODO(PoC Day 4 remaining):
 //   - rocks_store.rs hook: branch in BatchPipe::batch_write_rows to route via Raft when enabled.
 //   - config/mod.rs hook:  add `rocksdb-raft` branch in configure_meta_store.
+//   - node startup:        construct App + Raft at router init, serve toy_rpc WebSocket.
