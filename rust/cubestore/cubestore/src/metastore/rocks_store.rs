@@ -681,9 +681,9 @@ impl<'a, S> BatchPipe<'a, S> {
 
             // Bridge sync write_operation → async client_write. write_operation runs on
             // the RocksStoreRWLoop's dedicated OS thread, where Handle::current() panics;
-            // step 6 wires a Handle captured at router init into RocksStore and uses it here.
-            let raft_handle = tokio::runtime::Handle::current();
-            raft_handle
+            // use the Handle captured in App (set at router init) instead.
+            let handle = app.tokio_handle.clone();
+            handle
                 .block_on(async move { app.client_write(container).await })
                 .map_err(|e| CubeError::internal(format!("Raft client_write failed: {e:?}")))?;
         } else {
@@ -925,6 +925,10 @@ pub struct RocksStore {
     snapshots_upload_stopped: Arc<AsyncMutex<bool>>,
     pub(crate) rw_loop_default_cf: RocksStoreRWLoop,
     details: Arc<dyn RocksStoreDetails>,
+    /// PoC Day 4 step 1: when Some, write_operation routes batches via Raft
+    /// (see BatchPipe::batch_write_rows). Set after construction, once the
+    /// Raft App is built in configure_meta_store (App depends on this store's DB).
+    pub(crate) raft_app: Arc<Mutex<Option<Arc<crate::metastore::raft::App>>>>,
 }
 
 pub fn check_if_exists(name: &String, existing_keys_len: usize) -> Result<(), CubeError> {
@@ -978,9 +982,16 @@ impl RocksStore {
             config,
             rw_loop_default_cf: RocksStoreRWLoop::new("metastore", "default"),
             details,
+            raft_app: Arc::new(Mutex::new(None)),
         };
 
         Ok(meta_store)
+    }
+
+    /// PoC Day 4 step 6 wiring: install the Raft App so subsequent writes route
+    /// through Raft (BatchPipe::with_raft_app). Called once the App is constructed.
+    pub fn set_raft_app(self: &Arc<Self>, app: Arc<crate::metastore::raft::App>) {
+        *self.raft_app.lock().unwrap() = Some(app);
     }
 
     pub fn new(
@@ -1086,6 +1097,9 @@ impl RocksStore {
         let db = self.db.clone();
         let mem_seq = MemorySequence::new(self.seq_store.clone());
         let db_to_send = db.clone();
+        // PoC Day 4 step 1: clone the Raft-App holder so the closure on the
+        // RWLoop thread can attach it to BatchPipe (Raft routing when set).
+        let raft_app_holder = self.raft_app.clone();
 
         let loop_name = rw_loop.get_name();
         let store_name = self.details.get_name();
@@ -1098,6 +1112,9 @@ impl RocksStore {
                 let db_span = warn_long(&span_name, Duration::from_millis(100));
 
                 let mut batch = BatchPipe::new(db_to_send.as_ref());
+                if let Some(app) = raft_app_holder.lock().unwrap().clone() {
+                    batch = batch.with_raft_app(app);
+                }
                 let snapshot = db_to_send.snapshot();
                 let res = f(
                     DbTableRef {
