@@ -31,6 +31,8 @@ cuberpc = { path = "../cuberpc" }
 # PoC Day 4: openraft for metastore HA (active-active via Raft-replicated WriteBatch).
 # Pinned to v0.9.24 (stable, matches local checkout). `serde` feature needed for Entry serialize.
 openraft = { version = "=0.9.24", features = ["serde", "storage-v2"] }
+# PoC Day 4 step 3: toy_rpc for Raft inter-node RPC (WebSocket), as in openraft example.
+toy-rpc = { version = "0.10", features = ["ws_tokio", "server", "client", "tokio_runtime"] }
 datafusion = { git = "https://github.com/cube-js/arrow-datafusion", branch = "cube-46.0.1", features = ["serde"] }
 datafusion-datasource = { git = "https://github.com/cube-js/arrow-datafusion", branch = "cube-46.0.1" }
 datafusion-proto = { git = "https://github.com/cube-js/arrow-datafusion", branch = "cube-46.0.1" }
