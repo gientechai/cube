@@ -4,6 +4,7 @@ pub mod job;
 pub mod listener;
 pub mod multi_index;
 pub mod partition;
+pub mod raft;
 pub mod replay_handle;
 mod rocks_fs;
 mod rocks_store;
