@@ -57,9 +57,16 @@ openraft::declare_raft_types!(
 /// Convenience alias for the Raft instance type.
 pub type CubeStoreRaft = Raft<CubeStoreRaftTypeConfig>;
 
+/// Alias matching openraft example's `typ::Entry` (avoids a separate typ module).
+pub type Entry = openraft::Entry<CubeStoreRaftTypeConfig>;
+
+pub mod log_store;
+pub mod state_machine;
+
+pub use log_store::LogStore;
+pub use state_machine::StateMachineStore;
+
 // TODO(PoC Day 4 next steps):
-//   - log_store.rs:        RaftLogStorage impl (port from openraft example, single-CF RocksDB).
-//   - state_machine.rs:    RaftStateMachine impl; apply() calls db.write(wb.write_batch()).
 //   - network.rs:          RaftNetwork impl (toy_rpc WebSocket, separate port, as in example).
 //   - api.rs:              App + initialize / add_learner / change_membership / client_write.
 //   - rocks_store.rs hook: branch in BatchPipe::batch_write_rows to route via Raft when enabled.
