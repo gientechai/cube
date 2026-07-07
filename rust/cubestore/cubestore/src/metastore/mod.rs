@@ -1496,6 +1496,13 @@ impl RocksMetaStore {
         )?))
     }
 
+    /// PoC Day 4 step 2: expose the inner RocksStore so configure_meta_store can
+    /// construct the Raft App (LogStore + StateMachineStore share this store's DB)
+    /// and call `set_raft_app`.
+    pub fn store(&self) -> Arc<RocksStore> {
+        self.store.clone()
+    }
+
     fn new_from_store(store: Arc<RocksStore>) -> Arc<Self> {
         Arc::new(Self {
             store,

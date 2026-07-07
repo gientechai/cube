@@ -2523,6 +2523,60 @@ impl Config {
                             .unwrap()
                     };
                     meta_store.add_listener(metastore_event_sender).await;
+
+                    // PoC Day 4 step 2: when raft backend requested, construct the
+                    // Raft App (LogStore + StateMachineStore share this metastore DB)
+                    // and attach via set_raft_app so subsequent writes route via Raft.
+                    // Handle::current() works here because this closure runs in a tokio
+                    // context; the Handle is later used from the RWLoop's OS thread.
+                    if raft_backend {
+                        let rocks_store = meta_store.store();
+                        let db = rocks_store.db.clone();
+                        let handle = tokio::runtime::Handle::current();
+
+                        let node_id = env::var("CUBESTORE_RAFT_NODE_ID")
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(1);
+                        let rpc_addr =
+                            env::var("CUBESTORE_RAFT_RPC_ADDR").unwrap_or_else(|_| "127.0.0.1:22001".to_string());
+                        let api_addr =
+                            env::var("CUBESTORE_RAFT_API_ADDR").unwrap_or_else(|_| "127.0.0.1:21001".to_string());
+
+                        let raft_log_path = format!("{}.raft_log", path);
+                        let log_store = crate::metastore::raft::LogStore::open(&raft_log_path);
+                        let sm_store = crate::metastore::raft::StateMachineStore::new(db).await;
+                        let network = crate::metastore::raft::Network;
+                        let raft_config = Arc::new(
+                            openraft::Config {
+                                heartbeat_interval: 250,
+                                election_timeout_min: 299,
+                                ..Default::default()
+                            }
+                            .validate()
+                            .unwrap(),
+                        );
+                        let raft = openraft::Raft::new(
+                            node_id,
+                            raft_config.clone(),
+                            network,
+                            log_store,
+                            sm_store,
+                        )
+                        .await
+                        .unwrap();
+                        let app = Arc::new(crate::metastore::raft::App {
+                            id: node_id,
+                            rpc_addr: rpc_addr.clone(),
+                            api_addr: api_addr.clone(),
+                            tokio_handle: handle,
+                            raft,
+                            config: raft_config,
+                        });
+                        rocks_store.set_raft_app(app);
+                        tracing::info!(node_id, rpc_addr, api_addr, "Raft metastore backend enabled");
+                    }
+
                     meta_store
                 })
                 .await;
