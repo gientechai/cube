@@ -300,7 +300,7 @@ export class MysqlQuery extends BaseQuery {
       '  WHERE DATE_ADD(date_from, INTERVAL {{ granularity }}) <= TIMESTAMP({{ end }})\n' +
       ')\n' +
       'SELECT CAST(date_from AS DATETIME) AS date_from,\n' +
-      '       CAST(DATE_SUB(DATE_ADD(date_from, INTERVAL {{ granularity }}), INTERVAL 1000 MICROSECOND) AS DATETIME) AS date_to\n' +
+      '       CAST(DATE_SUB(DATE_ADD(date_from, INTERVAL {{ granularity }}), INTERVAL 1000 MICROSECOND) AS DATETIME(3)) AS date_to\n' +
       'FROM date_series';
 
     templates.statements.generated_time_series_with_cte_range_source =
@@ -314,7 +314,7 @@ export class MysqlQuery extends BaseQuery {
       '  WHERE DATE_ADD(date_from, INTERVAL {{ granularity }}) <= max_date\n' +
       ')\n' +
       'SELECT CAST(date_from AS DATETIME) AS date_from,\n' +
-      '       CAST(DATE_SUB(DATE_ADD(date_from, INTERVAL {{ granularity }}), INTERVAL 1000 MICROSECOND) AS DATETIME) AS date_to\n' +
+      '       CAST(DATE_SUB(DATE_ADD(date_from, INTERVAL {{ granularity }}), INTERVAL 1000 MICROSECOND) AS DATETIME(3)) AS date_to\n' +
       'FROM date_series';
     templates.expressions.wrap_segment_select = 'IF({{ expr }}, 1, 0)';
     templates.expressions.wrap_segment_filter = '{{ expr }} = 1';
