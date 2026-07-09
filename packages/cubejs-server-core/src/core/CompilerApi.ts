@@ -1003,10 +1003,54 @@ export class CompilerApi {
       return { query, denied: false };
     }
 
-    // Get the SQL to extract member names from the query
+    // Get the SQL to extract member names from the query. ORDER members may not
+    // appear in sql.memberNames when they are not projected, so include them
+    // explicitly to avoid sorting side channels on denied members.
     const sql = await this.getSql(evaluatedQuery, { requestId: context?.requestId });
-    const queryMemberNames = new Set(sql.memberNames);
-    const queryCubes = new Set(sql.memberNames.map(memberName => memberName.split('.')[0]));
+    const collectOrderMemberNames = (order: any): string[] => {
+      if (!order) {
+        return [];
+      }
+      if (Array.isArray(order)) {
+        return order
+          .map((item: any) => (Array.isArray(item) ? item[0] : item?.id))
+          .filter((memberName: any): memberName is string => (
+            typeof memberName === 'string' && memberName.includes('.')
+          ));
+      }
+      if (typeof order === 'object') {
+        return Object.keys(order).filter(memberName => memberName.includes('.'));
+      }
+      return [];
+    };
+    const collectFilterMemberNames = (filters: any[] = []): string[] => {
+      const members: string[] = [];
+      for (const filter of filters || []) {
+        if (filter?.and) {
+          members.push(...collectFilterMemberNames(filter.and));
+          continue;
+        }
+        if (filter?.or) {
+          members.push(...collectFilterMemberNames(filter.or));
+          continue;
+        }
+        const memberName = filter?.member || filter?.dimension;
+        if (typeof memberName === 'string' && memberName.includes('.')) {
+          members.push(memberName);
+        }
+      }
+      return members;
+    };
+    const orderMemberNames = [
+      ...collectOrderMemberNames(query.order),
+      ...collectOrderMemberNames(evaluatedQuery.order),
+    ];
+    const filterMemberNames = [
+      ...collectFilterMemberNames(query.filters),
+      ...collectFilterMemberNames(evaluatedQuery.filters),
+    ];
+    const queryMemberNames = new Set([...sql.memberNames, ...orderMemberNames, ...filterMemberNames]);
+    const queryCubes = new Set(Array.from(queryMemberNames).map(memberName => memberName.split('.')[0]));
 
     // Identify cubes that are accessed through views.
     // Similar to PostgreSQL views: views act as a security boundary for member access.
