@@ -148,8 +148,6 @@ impl ToDateRollingWindowJoinCondition {
         context: Rc<VisitorContext>,
     ) -> Result<String, CubeError> {
         let date_column = self.time_dimension.to_sql(templates, context)?;
-        // Align with ToDateRollingWindowOp filter path: compare time series bounds in query timezone.
-        let date_column = templates.convert_tz(date_column)?;
 
         let date_from =
             templates.column_reference(&Some(self.time_series_source.clone()), "date_from")?;
