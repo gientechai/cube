@@ -684,6 +684,14 @@ fn invoke_driver_tools<IT: InnerTypes>(b: &NativeDriverTools<IT>) -> InvokeResul
         b.support_generated_series_for_custom_td(),
     );
     r.record("date_bin", b.date_bin(s(), s(), s()));
+    r.record(
+        "period_average_divisor",
+        b.period_average_divisor(s(), s(), s(), s(), None, false),
+    );
+    r.record(
+        "period_average_numerator",
+        b.period_average_numerator(s(), s(), s(), s(), None),
+    );
     r
 }
 

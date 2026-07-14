@@ -42,4 +42,21 @@ pub trait DriverTools {
         source: String,
         origin: String,
     ) -> Result<String, CubeError>;
+    fn period_average_divisor(
+        &self,
+        avg_unit: String,
+        interval: String,
+        denominator: String,
+        time_dimension: String,
+        bucket_sql: Option<String>,
+        identity: bool,
+    ) -> Result<String, CubeError>;
+    fn period_average_numerator(
+        &self,
+        inner_agg_sql: String,
+        avg_unit: String,
+        interval: String,
+        time_dimension: String,
+        bucket_sql: Option<String>,
+    ) -> Result<String, CubeError>;
 }

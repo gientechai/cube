@@ -77,6 +77,10 @@ impl State {
             .borrow_mut()
             .set_query_tools(Rc::downgrade(&result.query_tools));
 
+        result
+            .query_tools
+            .set_compiler(Rc::downgrade(&result.compiler));
+
         // Compile mask filters now that both the Compiler and the
         // Rc<QueryTools> exist; the result is stored back into QueryTools.
         if let Some(items) = masked_members {

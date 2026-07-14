@@ -172,6 +172,28 @@ export class BaseMeasure {
     return !!this.nonAdditiveConfig;
   }
 
+  public isPeriodAverage(): boolean {
+    const definition = this.measureDefinition();
+    const meta = definition?.meta;
+    return !!(
+      definition.periodAverage
+      || definition.period_average
+      || (meta && typeof meta === 'object' && (meta.periodAverage || meta.period_average))
+    );
+  }
+
+  /**
+   * 半累加 CTE 内层已投影 period_average 结果时，外层 q_0 只引用列别名，不再重复除分母。
+   */
+  private isPeriodAverageRenderedInSemiAdditiveOuter(): boolean {
+    if (!this.isPeriodAverage()) {
+      return false;
+    }
+    const measurePath = this.expressionPath();
+    const renderedRef = this.query.safeEvaluateSymbolContext().renderedReference;
+    return !!(measurePath && renderedRef?.[measurePath]);
+  }
+
   public getMembers() {
     return [this];
   }
@@ -179,7 +201,7 @@ export class BaseMeasure {
   public selectColumns() {
     // 对于半累加指标，如果查询已经包含聚合（在 CTE 中），
     // 则直接返回列名，而不是重新计算聚合
-    if (this.isSemiAdditive()) {
+    if (this.isSemiAdditive() || this.isPeriodAverageRenderedInSemiAdditiveOuter()) {
       // 检查查询是否已经处理了半累加指标（通过检查上下文）
       // 如果是，则只返回列名
       return [`${this.aliasName()}`];
@@ -188,6 +210,9 @@ export class BaseMeasure {
   }
 
   public hasNoRemapping() {
+    if (this.isSemiAdditive() || this.isPeriodAverageRenderedInSemiAdditiveOuter()) {
+      return true;
+    }
     return this.measureSql() === this.aliasName();
   }
 
@@ -205,18 +230,32 @@ export class BaseMeasure {
   }
 
   public measureSql() {
-    // 处理表达式类型的 measure
-    if (this.expression) {
-      return this.convertTzForRawTimeDimensionIfNeeded(() => this.query.evaluateSymbolSql(this.expressionCubeName, this.expressionName, this.definition(), 'measure'));
+    const evaluate = () => {
+      // 处理表达式类型的 measure
+      if (this.expression) {
+        return this.convertTzForRawTimeDimensionIfNeeded(() => this.query.evaluateSymbolSql(this.expressionCubeName, this.expressionName, this.definition(), 'measure'));
+      }
+
+      // period_average 引用的时点型基础 measure：按普通 measure 聚合，不走半累加期初/期末逻辑
+      if (this.isSemiAdditive() && !this.query.shouldUseSemiAdditiveAggregation(this)) {
+        return this.query.measureSql(this);
+      }
+
+      // 处理半累加指标
+      if (this.isSemiAdditive()) {
+        return this.semiAdditiveMeasureSql();
+      }
+
+      // 常规指标
+      return this.query.measureSql(this);
+    };
+
+    if (this.isPeriodAverage()) {
+      const innerAggSql = this.query.evaluateSymbolSqlWithContext(evaluate, { periodAverageNumerator: true });
+      return this.query.wrapPeriodAverageMeasureSql(this, innerAggSql);
     }
 
-    // 处理半累加指标
-    if (this.isSemiAdditive()) {
-      return this.semiAdditiveMeasureSql();
-    }
-
-    // 常规指标
-    return this.query.measureSql(this);
+    return evaluate();
   }
 
   // We need this for measures however we don't for filters for performance reasons

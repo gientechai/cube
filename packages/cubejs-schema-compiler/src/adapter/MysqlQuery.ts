@@ -221,6 +221,23 @@ export class MysqlQuery extends BaseQuery {
     return `\`${name}\``;
   }
 
+  /**
+   * MySQL 系：在默认的双引号 + 无引号基础上，补充反引号限定写法 `​`​`cube``。
+   */
+  ownedCubeQualifiedColumnReplacements(
+    cubeName: string,
+    cubeAlias: string,
+    escapedCubeName: string,
+  ) {
+    return [
+      ...super.ownedCubeQualifiedColumnReplacements(cubeName, cubeAlias, escapedCubeName),
+      {
+        pattern: new RegExp(`\`${escapedCubeName}\`\\s*\\.`, 'g'),
+        replacement: `${cubeAlias}.`,
+      },
+    ];
+  }
+
   public seriesSql(timeDimension: BaseTimeDimension): string {
     const values = timeDimension.timeSeries().map(
       ([from, to]) => `select '${from}' f, '${to}' t`
@@ -254,6 +271,166 @@ export class MysqlQuery extends BaseQuery {
 
   public intervalString(interval: string): string {
     return this.formatInterval(interval);
+  }
+
+  // ==========================================================================
+  // period_average 方言适配区（MySQL）
+  //
+  // 下面方法均是对 BaseQuery 中 PostgreSQL 风格默认实现的重写，将日期/时间函数
+  // 替换为 MySQL 语法。适配新数据库时，参照本区块重写下列方法（详见 BaseQuery
+  // 中各方法的 @dialect 注释）：
+  //   - periodAverageDateLiteral / periodAverageToDateExpr  日期字面量与转 DATE
+  //   - periodAverageNowExpr             当前日期（带时区 CONVERT_TZ）
+  //   - periodAverageGroupedBucketExpr   窗口列 MIN 包装
+  //   - periodAverageClosedFormIntervalBucketUnits  整区间 calendar 快路径（先 super）
+  //   - periodAverageCumulativeCalendarUnitCount    累计 calendar 快路径（先 super）
+  //   - periodAverageDaysIn{Month,Quarter,Year}Bucket  桶内天数
+  //   - periodAverageBucketEndExpr       区间终点
+  //   - periodAverageIntervalStartExpr   区间起点
+  //   - periodAverageIntervalBucketFromAvgUnit  从 avg_unit 列推区间桶
+  //   - {days,months,quarters,years}BetweenInclusive  间隔计数（TIMESTAMPDIFF）
+  //   - ownedCubeQualifiedColumnReplacements  标识符引号规则（本库：反引号 + super）
+  // ==========================================================================
+
+  periodAverageDateLiteral(dateStr: string): string {
+    return `DATE('${dateStr}')`;
+  }
+
+  periodAverageNowExpr(): string {
+    const frozenNow = process.env.CUBEJS_TEST_NOW;
+    if (frozenNow) {
+      return this.periodAverageDateLiteral(frozenNow);
+    }
+    if (this.useNamedTimezones) {
+      return `DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '${this.timezone}'))`;
+    }
+    return `DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '${moment().tz(this.timezone).format('Z')}'))`;
+  }
+
+  periodAverageToDateExpr(sql: string): string {
+    return `DATE(${sql})`;
+  }
+
+  periodAverageGroupedBucketExpr(bucketColumn: string, options: { aggregateOnce?: boolean } = {}) {
+    if (this.ungrouped) {
+      return bucketColumn;
+    }
+    const trimmed = bucketColumn.trim();
+    if (/^MIN\s*\(/i.test(trimmed)) {
+      return bucketColumn;
+    }
+    return `MIN(${bucketColumn})`;
+  }
+
+  periodAverageClosedFormIntervalBucketUnits(avgUnit: string, interval: string, groupedBucket: string) {
+    const constant = super.periodAverageClosedFormIntervalBucketUnits(avgUnit, interval, groupedBucket);
+    if (constant) {
+      return constant;
+    }
+
+    if (avgUnit === 'day') {
+      if (interval === 'month') {
+        return this.periodAverageDaysInMonthBucket(groupedBucket);
+      }
+      if (interval === 'quarter') {
+        return this.periodAverageDaysInQuarterBucket(groupedBucket);
+      }
+      if (interval === 'year') {
+        return this.periodAverageDaysInYearBucket(groupedBucket);
+      }
+    }
+
+    return null;
+  }
+
+  periodAverageCumulativeCalendarUnitCount(
+    avgUnit: string,
+    interval: string,
+    intervalStart: string,
+    current: string,
+  ) {
+    if (avgUnit === 'day') {
+      return `GREATEST(DATEDIFF(${current}, ${intervalStart}) + 1, 0)`;
+    }
+    if (avgUnit === 'month' && (interval === 'year' || interval === 'quarter' || interval === 'month')) {
+      return `GREATEST(MONTH(${current}) - MONTH(${intervalStart}) + 1, 0)`;
+    }
+    return null;
+  }
+
+  periodAverageDaysInMonthBucket(bucketColumn: string) {
+    return `GREATEST(DAY(LAST_DAY(${bucketColumn})), 0)`;
+  }
+
+  periodAverageDaysInQuarterBucket(bucketColumn: string) {
+    return `GREATEST(DATEDIFF(LAST_DAY(DATE_ADD(${bucketColumn}, INTERVAL 2 MONTH)), DATE(DATE_FORMAT(${bucketColumn}, '%Y-%m-01'))) + 1, 0)`;
+  }
+
+  periodAverageDaysInYearBucket(bucketColumn: string) {
+    return `GREATEST(DATEDIFF(DATE(CONCAT(YEAR(${bucketColumn}), '-12-31')), DATE(CONCAT(YEAR(${bucketColumn}), '-01-01'))) + 1, 0)`;
+  }
+
+  periodAverageBucketEndExpr(granularity: string, bucketColumn: string): string {
+    switch (granularity) {
+      case 'day':
+        return `DATE(${bucketColumn})`;
+      case 'month':
+        return `LAST_DAY(${bucketColumn})`;
+      case 'quarter':
+        return `LAST_DAY(DATE_ADD(${bucketColumn}, INTERVAL 2 MONTH))`;
+      case 'year':
+        return `DATE(CONCAT(YEAR(${bucketColumn}), '-12-31'))`;
+      default:
+        return `DATE(${bucketColumn})`;
+    }
+  }
+
+  periodAverageIntervalStartExpr(interval: string, bucketColumn: string): string {
+    switch (interval) {
+      case 'day':
+        return this.periodAverageToDateExpr(bucketColumn);
+      case 'month':
+        return `DATE(DATE_FORMAT(${bucketColumn}, '%Y-%m-01'))`;
+      case 'quarter':
+        return `MAKEDATE(YEAR(${bucketColumn}), 1) + INTERVAL QUARTER(${bucketColumn}) QUARTER - INTERVAL 1 QUARTER`;
+      case 'year':
+        return `DATE(CONCAT(YEAR(${bucketColumn}), '-01-01'))`;
+      default:
+        throw new UserError(`Unsupported period_average interval '${interval}'`);
+    }
+  }
+
+  periodAverageIntervalBucketFromAvgUnit(avgUnitBucket: string, interval: string): string {
+    switch (interval) {
+      case 'day':
+        return avgUnitBucket;
+      case 'month':
+        return `DATE_FORMAT(${avgUnitBucket}, '%Y-%m-01T00:00:00.000')`;
+      case 'quarter': {
+        const quarterStart = `MAKEDATE(YEAR(${avgUnitBucket}), 1) + INTERVAL QUARTER(${avgUnitBucket}) QUARTER - INTERVAL 1 QUARTER`;
+        return `DATE_FORMAT(${quarterStart}, '%Y-%m-%dT00:00:00.000')`;
+      }
+      case 'year':
+        return `DATE_FORMAT(${avgUnitBucket}, '%Y-01-01T00:00:00.000')`;
+      default:
+        throw new UserError(`Unsupported period_average interval '${interval}'`);
+    }
+  }
+
+  daysBetweenInclusive(start: string, end: string): string {
+    return `GREATEST((DATEDIFF(${end}, ${start}) + 1), 0)`;
+  }
+
+  monthsBetweenInclusive(start: string, end: string): string {
+    return `GREATEST((TIMESTAMPDIFF(MONTH, ${start}, ${end}) + 1), 0)`;
+  }
+
+  quartersBetweenInclusive(start: string, end: string): string {
+    return `GREATEST((TIMESTAMPDIFF(QUARTER, ${start}, ${end}) + 1), 0)`;
+  }
+
+  yearsBetweenInclusive(start: string, end: string): string {
+    return `GREATEST((TIMESTAMPDIFF(YEAR, ${start}, ${end}) + 1), 0)`;
   }
 
   public sqlTemplates() {

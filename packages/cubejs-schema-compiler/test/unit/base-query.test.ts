@@ -1,5 +1,5 @@
 import moment from 'moment-timezone';
-import { BaseQuery, PostgresQuery, MssqlQuery, UserError, CubeStoreQuery } from '../../src';
+import { BaseQuery, PostgresQuery, MssqlQuery, MysqlQuery, UserError, CubeStoreQuery } from '../../src';
 import { prepareJsCompiler, prepareYamlCompiler } from './PrepareCompiler';
 import {
   createCubeSchema,
@@ -230,6 +230,22 @@ describe('SQL Generation', () => {
       expect(rewrittenQuotedReference).toEqual('"main__cards"."amount"');
       expect(rewrittenUnquotedReference).toEqual('"main__cards".amount');
       expect(untouchedOtherCubeReference).toEqual('"orders"."amount"');
+    });
+    it('Rewrites MySQL backtick-qualified current cube references to the runtime alias prefix', async () => {
+      await compilers.compiler.compile();
+
+      const query = new MysqlQuery(compilers, {
+        measures: ['cards.sum'],
+        timeDimensions: [],
+        filters: [],
+      });
+
+      const rewrittenBacktickReference = query.withCubeAliasPrefix(
+        'main',
+        () => query.autoPrefixWithCubeName('cards', '`cards`.`amount`')
+      );
+
+      expect(rewrittenBacktickReference).toEqual('`main__cards`.`amount`');
     });
     it('Simple query - simple filter', async () => {
       await compilers.compiler.compile();

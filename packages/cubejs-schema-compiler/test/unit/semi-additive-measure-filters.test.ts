@@ -5,6 +5,27 @@ import { OracleQuery } from '../../src/adapter/OracleQuery';
 import { PostgresQuery } from '../../src/adapter/PostgresQuery';
 import { prepareJsCompiler } from './PrepareCompiler';
 
+/** JOIN 路径用 matched_data，窗口路径用 windowed_data */
+const expectSemiAdditiveCtePath = (sql: string) => {
+  expect(sql).toMatch(/WITH base_data AS/i);
+  expect(sql).toMatch(/windowed_data|matched_data/i);
+};
+
+const expectPaSemiAdditiveSumDivisorSql = (sql: string, paMeasureSuffix: string) => {
+  expect(sql).toMatch(new RegExp(`__pa_base_[^\\s,)]+${paMeasureSuffix}`, 'i'));
+  expect(sql).toMatch(
+    new RegExp(
+      'SUM\\s*\\(?\\s*["\']__pa_base_[^"\']+["\']\\s*\\)?\\s*\\)?\\s*\\/\\s*NULLIF',
+      'i',
+    ),
+  );
+};
+
+const expectNoMainTableInSemiAdditiveOuterAggregation = (sql: string) => {
+  expect(sql).not.toMatch(/FROM windowed_data[\s\S]*main__/i);
+  expect(sql).not.toMatch(/FROM matched_data[\s\S]*main__/i);
+};
+
 describe('semi-additive measure schema filters', () => {
   const { compiler, joinGraph, cubeEvaluator } = prepareJsCompiler(`
     cube(\`score1\`, {
@@ -375,5 +396,197 @@ describe('semi-additive windowGroupings dimensions in base_data', () => {
     // windowGroupings 进入 bounds 的 GROUP BY（JOIN 路径不再使用 PARTITION BY）
     expect(sql).toMatch(/GROUP BY[\s\S]*"facts__city"/i);
     expect(sql).not.toMatch(/OVER\s*\(/i);
+  });
+});
+
+describe('period_average with semi-additive base measure', () => {
+  const { compiler, joinGraph, cubeEvaluator } = prepareJsCompiler(`
+    cube(\`facts\`, {
+      sql: \`SELECT * FROM xss.cube_metrics_facts\`,
+
+      dimensions: {
+        statDt: {
+          sql: \`\${CUBE}.stat_dt\`,
+          type: 'time',
+        },
+      },
+
+      measures: {
+        balanceEnd: {
+          sql: \`\${CUBE}.balance_snapshot\`,
+          type: 'sum',
+          nonAdditiveDimension: {
+            name: 'statDt',
+            windowChoice: 'max',
+          },
+        },
+        periodDailyAvg: {
+          type: 'number',
+          sql: \`\${balanceEnd}\`,
+          period_average: {
+            avg_unit: 'day',
+            interval: 'month',
+            denominator: 'calendar',
+            time_dimension: 'statDt',
+          },
+        },
+      },
+    })
+  `);
+
+  beforeAll(async () => {
+    await compiler.compile();
+  });
+
+  it('compile infers baseMeasure from sql for Tesseract bridge', () => {
+    const def = cubeEvaluator.measureByPath('facts.periodDailyAvg');
+    const pa = def.period_average || def.periodAverage;
+    expect(pa?.baseMeasure).toBe('facts.balanceEnd');
+    expect(pa?.baseAggType).toBe('sum');
+  });
+
+  it('only period_average selected → no semi-additive CTE, numerator uses SUM', () => {
+    const query = new PostgresQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['facts.periodDailyAvg'],
+        timeDimensions: [{
+          dimension: 'facts.statDt',
+          granularity: 'month',
+          dateRange: ['2025-06-01', '2025-06-30'],
+        }],
+        timezone: 'UTC',
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).not.toMatch(/WITH base_data AS/i);
+    expect(sql).not.toMatch(/windowed_data/i);
+    expect(sql).toMatch(/SUM\s*\(/i);
+    expect(sql).not.toMatch(/OVER\s*\(/i);
+    expect(sql).toMatch(/NULLIF/i);
+  });
+
+  it('balanceEnd + period_average together → balanceEnd semi-additive, PA numerator still SUM', () => {
+    const query = new PostgresQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['facts.balanceEnd', 'facts.periodDailyAvg'],
+        timeDimensions: [{
+          dimension: 'facts.statDt',
+          granularity: 'month',
+          dateRange: ['2025-06-01', '2025-06-30'],
+        }],
+        timezone: 'UTC',
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expectSemiAdditiveCtePath(sql);
+    expect(sql).toMatch(/SUM\s*\(/i);
+    expect(sql).toMatch(/NULLIF/i);
+    expect(sql).toMatch(/__pa_base_facts__period_daily_avg/i);
+    expectPaSemiAdditiveSumDivisorSql(sql, 'period_daily_avg');
+    expect(sql).not.toMatch(/MIN\(date_trunc\('month',\s*\("main__facts"/i);
+    expect(sql).not.toMatch(/sum\("main__facts"\.balance_snapshot\).*period_daily_avg/is);
+  });
+});
+
+describe('period_average + explicit semi-additive measure (regular sum base)', () => {
+  const { compiler, joinGraph, cubeEvaluator } = prepareJsCompiler(`
+    cube(\`facts\`, {
+      sql: \`SELECT * FROM xss.cube_metrics_facts\`,
+
+      dimensions: {
+        statDt: {
+          sql: \`\${CUBE}.stat_dt\`,
+          type: 'time',
+        },
+      },
+
+      measures: {
+        balanceBegin: {
+          sql: \`\${CUBE}.balance_snapshot\`,
+          type: 'sum',
+          nonAdditiveDimension: {
+            name: 'statDt',
+            windowChoice: 'min',
+          },
+        },
+        trxAmount: {
+          sql: \`\${CUBE}.amount\`,
+          type: 'sum',
+        },
+        periodDailyAvgCalendar: {
+          type: 'number',
+          sql: \`\${trxAmount}\`,
+          period_average: {
+            avg_unit: 'day',
+            interval: 'month',
+            denominator: 'calendar',
+            time_dimension: 'statDt',
+          },
+        },
+        periodDailyAvgData: {
+          type: 'number',
+          sql: \`\${trxAmount}\`,
+          period_average: {
+            avg_unit: 'day',
+            interval: 'month',
+            denominator: 'data',
+            time_dimension: 'statDt',
+          },
+        },
+      },
+    })
+  `);
+
+  beforeAll(async () => {
+    await compiler.compile();
+  });
+
+  it('balanceBegin + periodDailyAvgCalendar → PA uses __pa_base column, not main__ table in semi-additive CTE', () => {
+    const query = new PostgresQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['facts.balanceBegin', 'facts.periodDailyAvgCalendar'],
+        timeDimensions: [{
+          dimension: 'facts.statDt',
+          granularity: 'month',
+          dateRange: ['2026-04-01', '2026-04-30'],
+        }],
+        timezone: 'UTC',
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expectSemiAdditiveCtePath(sql);
+    expect(sql).toMatch(/__pa_base_facts__period_daily_avg_calendar/i);
+    expectPaSemiAdditiveSumDivisorSql(sql, 'period_daily_avg_calendar');
+    expect(sql).not.toMatch(/sum\("main__facts"\.amount\)/i);
+    expectNoMainTableInSemiAdditiveOuterAggregation(sql);
+  });
+
+  it('balanceBegin + periodDailyAvgData uses row-level stat_dt for data divisor in CTE', () => {
+    const query = new PostgresQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['facts.balanceBegin', 'facts.periodDailyAvgData'],
+        timeDimensions: [{
+          dimension: 'facts.statDt',
+          granularity: 'month',
+          dateRange: ['2026-04-01', '2026-04-30'],
+        }],
+        timezone: 'UTC',
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).toMatch(/COUNT\(DISTINCT[\s\S]*facts__stat_dt/i);
+    expect(sql).not.toMatch(/COUNT\(DISTINCT[\s\S]*\(stat_dt::timestamptz/i);
   });
 });
