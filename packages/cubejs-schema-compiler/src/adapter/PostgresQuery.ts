@@ -112,4 +112,48 @@ export class PostgresQuery extends BaseQuery {
   public get shouldReuseParams() {
     return true;
   }
+
+  // ==========================================================================
+  // period_average 方言适配区（PostgreSQL）
+  //
+  // BaseQuery 的 period_average 默认实现本身就是 PostgreSQL 语法，故 PG 仅重写
+  // 「整区间 calendar 快路径」相关方法以提供 day 口径的闭式天数表达式，
+  // 其余方法（日期字面量、now、间隔计数等）直接继承 BaseQuery 默认实现。
+  //
+  // 适配新数据库时：若该库语法接近 PG（如 Redshift），可直接继承 BaseQuery 默认实现，
+  // 仅按需重写 periodAverageClosedFormIntervalBucketUnits / periodAverageDaysIn* 即可。
+  // ==========================================================================
+
+  periodAverageClosedFormIntervalBucketUnits(avgUnit, interval, groupedBucket) {
+    const constant = super.periodAverageClosedFormIntervalBucketUnits(avgUnit, interval, groupedBucket);
+    if (constant) {
+      return constant;
+    }
+
+    if (avgUnit === 'day') {
+      if (interval === 'month') {
+        return this.periodAverageDaysInMonthBucket(groupedBucket);
+      }
+      if (interval === 'quarter') {
+        return this.periodAverageDaysInQuarterBucket(groupedBucket);
+      }
+      if (interval === 'year') {
+        return this.periodAverageDaysInYearBucket(groupedBucket);
+      }
+    }
+
+    return null;
+  }
+
+  periodAverageDaysInMonthBucket(bucketColumn) {
+    return `GREATEST(EXTRACT(DAY FROM ((${bucketColumn}) + INTERVAL '1 month' - INTERVAL '1 day'))::int, 0)`;
+  }
+
+  periodAverageDaysInQuarterBucket(bucketColumn) {
+    return `GREATEST(((${bucketColumn}) + INTERVAL '3 months' - INTERVAL '1 day')::date - (${bucketColumn})::date + 1, 0)`;
+  }
+
+  periodAverageDaysInYearBucket(bucketColumn) {
+    return `GREATEST(((${bucketColumn}) + INTERVAL '1 year' - INTERVAL '1 day')::date - (${bucketColumn})::date + 1, 0)`;
+  }
 }

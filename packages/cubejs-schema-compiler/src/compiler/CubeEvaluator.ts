@@ -140,12 +140,54 @@ export type NonAdditiveDimensionConfig = {
   distinct?: boolean;
 };
 
+export type PeriodAverageConfig = {
+  avgUnit?: 'day' | 'month' | 'quarter' | 'year';
+  avg_unit?: 'day' | 'month' | 'quarter' | 'year';
+  unit?: 'day' | 'month' | 'quarter' | 'year';
+  interval: 'day' | 'month' | 'quarter' | 'year';
+  denominator: 'data' | 'calendar';
+  timeDimension?: string;
+  time_dimension?: string;
+  baseMeasure?: string;
+  base_measure?: string;
+  baseAggType?: string;
+  base_agg_type?: string;
+};
+
+type PeriodAverageInput = Partial<PeriodAverageConfig> & {
+  avg_unit?: PeriodAverageConfig['avgUnit'];
+  unit?: PeriodAverageConfig['avgUnit'];
+  time_dimension?: string;
+};
+
+const PERIOD_AVERAGE_GRANULARITY_RANK: Record<string, number> = {
+  day: 0,
+  month: 1,
+  quarter: 2,
+  year: 3,
+};
+
+function periodAverageGranularityRank(granularity: string): number {
+  const rank = PERIOD_AVERAGE_GRANULARITY_RANK[granularity];
+  if (rank === undefined) {
+    throw new Error(`Unsupported period_average granularity '${granularity}'`);
+  }
+  return rank;
+}
+
+function periodAverageIsFinerThan(avgUnit: string, interval: string): boolean {
+  return periodAverageGranularityRank(avgUnit) < periodAverageGranularityRank(interval);
+}
+
 export type MeasureDefinition = {
   type: string;
   aggType?: string,
   sql(): string;
   ownedByCube: boolean;
   rollingWindow?: any
+  periodAverage?: PeriodAverageConfig | PeriodAverageInput;
+  period_average?: PeriodAverageConfig | PeriodAverageInput;
+  meta?: Record<string, unknown>;
   filters?: any
   filter?: MultiStageFilterDirective;
   primaryKey?: true;
@@ -288,6 +330,11 @@ export class CubeEvaluator extends CubeSymbols {
   protected prepareCube(cube, errorReporter: ErrorReporter): EvaluatedCube {
     this.prepareJoins(cube, errorReporter);
     this.preparePreAggregations(cube, errorReporter);
+
+    // period_average must be resolved before prepareMembers so aliasMember is not set on PA measures.
+    this.normalizePeriodAverageInputs(cube.measures);
+    this.evaluatePeriodAverageReferences(cube.name, cube.measures, errorReporter);
+
     this.prepareMembers(cube.measures, cube, errorReporter);
     this.prepareMembers(cube.dimensions, cube, errorReporter);
     this.prepareMembers(cube.segments, cube, errorReporter);
@@ -665,6 +712,128 @@ export class CubeEvaluator extends CubeSymbols {
     }
   }
 
+  private normalizePeriodAverageInputs(
+    measures: Record<string, MeasureDefinition> | undefined,
+  ) {
+    if (!measures) {
+      return;
+    }
+
+    // eslint-disable-next-line no-restricted-syntax
+    for (const member of Object.values(measures)) {
+      if (member?.period_average && !member.periodAverage) {
+        member.periodAverage = member.period_average;
+      }
+    }
+  }
+
+  private evaluatePeriodAverageReferences(
+    cubeName: string,
+    measures: Record<string, MeasureDefinition> | undefined,
+    errorReporter: ErrorReporter,
+  ) {
+    if (!measures) {
+      return;
+    }
+
+    // eslint-disable-next-line no-restricted-syntax
+    for (const [measureName, member] of Object.entries(measures)) {
+      const periodAverage = (member.periodAverage || member.period_average) as PeriodAverageInput | undefined;
+      if (!periodAverage) {
+        continue;
+      }
+
+      if (member.type !== 'number') {
+        errorReporter.error(`period_average on '${cubeName}.${measureName}' requires type: number`);
+        continue;
+      }
+
+      if (member.rollingWindow || member.multiStage) {
+        errorReporter.error(`period_average on '${cubeName}.${measureName}' cannot be combined with rolling_window or multi_stage`);
+      }
+
+      const rawAvgUnit = periodAverage.avgUnit
+        || periodAverage.avg_unit
+        || periodAverage.unit;
+      if (!rawAvgUnit) {
+        errorReporter.error(`period_average on '${cubeName}.${measureName}' requires avg_unit (or unit)`);
+        continue;
+      }
+
+      if (!periodAverage.interval) {
+        errorReporter.error(`period_average on '${cubeName}.${measureName}' requires interval`);
+        continue;
+      }
+
+      if ((rawAvgUnit as string) === 'week' || (periodAverage.interval as string) === 'week') {
+        errorReporter.error(`period_average does not support granularity 'week'`);
+        continue;
+      }
+
+      if (!periodAverageIsFinerThan(rawAvgUnit, periodAverage.interval)
+        && rawAvgUnit !== periodAverage.interval) {
+        errorReporter.error(
+          `period_average on '${cubeName}.${measureName}' requires avg_unit to be finer than interval (got avg_unit='${rawAvgUnit}', interval='${periodAverage.interval}')`,
+        );
+        continue;
+      }
+
+      const rawTimeDimension = periodAverage.timeDimension
+        || periodAverage.time_dimension;
+      if (!rawTimeDimension) {
+        errorReporter.error(`period_average on '${cubeName}.${measureName}' requires time_dimension`);
+        continue;
+      }
+
+      const timeDimension = rawTimeDimension.includes('.')
+        ? rawTimeDimension
+        : `${cubeName}.${rawTimeDimension}`;
+
+      if (!member.sql) {
+        errorReporter.error(`period_average on '${cubeName}.${measureName}' requires sql referencing a single base measure`);
+        continue;
+      }
+
+      const { pathReferencesUsed } = this.collectUsedCubeReferences(cubeName, member.sql);
+      if (pathReferencesUsed.length !== 1) {
+        errorReporter.error(`period_average on '${cubeName}.${measureName}' must reference exactly one base measure`);
+        continue;
+      }
+
+      const baseMeasurePath = this.pathFromArray(pathReferencesUsed[0]);
+      const baseMeasureName = pathReferencesUsed[0][1];
+      const baseMeasure = measures[baseMeasureName];
+      if (!baseMeasure) {
+        errorReporter.error(`period_average on '${cubeName}.${measureName}' references unknown measure '${baseMeasurePath}'`);
+        continue;
+      }
+
+      if (!['sum', 'count', 'avg'].includes(baseMeasure.type)) {
+        errorReporter.error(`period_average on '${cubeName}.${measureName}' must reference a sum, count, or avg measure, got '${baseMeasure.type}'`);
+      }
+
+      if (baseMeasure.periodAverage || baseMeasure.period_average) {
+        errorReporter.error(`period_average on '${cubeName}.${measureName}' cannot reference another period_average measure`);
+      }
+
+      if (!periodAverage.denominator) {
+        errorReporter.error(`period_average on '${cubeName}.${measureName}' requires denominator`);
+        continue;
+      }
+
+      member.periodAverage = {
+        avgUnit: rawAvgUnit as PeriodAverageConfig['avgUnit'],
+        interval: periodAverage.interval as PeriodAverageConfig['interval'],
+        denominator: periodAverage.denominator,
+        timeDimension,
+        baseMeasure: baseMeasurePath,
+        baseAggType: baseMeasure.type,
+      };
+      delete member.period_average;
+      delete (member as { aliasMember?: string }).aliasMember;
+    }
+  }
+
   private evaluateMultiStageReferences(cubeName: string, obj: { [key: string]: MeasureDefinition }) {
     if (!obj) {
       return;
@@ -827,6 +996,10 @@ export class CubeEvaluator extends CubeSymbols {
     }
   }
 
+  protected isPeriodAverageDefinition(member: any): boolean {
+    return !!(member?.periodAverage || member?.period_average);
+  }
+
   protected prepareMembers(members: any, cube: any, errorReporter: ErrorReporter) {
     members = members || {};
 
@@ -849,7 +1022,15 @@ export class CubeEvaluator extends CubeSymbols {
         }
         // Aliases one to one some another member as in case of views
         // Note: Segments do not have type set
-        if (!ownedByCube && !member.filters && (!member.type || CubeSymbols.isCalculatedMeasureType(member.type)) && pathReferencesUsed.length === 1 && this.pathFromArray(pathReferencesUsed[0]) === evaluatedSql) {
+        // period_average measures must not become aliasMember references.
+        if (
+          !this.isPeriodAverageDefinition(member)
+          && !ownedByCube
+          && !member.filters
+          && (!member.type || CubeSymbols.isCalculatedMeasureType(member.type))
+          && pathReferencesUsed.length === 1
+          && this.pathFromArray(pathReferencesUsed[0]) === evaluatedSql
+        ) {
           aliasMember = this.pathFromArray(pathReferencesUsed[0]);
         }
         const foreignCubes = cubeReferencesUsed.filter(usedCube => usedCube !== cube.name);

@@ -17,6 +17,7 @@
  * - generated_time_series_*：DUAL 上 CONNECT BY 生成 gen.lv，再 CROSS JOIN bounds 展开时间轴；无 dateRange 时从 GetDateRange 的 MIN/MAX 推断范围。
  */
 import { parseSqlInterval } from '@cubejs-backend/shared';
+import { UserError } from '../compiler/UserError';
 import { OracleQuery } from './OracleQuery';
 
 const DM_MAX_ALIAS_LENGTH = 30;
@@ -494,4 +495,182 @@ export class DmQuery extends OracleQuery {
     }
     return super.groupByDimensionLimit();
   }
+
+  // ==========================================================================
+  // period_average 方言适配区（达梦 DM）
+  //
+  // 下面方法均是对 BaseQuery 中 PostgreSQL 风格默认实现的重写，将日期/时间函数
+  // 替换为达梦语法（基本与 Oracle 一致，差异见各方法注释）。适配新数据库时，
+  // 参照本区块重写下列方法（详见 BaseQuery 中各方法的 @dialect 注释）：
+  //   - periodAverageDateLiteral / periodAverageToDateExpr  日期字面量与转 DATE
+  //   - periodAverageNowExpr             当前日期（注意：用 SYSDATE，DB 服务器时区）
+  //   - periodAverageGroupedBucketExpr   窗口列 MIN 包装
+  //   - periodAverageClosedFormIntervalBucketUnits  整区间 calendar 快路径（先 super）
+  //   - periodAverageCumulativeCalendarUnitCount    累计 calendar 快路径（先 super）
+  //   - periodAverageDaysIn{Month,Quarter,Year}Bucket  桶内天数
+  //   - periodAverageBucketEndExpr       区间终点
+  //   - periodAverageIntervalStartExpr   区间起点
+  //   - periodAverageIntervalBucketFromAvgUnit  从 avg_unit 列推区间桶（注意 DM 用 TIMESTAMP）
+  //   - {days,months,quarters,years}BetweenInclusive  间隔计数（MONTHS_BETWEEN）
+  // ==========================================================================
+
+  periodAverageDateLiteral(dateStr: string): string {
+    const dateOnly = String(dateStr).slice(0, 10);
+    return `CAST('${dateOnly}' AS DATE)`;
+  }
+
+  periodAverageNowExpr(): string {
+    const frozenNow = process.env.CUBEJS_TEST_NOW;
+    if (frozenNow) {
+      return this.periodAverageDateLiteral(frozenNow);
+    }
+    return 'CAST(SYSDATE AS DATE)';
+  }
+
+  periodAverageToDateExpr(sql: string): string {
+    return `CAST(${sql} AS DATE)`;
+  }
+
+  periodAverageGroupedBucketExpr(bucketColumn: string, options: { aggregateOnce?: boolean } = {}) {
+    if (this.ungrouped) {
+      return bucketColumn;
+    }
+    const trimmed = bucketColumn.trim();
+    if (/^MIN\s*\(/i.test(trimmed)) {
+      return bucketColumn;
+    }
+    return `MIN(${bucketColumn})`;
+  }
+
+  periodAverageClosedFormIntervalBucketUnits(avgUnit: string, interval: string, groupedBucket: string) {
+    const constant = super.periodAverageClosedFormIntervalBucketUnits(avgUnit, interval, groupedBucket);
+    if (constant) {
+      return constant;
+    }
+
+    if (avgUnit === 'day') {
+      if (interval === 'month') {
+        return this.periodAverageDaysInMonthBucket(groupedBucket);
+      }
+      if (interval === 'quarter') {
+        return this.periodAverageDaysInQuarterBucket(groupedBucket);
+      }
+      if (interval === 'year') {
+        return this.periodAverageDaysInYearBucket(groupedBucket);
+      }
+    }
+
+    return null;
+  }
+
+  periodAverageCumulativeCalendarUnitCount(
+    avgUnit: string,
+    interval: string,
+    intervalStart: string,
+    current: string,
+  ) {
+    if (avgUnit === 'day') {
+      return `GREATEST((CAST(${current} AS DATE) - CAST(${intervalStart} AS DATE) + 1), 0)`;
+    }
+    if (avgUnit === 'month' && (interval === 'year' || interval === 'quarter' || interval === 'month')) {
+      return `GREATEST(EXTRACT(MONTH FROM CAST(${current} AS DATE)) - EXTRACT(MONTH FROM CAST(${intervalStart} AS DATE)) + 1, 0)`;
+    }
+    return null;
+  }
+
+  periodAverageDaysInMonthBucket(bucketColumn: string) {
+    return `GREATEST(EXTRACT(DAY FROM LAST_DAY(CAST(${bucketColumn} AS DATE))), 0)`;
+  }
+
+  periodAverageDaysInQuarterBucket(bucketColumn: string) {
+    const quarterStart = `CAST(TRUNC(CAST(${bucketColumn} AS DATE), 'Q') AS DATE)`;
+    const quarterEnd = `LAST_DAY(ADD_MONTHS(${quarterStart}, 2))`;
+    return `GREATEST((${quarterEnd} - ${quarterStart} + 1), 0)`;
+  }
+
+  periodAverageDaysInYearBucket(bucketColumn: string) {
+    const yearStart = `CAST(TRUNC(CAST(${bucketColumn} AS DATE), 'YYYY') AS DATE)`;
+    const yearEnd = `LAST_DAY(ADD_MONTHS(${yearStart}, 11))`;
+    return `GREATEST((${yearEnd} - ${yearStart} + 1), 0)`;
+  }
+
+  periodAverageBucketEndExpr(granularity: string, bucketColumn: string, bucketAlreadyAtInterval = false) {
+    const asDate = `CAST(${bucketColumn} AS DATE)`;
+    if (bucketAlreadyAtInterval) {
+      switch (granularity) {
+        case 'day':
+          return this.periodAverageToDateExpr(bucketColumn);
+        case 'month':
+          return `LAST_DAY(${asDate})`;
+        case 'quarter':
+          return `LAST_DAY(ADD_MONTHS(CAST(TRUNC(${asDate}, 'Q') AS DATE), 2))`;
+        case 'year':
+          return `LAST_DAY(ADD_MONTHS(CAST(TRUNC(${asDate}, 'YYYY') AS DATE), 11))`;
+        default:
+          return this.periodAverageToDateExpr(bucketColumn);
+      }
+    }
+
+    switch (granularity) {
+      case 'day':
+        return this.periodAverageToDateExpr(bucketColumn);
+      case 'month':
+        return `LAST_DAY(CAST(TRUNC(${asDate}, 'MM') AS DATE))`;
+      case 'quarter':
+        return `LAST_DAY(ADD_MONTHS(CAST(TRUNC(${asDate}, 'Q') AS DATE), 2))`;
+      case 'year':
+        return `LAST_DAY(ADD_MONTHS(CAST(TRUNC(${asDate}, 'YYYY') AS DATE), 11))`;
+      default:
+        return this.periodAverageToDateExpr(bucketColumn);
+    }
+  }
+
+  periodAverageIntervalStartExpr(interval: string, bucketColumn: string): string {
+    switch (interval) {
+      case 'day':
+        return this.periodAverageToDateExpr(bucketColumn);
+      case 'month':
+        return `CAST(TRUNC(CAST(${bucketColumn} AS DATE), 'MM') AS DATE)`;
+      case 'quarter':
+        return `CAST(TRUNC(CAST(${bucketColumn} AS DATE), 'Q') AS DATE)`;
+      case 'year':
+        return `CAST(TRUNC(CAST(${bucketColumn} AS DATE), 'YYYY') AS DATE)`;
+      default:
+        throw new UserError(`Unsupported period_average interval '${interval}'`);
+    }
+  }
+
+  periodAverageIntervalBucketFromAvgUnit(avgUnitBucket: string, interval: string): string {
+    switch (interval) {
+      case 'day':
+        return avgUnitBucket;
+      case 'month':
+        return `CAST(TRUNC(CAST(${avgUnitBucket} AS DATE), 'MM') AS TIMESTAMP)`;
+      case 'quarter':
+        return `CAST(TRUNC(CAST(${avgUnitBucket} AS DATE), 'Q') AS TIMESTAMP)`;
+      case 'year':
+        return `CAST(TRUNC(CAST(${avgUnitBucket} AS DATE), 'YYYY') AS TIMESTAMP)`;
+      default:
+        throw new UserError(`Unsupported period_average interval '${interval}'`);
+    }
+  }
+
+  daysBetweenInclusive(start: string, end: string): string {
+    return `GREATEST((CAST(${end} AS DATE) - CAST(${start} AS DATE) + 1), 0)`;
+  }
+
+  monthsBetweenInclusive(start: string, end: string): string {
+    return `GREATEST(FLOOR(MONTHS_BETWEEN(CAST(${end} AS DATE), CAST(${start} AS DATE))) + 1, 0)`;
+  }
+
+  quartersBetweenInclusive(start: string, end: string): string {
+    return `GREATEST(FLOOR(MONTHS_BETWEEN(CAST(${end} AS DATE), CAST(${start} AS DATE)) / 3) + 1, 0)`;
+  }
+
+  yearsBetweenInclusive(start: string, end: string): string {
+    return `GREATEST(FLOOR(MONTHS_BETWEEN(CAST(${end} AS DATE), CAST(${start} AS DATE)) / 12) + 1, 0)`;
+  }
+
+  // 达梦 DDL 为引号小写，与 Postgres 相同：`"cube"."col"` 与 `cube.col`，
+  // 与 BaseQuery 默认实现一致，无需 override。
 }

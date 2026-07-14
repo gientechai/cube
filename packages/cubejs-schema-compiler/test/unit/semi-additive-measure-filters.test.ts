@@ -359,3 +359,197 @@ describe('semi-additive windowGroupings dimensions in base_data', () => {
     expect(sql).toMatch(/PARTITION BY "facts__city"/i);
   });
 });
+
+describe('period_average with semi-additive base measure', () => {
+  const { compiler, joinGraph, cubeEvaluator } = prepareJsCompiler(`
+    cube(\`facts\`, {
+      sql: \`SELECT * FROM xss.cube_metrics_facts\`,
+
+      dimensions: {
+        statDt: {
+          sql: \`\${CUBE}.stat_dt\`,
+          type: 'time',
+        },
+      },
+
+      measures: {
+        balanceEnd: {
+          sql: \`\${CUBE}.balance_snapshot\`,
+          type: 'sum',
+          nonAdditiveDimension: {
+            name: 'statDt',
+            windowChoice: 'max',
+          },
+        },
+        periodDailyAvg: {
+          type: 'number',
+          sql: \`\${balanceEnd}\`,
+          period_average: {
+            avg_unit: 'day',
+            interval: 'month',
+            denominator: 'calendar',
+            time_dimension: 'statDt',
+          },
+        },
+      },
+    })
+  `);
+
+  beforeAll(async () => {
+    await compiler.compile();
+  });
+
+  it('compile infers baseMeasure from sql for Tesseract bridge', () => {
+    const def = cubeEvaluator.measureByPath('facts.periodDailyAvg');
+    const pa = def.period_average || def.periodAverage;
+    expect(pa?.baseMeasure).toBe('facts.balanceEnd');
+    expect(pa?.baseAggType).toBe('sum');
+  });
+
+  it('only period_average selected → no semi-additive CTE, numerator uses SUM', () => {
+    const query = new PostgresQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['facts.periodDailyAvg'],
+        timeDimensions: [{
+          dimension: 'facts.statDt',
+          granularity: 'month',
+          dateRange: ['2025-06-01', '2025-06-30'],
+        }],
+        timezone: 'UTC',
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).not.toMatch(/WITH base_data AS/i);
+    expect(sql).not.toMatch(/windowed_data/i);
+    expect(sql).toMatch(/SUM\s*\(/i);
+    expect(sql).not.toMatch(/OVER\s*\(/i);
+    expect(sql).toMatch(/NULLIF/i);
+  });
+
+  it('balanceEnd + period_average together → balanceEnd semi-additive, PA numerator still SUM', () => {
+    const query = new PostgresQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['facts.balanceEnd', 'facts.periodDailyAvg'],
+        timeDimensions: [{
+          dimension: 'facts.statDt',
+          granularity: 'month',
+          dateRange: ['2025-06-01', '2025-06-30'],
+        }],
+        timezone: 'UTC',
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).toMatch(/WITH base_data AS/i);
+    expect(sql).toMatch(/windowed_data/i);
+    expect(sql).toMatch(/SUM\s*\(/i);
+    expect(sql).toMatch(/NULLIF/i);
+    expect(sql).toMatch(/__pa_base_facts__period_daily_avg/i);
+    expect(sql).toMatch(/SUM\("__pa_base_facts__period_daily_avg"\)\)\s*\/\s*NULLIF/i);
+    expect(sql).not.toMatch(/MIN\(date_trunc\('month',\s*\("main__facts"/i);
+    expect(sql).not.toMatch(/sum\("main__facts"\.balance_snapshot\).*period_daily_avg/is);
+  });
+});
+
+describe('period_average + explicit semi-additive measure (regular sum base)', () => {
+  const { compiler, joinGraph, cubeEvaluator } = prepareJsCompiler(`
+    cube(\`facts\`, {
+      sql: \`SELECT * FROM xss.cube_metrics_facts\`,
+
+      dimensions: {
+        statDt: {
+          sql: \`\${CUBE}.stat_dt\`,
+          type: 'time',
+        },
+      },
+
+      measures: {
+        balanceBegin: {
+          sql: \`\${CUBE}.balance_snapshot\`,
+          type: 'sum',
+          nonAdditiveDimension: {
+            name: 'statDt',
+            windowChoice: 'min',
+          },
+        },
+        trxAmount: {
+          sql: \`\${CUBE}.amount\`,
+          type: 'sum',
+        },
+        periodDailyAvgCalendar: {
+          type: 'number',
+          sql: \`\${trxAmount}\`,
+          period_average: {
+            avg_unit: 'day',
+            interval: 'month',
+            denominator: 'calendar',
+            time_dimension: 'statDt',
+          },
+        },
+        periodDailyAvgData: {
+          type: 'number',
+          sql: \`\${trxAmount}\`,
+          period_average: {
+            avg_unit: 'day',
+            interval: 'month',
+            denominator: 'data',
+            time_dimension: 'statDt',
+          },
+        },
+      },
+    })
+  `);
+
+  beforeAll(async () => {
+    await compiler.compile();
+  });
+
+  it('balanceBegin + periodDailyAvgCalendar → PA uses __pa_base column, not main__ table in windowed_data', () => {
+    const query = new PostgresQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['facts.balanceBegin', 'facts.periodDailyAvgCalendar'],
+        timeDimensions: [{
+          dimension: 'facts.statDt',
+          granularity: 'month',
+          dateRange: ['2026-04-01', '2026-04-30'],
+        }],
+        timezone: 'UTC',
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).toMatch(/WITH base_data AS/i);
+    expect(sql).toMatch(/windowed_data/i);
+    expect(sql).toMatch(/__pa_base_facts__period_daily_avg_calendar/i);
+    expect(sql).toMatch(/SUM\("__pa_base_facts__period_daily_avg_calendar"\)\)\s*\/\s*NULLIF/i);
+    expect(sql).not.toMatch(/sum\("main__facts"\.amount\)/i);
+    expect(sql).not.toMatch(/FROM windowed_data[\s\S]*main__facts/i);
+  });
+
+  it('balanceBegin + periodDailyAvgData uses row-level stat_dt for data divisor in CTE', () => {
+    const query = new PostgresQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['facts.balanceBegin', 'facts.periodDailyAvgData'],
+        timeDimensions: [{
+          dimension: 'facts.statDt',
+          granularity: 'month',
+          dateRange: ['2026-04-01', '2026-04-30'],
+        }],
+        timezone: 'UTC',
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).toMatch(/COUNT\(DISTINCT[\s\S]*facts__stat_dt/i);
+    expect(sql).not.toMatch(/COUNT\(DISTINCT[\s\S]*\(stat_dt::timestamptz/i);
+  });
+});

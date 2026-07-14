@@ -471,6 +471,20 @@ const FixedRollingWindow = {
   offset: Joi.any().valid('start', 'end')
 };
 
+const PeriodAverageGranularity = Joi.string().valid('day', 'month', 'quarter', 'year');
+
+const PeriodAverageSchema = Joi.object().keys({
+  avg_unit: PeriodAverageGranularity,
+  avgUnit: PeriodAverageGranularity,
+  unit: PeriodAverageGranularity,
+  interval: PeriodAverageGranularity.required(),
+  denominator: Joi.string().valid('data', 'calendar').required(),
+  time_dimension: Joi.string(),
+  timeDimension: Joi.string(),
+}).or('avg_unit', 'avgUnit', 'unit').or('time_dimension', 'timeDimension').messages({
+  'object.missing': 'period_average.time_dimension is required',
+});
+
 const GranularitySchema = Joi.string().required(); // To support custom granularities
 
 const YearToDate = {
@@ -547,7 +561,9 @@ const BaseMeasure = {
     windowGroupings: Joi.array().items(Joi.string()),
     distinct: Joi.boolean().strict()
   }),
-  meta: Joi.any()
+  meta: Joi.any(),
+  periodAverage: PeriodAverageSchema,
+  period_average: PeriodAverageSchema,
 };
 
 const PreAggregationRefreshKeySchema = condition(

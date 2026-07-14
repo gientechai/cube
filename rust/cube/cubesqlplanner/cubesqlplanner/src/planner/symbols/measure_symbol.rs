@@ -3,7 +3,7 @@ use super::measure_kinds::{CalculatedMeasure, CalculatedMeasureType, MeasureKind
 use super::SymbolPath;
 use super::{MemberSymbol, SymbolFactory};
 use crate::cube_bridge::evaluator::CubeEvaluator;
-use crate::cube_bridge::measure_definition::{MeasureDefinition, RollingWindow};
+use crate::cube_bridge::measure_definition::{MeasureDefinition, PeriodAverage, RollingWindow};
 use crate::cube_bridge::member_sql::MemberSql;
 use crate::planner::collectors::find_owned_by_cube_child;
 use crate::planner::sql_templates::PlanSqlTemplates;
@@ -85,6 +85,7 @@ pub struct MeasureSymbol {
     compiled_path: CompiledMemberPath,
     kind: MeasureKind,
     rolling_window: Option<RollingWindow>,
+    period_average: Option<PeriodAverage>,
     multi_stage: Option<MultiStageProperties>,
     is_reference: bool,
     is_view: bool,
@@ -104,6 +105,7 @@ impl MeasureSymbol {
         case: Option<Case>,
         kind: MeasureKind,
         rolling_window: Option<RollingWindow>,
+        period_average: Option<PeriodAverage>,
         multi_stage: Option<MultiStageProperties>,
         measure_filters: Vec<Rc<SqlCall>>,
         measure_drill_filters: Vec<Rc<SqlCall>>,
@@ -117,6 +119,7 @@ impl MeasureSymbol {
             case,
             kind,
             rolling_window,
+            period_average,
             measure_filters,
             measure_drill_filters,
             measure_order_by,
@@ -152,6 +155,7 @@ impl MeasureSymbol {
                 compiled_path: self.compiled_path.clone(),
                 kind,
                 rolling_window: None,
+                period_average: None,
                 multi_stage: None,
                 is_reference: false,
                 is_view: self.is_view,
@@ -204,6 +208,7 @@ impl MeasureSymbol {
             compiled_path: self.compiled_path.clone(),
             kind: result_kind,
             rolling_window: self.rolling_window.clone(),
+            period_average: self.period_average.clone(),
             multi_stage: self.multi_stage.clone(),
             is_reference: self.is_reference,
             is_view: self.is_view,
@@ -448,6 +453,14 @@ impl MeasureSymbol {
 
     pub fn is_rolling_window(&self) -> bool {
         self.rolling_window().is_some()
+    }
+
+    pub fn period_average(&self) -> Option<&PeriodAverage> {
+        self.period_average.as_ref()
+    }
+
+    pub fn is_period_average(&self) -> bool {
+        self.period_average.is_some()
     }
 
     pub fn is_running_total(&self) -> bool {
@@ -711,6 +724,7 @@ impl SymbolFactory for MeasureSymbolFactory {
 
         let measure_type_str = &definition.static_data().measure_type;
         let rolling_window = definition.static_data().rolling_window.clone();
+        let period_average = definition.static_data().period_average.clone();
         let is_multi_stage = multi_stage.is_some();
 
         let kind = MeasureKind::from_type_str(measure_type_str, sql, pk_sqls)?;
@@ -745,15 +759,19 @@ impl SymbolFactory for MeasureSymbolFactory {
 
         let is_view = cube.static_data().is_view.unwrap_or(false);
 
-        let is_reference = (is_view && is_sql_is_direct_ref)
-            || (!owned_by_cube
-                && is_sql_is_direct_ref
-                && is_calculated
-                && !is_multi_stage
-                && case.is_none()
-                && measure_filters.is_empty()
-                && measure_drill_filters.is_empty()
-                && measure_order_by.is_empty());
+        let is_reference = if period_average.is_some() {
+            false
+        } else {
+            (is_view && is_sql_is_direct_ref)
+                || (!owned_by_cube
+                    && is_sql_is_direct_ref
+                    && is_calculated
+                    && !is_multi_stage
+                    && case.is_none()
+                    && measure_filters.is_empty()
+                    && measure_drill_filters.is_empty()
+                    && measure_order_by.is_empty())
+        };
 
         let cube_symbol = compiler.add_cube_table_evaluator(path.cube_name().clone(), vec![])?;
 
@@ -772,6 +790,7 @@ impl SymbolFactory for MeasureSymbolFactory {
             case,
             kind,
             rolling_window,
+            period_average,
             multi_stage,
             measure_filters,
             measure_drill_filters,

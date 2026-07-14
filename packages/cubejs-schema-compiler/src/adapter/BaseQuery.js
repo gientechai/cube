@@ -271,6 +271,11 @@ export class BaseQuery {
       }
     }
     this.compilerCache = this.compilers.compiler.compilerCache;
+    if (this.options.timeDimensions?.length) {
+      this.options.timeDimensions = this.options.timeDimensions.map((td) =>
+        this.normalizeTimeDimensionInput(td)
+      );
+    }
     this.queryCache = this.compilerCache.getQueryCache({
       measures: this.options.measures,
       dimensions: this.options.dimensions,
@@ -955,6 +960,12 @@ export class BaseQuery {
         return this.newQueryWithoutNative().buildSqlAndParams(exportAnnotatedSql);
       }
 
+      // period_average + denominator:data（整区间 / 形态 B）在明细层 COUNT(DISTINCT) 代价过高，
+      // 回退到 JS 生成器：先按 avg_unit 预聚合，再在外层用 COUNT 计有数据周期数。
+      if (this.shouldUsePeriodAverageDataPreAggregatePath()) {
+        return this.newQueryWithoutNative().buildSqlAndParams(exportAnnotatedSql);
+      }
+
       return this.buildSqlAndParamsRust(exportAnnotatedSql);
     }
 
@@ -1298,6 +1309,10 @@ export class BaseQuery {
   }
 
   simpleQuery() {
+    if (this.shouldUsePeriodAverageDataPreAggregatePath()) {
+      return this.buildPeriodAverageDataQuery();
+    }
+
     // eslint-disable-next-line prefer-template
     const inlineWhereConditions = [];
     const commonQuery = this.rewriteInlineWhere(() => this.commonQuery(), inlineWhereConditions);
@@ -3532,12 +3547,50 @@ export class BaseQuery {
 
     const cubeAlias = this.cubeAlias(cubeName);
     const escapedCubeName = cubeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const quotedCubePattern = new RegExp(`"${escapedCubeName}"\\s*\\.`, 'g');
-    const unquotedCubePattern = new RegExp(`(^|[^A-Za-z0-9_$."'])${escapedCubeName}\\s*\\.`, 'g');
+    let result = sql;
 
-    const withQuotedAliases = sql.replace(quotedCubePattern, `${cubeAlias}.`);
+    for (const { pattern, replacement } of this.ownedCubeQualifiedColumnReplacements(
+      cubeName,
+      cubeAlias,
+      escapedCubeName,
+    )) {
+      result = result.replace(pattern, replacement);
+    }
 
-    return withQuotedAliases.replace(unquotedCubePattern, `$1${cubeAlias}.`);
+    return result;
+  }
+
+  /**
+   * 各 dialect 应 override，声明如何识别「当前 cube 名 + .」的写法并重写为 cubeAlias。
+   *
+   * 默认实现覆盖两种最常见的写法：
+   *   ① `"cube".col` — 双引号限定（Postgres/Redshift/Snowflake/Presto/Trino/Athena/
+   *      SQLite/ClickHouse 等的标准标识符引号，cube 名含大写字母或保留字时几乎必用）；
+   *   ② `cube.col`   — 无引号写法（所有库的兜底）。
+   *
+   * 子类 override 时建议在 `super` 基础上做增量，仅补充本方言特有的引号字符，
+   * 例如 MySQL/BigQuery 追加反引号 `​`​`cube``、SQL Server 追加 `[cube]`，
+   * 避免遗漏默认已覆盖的双引号写法。
+   *
+   * @protected
+   * @param {string} cubeName
+   * @param {string} cubeAlias
+   * @param {string} escapedCubeName
+   * @returns {{ pattern: RegExp, replacement: string }[]}
+   */
+  ownedCubeQualifiedColumnReplacements(cubeName, cubeAlias, escapedCubeName) {
+    return [
+      // ① 双引号：`"cube".col`
+      {
+        pattern: new RegExp(`"${escapedCubeName}"\\s*\\.`, 'g'),
+        replacement: `${cubeAlias}.`,
+      },
+      // ② 无引号：`cube.col`（排除其后紧跟其它标识符字符的情况）
+      {
+        pattern: new RegExp(`(^|[^A-Za-z0-9_$."'\`\\[])${escapedCubeName}\\s*\\.`, 'g'),
+        replacement: `$1${cubeAlias}.`,
+      },
+    ];
   }
 
   autoPrefixWithCubeName(cubeName, sql, isMemberExpr = false) {
@@ -4123,7 +4176,9 @@ export class BaseQuery {
       this.safeEvaluateSymbolContext().rootMeasure.value = { multiplied: resultMultiplied, measure: measurePath, multiStage: symbol.multiStage };
     }
     if (((this.evaluateSymbolContext || {}).renderedReference || {})[measurePath]) {
-      return this.evaluateSymbolContext.renderedReference[measurePath];
+      if (this.shouldUseRenderedReferenceForMeasurePath(measurePath)) {
+        return this.evaluateSymbolContext.renderedReference[measurePath];
+      }
     }
     if (
       this.safeEvaluateSymbolContext().ungrouped ||
@@ -4389,6 +4444,930 @@ export class BaseQuery {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   timeGroupedColumn(granularity, dimension) {
     throw new Error('Not implemented');
+  }
+
+  /**
+   * period_average + denominator:data 是否应走「先按 avg_unit 预聚合」路径。
+   * 仅支持无 multiplied/cumulative/multi-stage/semi-additive 的简单查询。
+   */
+  shouldUsePeriodAverageDataPreAggregatePath(measures = this.measures) {
+    if (this.ungrouped || this.multiStageQuery) {
+      return false;
+    }
+    if (this.hasSemiAdditiveMeasures(measures) || this.queryReferencesSemiAdditiveMeasures()) {
+      return false;
+    }
+
+    const paMeasures = this.collectPeriodAverageDataPreAggregateMeasures(measures);
+    if (!paMeasures.length) {
+      return false;
+    }
+
+    // 仅当查询中所有 measure 都是可预聚合的 data period_average 时才走 CTE 路径；
+    // 与 calendar period_average 或其它 measure 混查时外层仍需访问明细表。
+    if (paMeasures.length !== measures.length) {
+      return false;
+    }
+
+    const {
+      multipliedMeasures,
+      cumulativeMeasures,
+      multiStageMembers,
+    } = this.fullKeyQueryAggregateMeasures();
+
+    return !multipliedMeasures.length
+      && !cumulativeMeasures.length
+      && !multiStageMembers.length;
+  }
+
+  collectPeriodAverageDataPreAggregateMeasures(measures = this.measures) {
+    return measures.filter((measure) => {
+      const periodAverage = measure.measureDefinition()?.periodAverage;
+      if (!periodAverage || periodAverage.denominator !== 'data') {
+        return false;
+      }
+      const schemaTimeDimension = periodAverage.timeDimension;
+      const td = this.periodAverageMatchingTimeDimension(schemaTimeDimension);
+      const viewMode = this.periodAverageViewMode(
+        periodAverage.avgUnit,
+        periodAverage.interval,
+        td?.granularity,
+      );
+      return viewMode === 'interval_bucket' || viewMode === 'range';
+    });
+  }
+
+  periodAverageDataPreAggregateUnitColumnAlias(measure) {
+    return this.escapeColumnName(`__pa_unit_${measure.unescapedAliasName()}`);
+  }
+
+  periodAverageDataPreAggregateSumColumnAlias(measure) {
+    return this.escapeColumnName(`__pa_sum_${measure.unescapedAliasName()}`);
+  }
+
+  periodAverageDataPreAggregateInnerBaseSql(measure) {
+    const periodAverage = measure.measureDefinition().periodAverage;
+    const baseMeasure = this.newMeasure(periodAverage.baseMeasure);
+    const cubeName = baseMeasure.cube().name;
+    const symbol = baseMeasure.measureDefinition();
+    const sql = symbol.sql && this.evaluateSql(cubeName, symbol.sql);
+    return this.applyMeasureFilters(
+      this.autoPrefixWithCubeName(cubeName, sql, false),
+      symbol,
+      cubeName,
+    );
+  }
+
+  periodAverageDataPreAggregateUnitBucketSql(measure) {
+    const periodAverage = measure.measureDefinition().periodAverage;
+    const schemaTimeDimension = periodAverage.timeDimension;
+    const tdSql = this.periodAverageTimeDimensionSql(schemaTimeDimension);
+    return this.periodAverageToDateExpr(this.timeGroupedColumn(periodAverage.avgUnit, tdSql));
+  }
+
+  periodAverageDataPreAggregateOuterMeasureSql(measure) {
+    const sumCol = this.periodAverageDataPreAggregateSumColumnAlias(measure);
+    const unitCol = this.periodAverageDataPreAggregateUnitColumnAlias(measure);
+    const periodAverage = measure.measureDefinition().periodAverage;
+    const baseMeasure = this.newMeasure(periodAverage.baseMeasure);
+    const aggType = (periodAverage.baseAggType || baseMeasure.measureDefinition().type || 'sum').toUpperCase();
+    const numerator = aggType === 'SUM' || aggType === 'COUNT'
+      ? `SUM(${sumCol})`
+      : `${aggType}(${sumCol})`;
+    return `(${numerator}) / NULLIF(COUNT(${unitCol}), 0)`;
+  }
+
+  buildPeriodAverageDataQuery() {
+    const paMeasures = this.collectPeriodAverageDataPreAggregateMeasures();
+    const inlineWhereConditions = [];
+    const subQueryDimensions = this.collectFrom(
+      this.dimensionsForSelect()
+        .concat(paMeasures)
+        .concat(this.allFilters),
+      this.collectSubQueryDimensionsFor.bind(this),
+      'collectSubQueryDimensionsFor',
+    );
+    const baseFromSql = this.rewriteInlineWhere(
+      () => this.joinQuery(this.join, subQueryDimensions),
+      inlineWhereConditions,
+    );
+    const whereClause = this.baseWhere(this.allFilters.concat(inlineWhereConditions));
+
+    const innerSelectParts = [];
+    const innerGroupByParts = [];
+    const pushedInnerGroupKeys = new Set();
+
+    const pushInnerGroupExpr = (expr) => {
+      const key = String(expr).trim();
+      if (pushedInnerGroupKeys.has(key)) {
+        return;
+      }
+      pushedInnerGroupKeys.add(key);
+      innerGroupByParts.push(expr);
+    };
+
+    this.dimensionsForSelect().forEach((dimension) => {
+      if (dimension instanceof BaseTimeDimension) {
+        return;
+      }
+      const cols = dimension.selectColumns && dimension.selectColumns();
+      if (cols) {
+        cols.forEach((col) => innerSelectParts.push(col));
+      }
+      pushInnerGroupExpr(dimension.dimensionSql());
+    });
+
+    paMeasures.forEach((measure) => {
+      const unitBucket = this.periodAverageDataPreAggregateUnitBucketSql(measure);
+      const unitCol = this.periodAverageDataPreAggregateUnitColumnAlias(measure);
+      innerSelectParts.push(`${unitBucket} AS ${unitCol}`);
+      pushInnerGroupExpr(unitBucket);
+
+      const baseSql = this.periodAverageDataPreAggregateInnerBaseSql(measure);
+      const sumCol = this.periodAverageDataPreAggregateSumColumnAlias(measure);
+      innerSelectParts.push(`SUM(${baseSql}) AS ${sumCol}`);
+    });
+
+    const innerQuery = `SELECT ${innerSelectParts.join(', ')} FROM ${baseFromSql}${whereClause}`
+      + (innerGroupByParts.length ? ` GROUP BY ${innerGroupByParts.join(', ')}` : '');
+
+    const outerSelectParts = [];
+    const outerGroupByParts = [];
+    const pushedOuterGroupKeys = new Set();
+
+    const pushOuterGroupExpr = (expr, selectExpr = expr) => {
+      const key = String(expr).trim();
+      if (pushedOuterGroupKeys.has(key)) {
+        return;
+      }
+      pushedOuterGroupKeys.add(key);
+      outerGroupByParts.push(expr);
+      if (selectExpr) {
+        outerSelectParts.push(`${selectExpr}`);
+      }
+    };
+
+    this.dimensionsForSelect().forEach((dimension) => {
+      if (dimension instanceof BaseTimeDimension) {
+        return;
+      }
+      const alias = dimension.aliasName();
+      pushOuterGroupExpr(
+        this.escapeColumnName(alias),
+        `${this.escapeColumnName(alias)} AS ${this.escapeColumnName(alias)}`,
+      );
+    });
+
+    const primaryPaMeasure = paMeasures[0];
+    const primaryPeriodAverage = primaryPaMeasure.measureDefinition().periodAverage;
+    const schemaTimeDimension = primaryPeriodAverage.timeDimension;
+    const primaryUnitCol = this.periodAverageDataPreAggregateUnitColumnAlias(primaryPaMeasure);
+
+    (this.timeDimensions || []).forEach((td) => {
+      if (!this.periodAverageTimeDimensionMemberMatches(schemaTimeDimension, td.dimension)) {
+        if (td.granularity) {
+          const tdInstance = this.newTimeDimension(td);
+          const bucketSql = tdInstance.dimensionSql();
+          pushOuterGroupExpr(
+            bucketSql,
+            `${bucketSql} AS ${tdInstance.aliasName()}`,
+          );
+        }
+        return;
+      }
+
+      if (td.granularity) {
+        const tdInstance = this.newTimeDimension(td);
+        const outerBucket = this.timeGroupedColumn(td.granularity, primaryUnitCol);
+        pushOuterGroupExpr(
+          outerBucket,
+          `${outerBucket} AS ${tdInstance.aliasName()}`,
+        );
+      }
+    });
+
+    this.measures.forEach((measure) => {
+      const periodAverage = measure.measureDefinition()?.periodAverage;
+      if (
+        periodAverage
+        && periodAverage.denominator === 'data'
+        && this.collectPeriodAverageDataPreAggregateMeasures([measure]).length
+      ) {
+        outerSelectParts.push(
+          `${this.periodAverageDataPreAggregateOuterMeasureSql(measure)} AS ${measure.aliasName()}`,
+        );
+        return;
+      }
+      const cols = measure.selectColumns && measure.selectColumns();
+      if (cols) {
+        cols.forEach((col) => outerSelectParts.push(col));
+      }
+    });
+
+    let query = `WITH period_avg_data_daily AS (${innerQuery}) SELECT ${outerSelectParts.join(', ')}`
+      + ` FROM period_avg_data_daily`;
+
+    if (outerGroupByParts.length) {
+      query += ` GROUP BY ${outerGroupByParts.join(', ')}`;
+    }
+
+    query = this.baseHaving(query, this.measureFilters);
+    return query + this.orderBy() + this.groupByDimensionLimit();
+  }
+
+  /**
+   * @param {string} unit
+   * @param {string} denominator
+   * @param {string} timeDimension
+   * @param {string|null|undefined} bucketSql
+   * @param {boolean} identity
+   * @return {string}
+   */
+  periodAverageQueryTimeDimension(schemaTimeDimension) {
+    return (this.timeDimensions || []).find((td) =>
+      this.periodAverageTimeDimensionMemberMatches(schemaTimeDimension, td.dimension)
+    ) || null;
+  }
+
+  /**
+   * SQL for the query time bucket (must match GROUP BY) when computing calendar divisors.
+   * Falls back to timeGroupedColumn on the raw dimension only when the query time dimension
+   * is unavailable (e.g. unit tests calling periodAverageDivisor directly).
+   */
+  periodAverageBucketColumnSql(timeDimension, bucketSql, granularity) {
+    if (bucketSql) {
+      return bucketSql;
+    }
+    const queryTimeDim = this.periodAverageQueryTimeDimension(timeDimension);
+    if (queryTimeDim && granularity) {
+      return queryTimeDim.dimensionSql();
+    }
+    if (granularity) {
+      return this.timeGroupedColumn(granularity, this.periodAverageTimeDimensionSql(timeDimension));
+    }
+    return null;
+  }
+
+  periodAverageDivisor(avgUnit, interval, denominator, timeDimension, bucketSql, identity, dataPreAggregated = false, dataBucketSql = null) {
+    if (identity) {
+      return '1';
+    }
+
+    const tdSql = this.periodAverageTimeDimensionSql(timeDimension);
+    const td = this.periodAverageMatchingTimeDimension(timeDimension);
+    const queryGranularity = td?.granularity;
+    this.periodAverageValidateQueryGranularity(avgUnit, interval, queryGranularity, timeDimension);
+
+    const viewMode = this.periodAverageViewMode(avgUnit, interval, queryGranularity);
+
+    if (viewMode === 'range') {
+      if (denominator === 'data') {
+        const truncated = this.timeGroupedColumn(avgUnit, tdSql);
+        return `COUNT(DISTINCT ${this.periodAverageToDateExpr(truncated)})`;
+      }
+      const range = this.periodAverageDateRange(timeDimension);
+      return this.periodAverageCalendarUnitCount(avgUnit, range.start, range.end);
+    }
+
+    const bucketColumn = this.periodAverageBucketColumnSql(timeDimension, bucketSql, queryGranularity);
+    if (!bucketColumn) {
+      throw new UserError(
+        `period_average requires either time dimension granularity or a date range filter on '${timeDimension}'`
+      );
+    }
+
+    if (viewMode === 'cumulative') {
+      if (denominator === 'data') {
+        const intervalBucket = this.periodAverageIntervalBucketFromAvgUnit(bucketColumn, interval);
+        return this.periodAverageCumulativeDataDivisor(intervalBucket, bucketColumn);
+      }
+      return this.periodAverageCumulativeCalendarDivisor(avgUnit, interval, bucketColumn);
+    }
+
+    // interval_bucket / range + data：外层已按 avg_unit 预聚合时，分母为普通 COUNT
+    if (dataPreAggregated && denominator === 'data' && bucketSql) {
+      return `COUNT(${this.periodAverageGroupedBucketExpr(bucketSql)})`;
+    }
+
+    // interval_bucket: one row per configured interval
+    if (denominator === 'data') {
+      const dataSource = dataBucketSql || bucketSql;
+      const truncated = dataSource
+        ? this.timeGroupedColumn(avgUnit, dataSource)
+        : this.timeGroupedColumn(avgUnit, tdSql);
+      return `COUNT(DISTINCT ${this.periodAverageToDateExpr(truncated)})`;
+    }
+
+    if (avgUnit === interval) {
+      return '1';
+    }
+
+    return this.periodAverageCalendarBucketDivisor(avgUnit, interval, bucketColumn, queryGranularity);
+  }
+
+  periodAverageNumerator(innerAggSql, avgUnit, interval, timeDimension, bucketSql) {
+    const td = this.periodAverageMatchingTimeDimension(timeDimension);
+    const queryGranularity = td?.granularity;
+    this.periodAverageValidateQueryGranularity(avgUnit, interval, queryGranularity, timeDimension);
+
+    const viewMode = this.periodAverageViewMode(avgUnit, interval, queryGranularity);
+    if (viewMode !== 'cumulative') {
+      return innerAggSql;
+    }
+
+    const avgUnitBucket = this.periodAverageBucketColumnSql(timeDimension, bucketSql, queryGranularity);
+    const intervalBucket = this.periodAverageIntervalBucketFromAvgUnit(avgUnitBucket, interval);
+    const partitionBy = this.periodAverageGroupedBucketExpr(intervalBucket);
+    const orderBy = this.periodAverageGroupedBucketExpr(avgUnitBucket);
+
+    return `SUM(${innerAggSql}) OVER (PARTITION BY ${partitionBy} ORDER BY ${orderBy} ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`;
+  }
+
+  /**
+   * JS planner path: wrap period_average numerator with configured divisor.
+   * Tesseract applies the same formula in PeriodAverageMeasureNode.
+   *
+   * @param {BaseMeasure} measure
+   * @param {string} innerAggSql
+   * @returns {string}
+   */
+  wrapPeriodAverageMeasureSql(measure, innerAggSql) {
+    const def = measure.measureDefinition();
+    const pa = this.measurePeriodAverageDefinition(def);
+    if (!pa) {
+      return innerAggSql;
+    }
+    const avgUnit = pa.avgUnit || pa.avg_unit || pa.unit;
+    const timeDimension = pa.timeDimension || pa.time_dimension;
+    const numerator = this.periodAverageNumerator(innerAggSql, avgUnit, pa.interval, timeDimension, null);
+    const divisor = this.periodAverageDivisor(
+      avgUnit,
+      pa.interval,
+      pa.denominator,
+      timeDimension,
+      null,
+      false,
+    );
+    return `(${numerator}) / NULLIF(${divisor}, 0)`;
+  }
+
+  periodAverageSemiAdditiveBaseColumnAlias(measure) {
+    return this.escapeColumnName(`__pa_base_${measure.unescapedAliasName()}`);
+  }
+
+  /**
+   * 半累加 CTE 最终 SELECT 来自 windowed_data，period_average 分母须引用已投影的时间维别名。
+   *
+   * @param {string} timeDimension
+   * @returns {string|null}
+   */
+  periodAverageSemiAdditiveBucketColumnSql(timeDimension) {
+    const td = this.periodAverageMatchingTimeDimension(timeDimension);
+    if (!td?.granularity) {
+      return null;
+    }
+
+    const matchingDimension = this.dimensionsForSelect().find((d) => {
+      const dimPath = typeof d.expressionPath === 'function'
+        ? d.expressionPath()
+        : d.dimension;
+      return this.periodAverageTimeDimensionMemberMatches(timeDimension, dimPath);
+    });
+
+    if (!matchingDimension) {
+      return null;
+    }
+
+    return matchingDimension.aliasName();
+  }
+
+  /**
+   * 半累加 CTE 内用于 data 分母的明细时间列（day 粒度 DISTINCT 计数）。
+   * month 桶查询时 interval 桶别名不足以做 day 级 COUNT DISTINCT，须用行级 stat_dt 投影。
+   *
+   * @param {string} timeDimension
+   * @returns {string|null}
+   */
+  periodAverageSemiAdditiveRowTimeColumnSql(timeDimension) {
+    const matchingDimensions = this.dimensionsForSelect().filter((d) => {
+      const dimPath = typeof d.expressionPath === 'function'
+        ? d.expressionPath()
+        : d.dimension;
+      return this.periodAverageTimeDimensionMemberMatches(timeDimension, dimPath);
+    });
+
+    const withoutGranularity = matchingDimensions.find((d) => !d.granularity);
+    if (withoutGranularity) {
+      return withoutGranularity.aliasName();
+    }
+
+    const granularityRank = { day: 0, week: 1, month: 2, quarter: 3, year: 4 };
+    const sorted = matchingDimensions
+      .filter((d) => d.granularity)
+      .sort((a, b) => (
+        (granularityRank[a.granularity] ?? 99) - (granularityRank[b.granularity] ?? 99)
+      ));
+    if (sorted.length > 0 && sorted[0].granularity === 'day') {
+      return sorted[0].aliasName();
+    }
+
+    const td = this.periodAverageMatchingTimeDimension(timeDimension);
+    if (td?.dimension) {
+      return this.aliasName(td.dimension);
+    }
+
+    return null;
+  }
+
+  periodAverageSemiAdditiveBaseRawSql(measure) {
+    const basePath = this.periodAverageBaseMeasurePath(measure);
+    if (!basePath) {
+      return null;
+    }
+    const baseMeasure = this.newMeasure(basePath);
+    const cubeName = baseMeasure.cube().name;
+    const symbol = baseMeasure.measureDefinition();
+    const sql = symbol.sql && this.evaluateSql(cubeName, symbol.sql);
+    if (!sql) {
+      return null;
+    }
+    return this.applyMeasureFilters(
+      this.autoPrefixWithCubeName(cubeName, sql, false),
+      symbol,
+      cubeName,
+    );
+  }
+
+  /**
+   * Derive the configured interval bucket from the query avg_unit GROUP BY expression.
+   * Must not reference raw time_dimension SQL — PostgreSQL requires window PARTITION BY
+   * expressions to be based on grouped columns.
+   */
+  /**
+   * 从查询的 avg_unit GROUP BY 列推导其所在的 interval（区间）桶表达式。
+   * 用于累计查看（cumulative）的窗口 PARTITION BY —— **不能引用原始时间维度列**，
+   * PostgreSQL 要求窗口 PARTITION BY 表达式基于已分组列。
+   * @dialect 必须重写：默认实现用 PostgreSQL 的 `DATE_TRUNC`，
+   *          适配新数据库时需改为该库的区间归一化函数
+   *          （如 MySQL `DATE_FORMAT(...,'%Y-%m-01T00:00:00.000')` / Oracle `TRUNC(...,'MM')`）。
+   */
+  periodAverageIntervalBucketFromAvgUnit(avgUnitBucket, interval) {
+    const grouped = this.periodAverageGroupedBucketExpr(avgUnitBucket);
+    switch (interval) {
+      case 'day':
+        return grouped;
+      case 'month':
+        return `DATE_TRUNC('month', ${grouped})`;
+      case 'quarter':
+        return `DATE_TRUNC('quarter', ${grouped})`;
+      case 'year':
+        return `DATE_TRUNC('year', ${grouped})`;
+      default:
+        throw new UserError(`Unsupported period_average interval '${interval}'`);
+    }
+  }
+
+  periodAverageViewMode(avgUnit, interval, queryGranularity) {
+    if (!queryGranularity) {
+      return 'range';
+    }
+    if (queryGranularity === interval) {
+      return 'interval_bucket';
+    }
+    if (queryGranularity === avgUnit && avgUnit !== interval) {
+      return 'cumulative';
+    }
+    return 'interval_bucket';
+  }
+
+  periodAverageValidateQueryGranularity(avgUnit, interval, queryGranularity, timeDimension) {
+    if (!queryGranularity) {
+      return;
+    }
+    if (['week', 'hour'].includes(queryGranularity)) {
+      throw new UserError(`period_average does not support query granularity '${queryGranularity}'`);
+    }
+    if (queryGranularity !== interval && queryGranularity !== avgUnit) {
+      throw new UserError(
+        `period_average on '${timeDimension}' is configured as avg_unit='${avgUnit}' over interval='${interval}'; query granularity must be '${interval}' or '${avgUnit}', got '${queryGranularity}'`
+      );
+    }
+  }
+
+  periodAverageIntervalBucketSql(timeDimension, interval) {
+    const tdSql = this.periodAverageTimeDimensionSql(timeDimension);
+    const queryTimeDim = this.periodAverageQueryTimeDimension(timeDimension);
+    if (queryTimeDim?.granularity === interval) {
+      return queryTimeDim.dimensionSql();
+    }
+    return this.timeGroupedColumn(interval, tdSql);
+  }
+
+  /**
+   * 从桶列表达式计算所在 interval（区间）的起始日期。
+   * @dialect 必须重写：默认实现用 PostgreSQL 的 `DATE_TRUNC(...)::date`，
+   *          适配新数据库时需改为该库的区间起点函数（如 `DATE_FORMAT(...,'%Y-%m-01')` / `TRUNC(...,'Q')`）。
+   */
+  periodAverageIntervalStartExpr(interval, bucketColumn) {
+    const grouped = this.periodAverageGroupedBucketExpr(bucketColumn);
+    switch (interval) {
+      case 'day':
+        return this.periodAverageToDateExpr(grouped);
+      case 'month':
+        return `(DATE_TRUNC('month', ${grouped})::date)`;
+      case 'quarter':
+        return `(DATE_TRUNC('quarter', ${grouped})::date)`;
+      case 'year':
+        return `(DATE_TRUNC('year', ${grouped})::date)`;
+      default:
+        throw new UserError(`Unsupported period_average interval '${interval}'`);
+    }
+  }
+
+  periodAverageCumulativeCalendarDivisor(avgUnit, interval, avgUnitBucket) {
+    const grouped = this.periodAverageGroupedBucketExpr(avgUnitBucket);
+    const current = this.periodAverageToDateExpr(grouped);
+    const intervalStart = this.periodAverageIntervalStartExpr(interval, grouped);
+    const optimized = this.periodAverageCumulativeCalendarUnitCount(
+      avgUnit,
+      interval,
+      intervalStart,
+      current,
+    );
+    if (optimized) {
+      return optimized;
+    }
+    return this.periodAverageCalendarUnitCount(avgUnit, intervalStart, current);
+  }
+
+  periodAverageCumulativeDataDivisor(intervalBucket, avgUnitBucket) {
+    const partitionBy = this.periodAverageGroupedBucketExpr(intervalBucket);
+    const orderBy = this.periodAverageGroupedBucketExpr(avgUnitBucket);
+    return `COUNT(*) OVER (PARTITION BY ${partitionBy} ORDER BY ${orderBy} ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`;
+  }
+
+  normalizeTimeDimensionInput(timeDimension) {
+    if (!timeDimension?.dimension) {
+      return timeDimension;
+    }
+
+    const parts = timeDimension.dimension.split('.');
+    if (!timeDimension.granularity && parts.length === 3) {
+      return {
+        ...timeDimension,
+        dimension: parts.slice(0, 2).join('.'),
+        granularity: parts[2],
+      };
+    }
+
+    return timeDimension;
+  }
+
+  periodAverageTimeDimensionMemberMatches(schemaTimeDimension, queryMember) {
+    if (!schemaTimeDimension || !queryMember) {
+      return false;
+    }
+    if (schemaTimeDimension === queryMember) {
+      return true;
+    }
+
+    const schemaParts = schemaTimeDimension.split('.');
+    const queryParts = queryMember.split('.');
+    const schemaDim = schemaParts[schemaParts.length - 1];
+    const queryDim = queryParts[queryParts.length - 1];
+
+    if (schemaDim !== queryDim) {
+      return false;
+    }
+
+    if (schemaParts.length > 1 && queryParts.length > 1) {
+      return schemaParts[0] === queryParts[0];
+    }
+
+    return true;
+  }
+
+  periodAverageQueryTimeDimensionCandidates() {
+    const seen = new Set();
+    /** @type {{dimension: string, granularity?: string, dateRange?: string[]}[]} */
+    const candidates = [];
+
+    const push = (td) => {
+      const normalized = this.normalizeTimeDimensionInput(td);
+      if (!normalized?.dimension || seen.has(normalized.dimension)) {
+        return;
+      }
+      seen.add(normalized.dimension);
+      candidates.push({
+        dimension: normalized.dimension,
+        granularity: normalized.granularity,
+        dateRange: normalized.dateRange,
+      });
+    };
+
+    (this.options.timeDimensions || []).forEach(push);
+    (this.timeDimensions || []).forEach((td) => push({
+      dimension: td.dimension,
+      granularity: td.granularity,
+      dateRange: td.dateRange,
+    }));
+
+    return candidates;
+  }
+
+  periodAveragePickMatchingTimeDimension(schemaTimeDimension, candidates) {
+    const exact = candidates.find((td) => td.dimension === schemaTimeDimension);
+    if (exact) {
+      return exact;
+    }
+
+    const matched = candidates.filter((td) =>
+      this.periodAverageTimeDimensionMemberMatches(schemaTimeDimension, td.dimension)
+    );
+
+    if (matched.length === 1) {
+      return matched[0];
+    }
+
+    const withGranularity = matched.filter((td) => !!td.granularity);
+    if (withGranularity.length === 1) {
+      return withGranularity[0];
+    }
+
+    return matched[0];
+  }
+
+  periodAverageMatchingTimeDimension(timeDimension) {
+    return this.periodAveragePickMatchingTimeDimension(
+      timeDimension,
+      this.periodAverageQueryTimeDimensionCandidates(),
+    );
+  }
+
+  periodAverageTimeDimensionSql(timeDimension) {
+    const [cubeName, dimName] = timeDimension.split('.');
+    const symbol = this.cubeEvaluator.dimensionByPath(timeDimension);
+    return this.convertTz(this.evaluateSymbolSql(cubeName, dimName, symbol, 'dimension'));
+  }
+
+  periodAverageQueryShape(timeDimension) {
+    const td = this.periodAverageMatchingTimeDimension(timeDimension);
+    if (td?.granularity) {
+      if (['week', 'hour'].includes(td.granularity)) {
+        throw new UserError(`period_average does not support query granularity '${td.granularity}' in MVP`);
+      }
+      return 'bucketed';
+    }
+    if (this.periodAverageDateRange(timeDimension)) {
+      return 'range_only';
+    }
+    throw new UserError(
+      `period_average requires either time dimension granularity or a date range filter on '${timeDimension}'`
+    );
+  }
+
+  /**
+   * 日期字面量。
+   * @dialect 必须重写：默认实现为 PostgreSQL 的 `'...'::date`，
+   *          适配新数据库时需改为该库的日期字面量写法（如 `DATE('...')` / `DATE '...'`）。
+   */
+  periodAverageDateLiteral(dateStr) {
+    return `'${dateStr}'::date`;
+  }
+
+  periodAverageDateRange(timeDimension) {
+    const td = this.periodAverageMatchingTimeDimension(timeDimension);
+    if (td?.dateRange?.length === 2) {
+      return {
+        start: this.periodAverageDateLiteral(td.dateRange[0]),
+        end: this.periodAverageScopeEndExpr(this.periodAverageDateLiteral(td.dateRange[1])),
+      };
+    }
+
+    const filterRange = this.periodAverageFilterDateRange(timeDimension);
+    if (filterRange) {
+      return filterRange;
+    }
+
+    return null;
+  }
+
+  periodAverageFilterDateRange(timeDimension) {
+    const filters = this.options.filters || [];
+    for (const filter of filters) {
+      const member = filter.member || filter.dimension;
+      if (!this.periodAverageTimeDimensionMemberMatches(timeDimension, member)) {
+        continue;
+      }
+      if (filter.operator === 'inDateRange' && filter.values?.length === 2) {
+        return {
+          start: this.periodAverageDateLiteral(filter.values[0]),
+          end: this.periodAverageScopeEndExpr(this.periodAverageDateLiteral(filter.values[1])),
+        };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 「当前时间」表达式（用于未完结区间的分母上界）。
+   * @dialect 必须重写：默认实现为 PostgreSQL 的 `(NOW() AT TIME ZONE tz)::date`，
+   *          适配新数据库时需改为该库的「当前日期」写法。
+   * @note 默认实现带时区换算；Oracle/DM 用 SYSDATE（DB 服务器时区），有已知偏差风险。
+   */
+  periodAverageNowExpr() {
+    const frozenNow = process.env.CUBEJS_TEST_NOW;
+    if (frozenNow) {
+      return this.periodAverageDateLiteral(frozenNow);
+    }
+    return `(NOW() AT TIME ZONE '${this.timezone}')::date`;
+  }
+
+  periodAverageScopeEndExpr(endExpr) {
+    return endExpr;
+  }
+
+  /**
+   * 把任意日期/时间表达式强制转为 DATE 类型。
+   * @dialect 必须重写：默认实现为 PostgreSQL 的 `(...)::date`，
+   *          适配新数据库时需改为该库的类型转换写法（如 `CAST(... AS DATE)` / `DATE(...)`）。
+   */
+  periodAverageToDateExpr(sql) {
+    return `(${sql})::date`;
+  }
+
+  /**
+   * 两个日期之间的自然日数（含首尾，闭区间）。
+   * @dialect 必须重写：默认实现用 PostgreSQL 的日期相减语法，
+   *          适配新数据库时需改为该库的日期差函数（如 `DATEDIFF` / `CAST AS DATE 相减`）。
+   */
+  daysBetweenInclusive(start, end) {
+    return `GREATEST((${end} - ${start} + 1), 0)`;
+  }
+
+  periodAverageCalendarUnitCount(unit, start, end) {
+    switch (unit) {
+      case 'day':
+        return this.daysBetweenInclusive(start, end);
+      case 'month':
+        return this.monthsBetweenInclusive(start, end);
+      case 'quarter':
+        return this.quartersBetweenInclusive(start, end);
+      case 'year':
+        return this.yearsBetweenInclusive(start, end);
+      default:
+        throw new UserError(`Unsupported period_average unit '${unit}'`);
+    }
+  }
+
+  /**
+   * 在窗口函数 / GROUP BY 中使用的桶列表达式。
+   * 部分数据库（MySQL/Oracle/DM）要求窗口 PARTITION BY/ORDER BY 里的表达式必须是
+   * 已分组列，因此非 ungrouped 时需用 `MIN(...)` 包装。
+   * @dialect 必须重写：PostgreSQL 直接返回原列即可；MySQL/Oracle/DM 需 `MIN(...)` 包装。
+   */
+  periodAverageGroupedBucketExpr(bucketColumn, options = {}) {
+    if (options.aggregateOnce && !this.ungrouped) {
+      return `MIN(${bucketColumn})`;
+    }
+    return bucketColumn;
+  }
+
+  /**
+   * Closed-form calendar unit count inside an interval bucket (interval_bucket view).
+   * Uses only the grouped bucket expression — no per-row raw time dimension.
+   */
+  periodAverageCalendarUnitsInIntervalBucket(avgUnit, interval, groupedBucket, bucketAlreadyAtInterval) {
+    if (bucketAlreadyAtInterval) {
+      if (avgUnit === interval) {
+        return '1';
+      }
+
+      const closedForm = this.periodAverageClosedFormIntervalBucketUnits(avgUnit, interval, groupedBucket);
+      if (closedForm) {
+        return closedForm;
+      }
+    }
+
+    const bucketStart = bucketAlreadyAtInterval
+      ? this.periodAverageToDateExpr(groupedBucket)
+      : this.periodAverageIntervalStartExpr(interval, groupedBucket);
+    const bucketEnd = this.periodAverageBucketEndExpr(interval, groupedBucket, bucketAlreadyAtInterval);
+    return this.periodAverageCalendarUnitCount(avgUnit, bucketStart, bucketEnd);
+  }
+
+  /**
+   * interval_bucket（整区间）calendar 分母的快路径：返回常数或闭式表达式，避免逐行日期运算。
+   * 默认实现仅返回「恒定常数」（如 month/year 的 12、3、4），不处理 day 维度。
+   * @dialect 应当重写：先调 super 处理常数情形，再补充 day 口径下
+   *          「月/季/年桶内的天数」（如 MySQL `DAY(LAST_DAY(...))` / Oracle `EXTRACT(DAY FROM LAST_DAY)`）。
+   *          适配新数据库时务必检查是否需要补充 day 快路径，否则会回退到较慢的日期差通用路径。
+   * @returns {string|null}
+   */
+  periodAverageClosedFormIntervalBucketUnits(avgUnit, interval, groupedBucket) {
+    if (avgUnit === 'month') {
+      if (interval === 'quarter') {
+        return '3';
+      }
+      if (interval === 'year') {
+        return '12';
+      }
+    }
+    if (avgUnit === 'quarter' && interval === 'year') {
+      return '4';
+    }
+    return null;
+  }
+
+  /**
+   * cumulative（区间内累计）calendar 分母的快路径：从区间起点到当前行的自然 avg_unit 数。
+   * 默认实现覆盖 day（日期差）和 month（EXTRACT(MONTH) 差）。
+   * @dialect 应当重写：先调 super，再补充该库的日期差写法
+   *          （如 MySQL `DATEDIFF` / Oracle `CAST AS DATE 相减`）。
+   *          适配新数据库时务必检查 day/month 快路径，否则回退到较慢的通用 *BetweenInclusive 路径。
+   * @returns {string|null}
+   */
+  periodAverageCumulativeCalendarUnitCount(avgUnit, interval, intervalStart, current) {
+    if (avgUnit === 'day') {
+      return `GREATEST((${current} - ${intervalStart} + 1), 0)`;
+    }
+    if (avgUnit === 'month' && (interval === 'year' || interval === 'quarter' || interval === 'month')) {
+      return `GREATEST((EXTRACT(MONTH FROM ${current})::int - EXTRACT(MONTH FROM ${intervalStart})::int + 1), 0)`;
+    }
+    return null;
+  }
+
+  periodAverageCalendarBucketDivisor(avgUnit, interval, bucketColumn, queryGranularity) {
+    const groupedBucket = this.periodAverageGroupedBucketExpr(bucketColumn, { aggregateOnce: true });
+    const bucketAlreadyAtInterval = queryGranularity === interval;
+    return this.periodAverageCalendarUnitsInIntervalBucket(
+      avgUnit,
+      interval,
+      groupedBucket,
+      bucketAlreadyAtInterval,
+    );
+  }
+
+  /**
+   * 从桶列表达式计算所在 interval（区间）的结束日期（含当日，闭区间）。
+   * @dialect 必须重写：默认实现用 PostgreSQL 的 `DATE_TRUNC + INTERVAL`，
+   *          适配新数据库时需改为该库的区间终点函数（如 `LAST_DAY(...)`）。
+   */
+  periodAverageBucketEndExpr(granularity, bucketColumn, bucketAlreadyAtInterval = false) {
+    if (bucketAlreadyAtInterval) {
+      switch (granularity) {
+        case 'day':
+          return this.periodAverageToDateExpr(bucketColumn);
+        case 'month':
+          return `((${bucketColumn}) + INTERVAL '1 month' - INTERVAL '1 day')::date`;
+        case 'quarter':
+          return `((${bucketColumn}) + INTERVAL '3 months' - INTERVAL '1 day')::date`;
+        case 'year':
+          return `((${bucketColumn}) + INTERVAL '1 year' - INTERVAL '1 day')::date`;
+        default:
+          return this.periodAverageToDateExpr(bucketColumn);
+      }
+    }
+
+    switch (granularity) {
+      case 'day':
+        return `${bucketColumn}::date`;
+      case 'month':
+        return `((DATE_TRUNC('month', ${bucketColumn}) + INTERVAL '1 month' - INTERVAL '1 day')::date)`;
+      case 'quarter':
+        return `((DATE_TRUNC('quarter', ${bucketColumn}) + INTERVAL '3 months' - INTERVAL '1 day')::date)`;
+      case 'year':
+        return `((DATE_TRUNC('year', ${bucketColumn}) + INTERVAL '1 year' - INTERVAL '1 day')::date)`;
+      default:
+        return `${bucketColumn}::date`;
+    }
+  }
+
+  /**
+   * 两个日期之间的自然月数（含首尾，闭区间）。
+   * @dialect 必须重写：默认实现用 PostgreSQL 的 `EXTRACT/AGE`，
+   *          适配新数据库时需改为该库的月份差函数（如 `TIMESTAMPDIFF(MONTH,...)` / `MONTHS_BETWEEN`）。
+   */
+  monthsBetweenInclusive(start, end) {
+    return `GREATEST((EXTRACT(YEAR FROM AGE(${end}, ${start}))::int * 12 + EXTRACT(MONTH FROM AGE(${end}, ${start}))::int + 1), 0)`;
+  }
+
+  /**
+   * 两个日期之间的自然季度数（含首尾，闭区间）。
+   * @dialect 必须重写：默认实现用 PostgreSQL 的 `EXTRACT/AGE`，
+   *          适配新数据库时需改为该库的季度差函数（如 `TIMESTAMPDIFF(QUARTER,...)` / `MONTHS_BETWEEN/3`）。
+   */
+  quartersBetweenInclusive(start, end) {
+    return `GREATEST((EXTRACT(YEAR FROM AGE(${end}, ${start}))::int * 4 + FLOOR(EXTRACT(MONTH FROM AGE(${end}, ${start}))::int / 3) + 1), 0)`;
+  }
+
+  /**
+   * 两个日期之间的自然年数（含首尾，闭区间）。
+   * @dialect 必须重写：默认实现用 PostgreSQL 的 `EXTRACT/AGE`，
+   *          适配新数据库时需改为该库的年份差函数（如 `TIMESTAMPDIFF(YEAR,...)` / `MONTHS_BETWEEN/12`）。
+   */
+  yearsBetweenInclusive(start, end) {
+    return `GREATEST((EXTRACT(YEAR FROM AGE(${end}, ${start}))::int + 1), 0)`;
   }
 
   /**
@@ -5865,7 +6844,226 @@ export class BaseQuery {
    * @returns {boolean}
    */
   hasSemiAdditiveMeasures(measures) {
-    return measures && measures.some(m => m.isSemiAdditive && m.isSemiAdditive());
+    return measures && measures.some((m) => {
+      const measurePath = m?.expressionPath && m.expressionPath();
+      return measurePath && this.shouldUseSemiAdditiveAggregationForMeasurePath(measurePath);
+    });
+  }
+
+  measurePeriodAverageDefinition(measureDefinition) {
+    if (!measureDefinition) {
+      return null;
+    }
+    const meta = measureDefinition.meta;
+    return measureDefinition.periodAverage
+      || measureDefinition.period_average
+      || (meta && typeof meta === 'object' && (meta.periodAverage || meta.period_average))
+      || null;
+  }
+
+  isPeriodAverageMeasureDefinition(measureDefinition) {
+    return !!this.measurePeriodAverageDefinition(measureDefinition);
+  }
+
+  isPeriodAverageMeasure(measure) {
+    if (!measure) {
+      return false;
+    }
+    try {
+      if (typeof measure.isPeriodAverage === 'function' && measure.isPeriodAverage()) {
+        return true;
+      }
+    } catch (e) {
+      // ignore
+    }
+    try {
+      return this.isPeriodAverageMeasureDefinition(measure.measureDefinition());
+    } catch (e) {
+      return false;
+    }
+  }
+
+  queryPeriodAverageMeasures(measures = this.measures) {
+    return (measures || []).filter((m) => this.isPeriodAverageMeasure(m));
+  }
+
+  renderPeriodAverageSemiAdditiveMeasureSql(measure) {
+    const def = measure.measureDefinition();
+    const pa = this.measurePeriodAverageDefinition(def);
+    if (!pa) {
+      return null;
+    }
+    const avgUnit = pa.avgUnit || pa.avg_unit || pa.unit;
+    const timeDimension = pa.timeDimension || pa.time_dimension;
+    const baseMeasurePath = this.periodAverageBaseMeasurePath(measure);
+    if (!baseMeasurePath) {
+      return null;
+    }
+    const baseMeasure = this.newMeasure(baseMeasurePath);
+    const aggType = (pa.baseAggType || pa.base_agg_type || baseMeasure.measureDefinition().type || 'sum').toUpperCase();
+    const paCol = this.periodAverageSemiAdditiveBaseColumnAlias(measure);
+    const innerAgg = aggType === 'SUM' || aggType === 'COUNT'
+      ? `SUM(${paCol})`
+      : `${aggType}(${paCol})`;
+    const paIntervalBucketSql = this.periodAverageSemiAdditiveBucketColumnSql(timeDimension);
+    const paRowTimeSql = this.periodAverageSemiAdditiveRowTimeColumnSql(timeDimension);
+    const paDataBucketSql = paRowTimeSql || paIntervalBucketSql;
+    const numerator = this.periodAverageNumerator(innerAgg, avgUnit, pa.interval, timeDimension, paIntervalBucketSql);
+    const divisor = this.periodAverageDivisor(
+      avgUnit,
+      pa.interval,
+      pa.denominator,
+      timeDimension,
+      paIntervalBucketSql,
+      false,
+      false,
+      paDataBucketSql,
+    );
+    return `(${numerator}) / NULLIF(${divisor}, 0) as ${measure.aliasName()}`;
+  }
+
+  semiAdditiveOuterSqlReferencesMainCubeAlias(sql) {
+    return typeof sql === 'string' && /\bmain__\w+/i.test(sql);
+  }
+
+  periodAverageBaseMeasurePathFromDefinition(measureDefinition) {
+    const periodAverage = this.measurePeriodAverageDefinition(measureDefinition);
+    if (!periodAverage) {
+      return null;
+    }
+    return periodAverage.baseMeasure || periodAverage.base_measure || null;
+  }
+
+  periodAverageBaseMeasurePath(measure) {
+    const fromDefinition = this.periodAverageBaseMeasurePathFromDefinition(measure.measureDefinition());
+    if (fromDefinition) {
+      return fromDefinition;
+    }
+
+    const selfPath = measure.expressionPath && measure.expressionPath();
+
+    try {
+      const refs = this.collectFrom(
+        [measure],
+        this.collectMemberNamesFor.bind(this),
+        'collectMemberNamesFor',
+      );
+      const measureRefs = (refs || []).filter((path) => {
+        if (!path || path === selfPath || !this.cubeEvaluator.isMeasure(path)) {
+          return false;
+        }
+        try {
+          return !this.isPeriodAverageMeasureDefinition(this.newMeasure(path).measureDefinition());
+        } catch (e) {
+          return true;
+        }
+      });
+      if (measureRefs.length === 1) {
+        return measureRefs[0];
+      }
+    } catch (e) {
+      return null;
+    }
+
+    return null;
+  }
+
+  periodAverageBaseMeasurePathsInQuery(measures = this.measures) {
+    const paths = new Set();
+    this.queryPeriodAverageMeasures(measures).forEach((measure) => {
+      const basePath = this.periodAverageBaseMeasurePath(measure);
+      if (basePath) {
+        paths.add(basePath);
+      }
+    });
+    return paths;
+  }
+
+  directSemiAdditiveMeasurePathsInQuery(measures = this.measures) {
+    return new Set(
+      (measures || [])
+        .filter(m => typeof m.isSemiAdditive === 'function' && m.isSemiAdditive())
+        .map(m => m.expressionPath && m.expressionPath())
+        .filter(Boolean),
+    );
+  }
+
+  /**
+   * period_average 分子展开时点型基础 measure 时，应像普通 measure 一样 SUM/AVG，
+   * 而不是半累加的期初/期末窗口取值。
+   *
+   * @param {BaseMeasure} measure
+   * @returns {boolean}
+   */
+  shouldUseSemiAdditiveAggregation(measure) {
+    if (!measure || typeof measure.isSemiAdditive !== 'function' || !measure.isSemiAdditive()) {
+      return false;
+    }
+
+    if (this.safeEvaluateSymbolContext().periodAverageNumerator) {
+      return false;
+    }
+
+    const measurePath = measure.expressionPath && measure.expressionPath();
+    if (!measurePath) {
+      return true;
+    }
+
+    return this.shouldUseSemiAdditiveAggregationForMeasurePath(measurePath);
+  }
+
+  /**
+   * @param {string} measurePath
+   * @returns {boolean}
+   */
+  shouldUseSemiAdditiveAggregationForMeasurePath(measurePath) {
+    if (!measurePath || !this.cubeEvaluator.isMeasure(measurePath)) {
+      return false;
+    }
+
+    let measure;
+    try {
+      measure = this.newMeasure(measurePath);
+    } catch (e) {
+      return false;
+    }
+
+    if (!measure.isSemiAdditive()) {
+      return false;
+    }
+
+    const periodAverageBases = this.periodAverageBaseMeasurePathsInQuery();
+    const directSemiAdditive = this.directSemiAdditiveMeasurePathsInQuery();
+
+    if (periodAverageBases.has(measurePath) && !directSemiAdditive.has(measurePath)) {
+      return false;
+    }
+
+    return true;
+  }
+
+  /**
+   * 半累加 CTE 外层会通过 renderedReference 复用已投影的半累加指标 SQL。
+   * period_average 分子展开时点型基础 measure 时须跳过该引用，改用普通 SUM/AVG。
+   *
+   * @param {string} measurePath
+   * @returns {boolean}
+   */
+  shouldUseRenderedReferenceForMeasurePath(measurePath) {
+    if (!this.safeEvaluateSymbolContext().periodAverageNumerator) {
+      return true;
+    }
+
+    if (!measurePath || !this.cubeEvaluator.isMeasure(measurePath)) {
+      return true;
+    }
+
+    try {
+      const measure = this.newMeasure(measurePath);
+      return !(typeof measure.isSemiAdditive === 'function' && measure.isSemiAdditive());
+    } catch (e) {
+      return true;
+    }
   }
 
   /**
@@ -5900,7 +7098,8 @@ export class BaseQuery {
           return null;
         }
       })
-      .filter(m => m && m.isSemiAdditive && m.isSemiAdditive());
+      .filter(m => m && m.isSemiAdditive && m.isSemiAdditive())
+      .filter(m => this.shouldUseSemiAdditiveAggregationForMeasurePath(m.expressionPath()));
   }
 
   /**
@@ -5908,9 +7107,10 @@ export class BaseQuery {
    * Used with `this.from` so multi-stage subqueries still run regularMeasuresSubQuery.
    */
   queryHasSemiAdditiveMeasures() {
-    return (this.measures || []).some(
-      m => typeof m.isSemiAdditive === 'function' && m.isSemiAdditive()
-    );
+    return (this.measures || []).some((m) => {
+      const measurePath = m?.expressionPath && m.expressionPath();
+      return measurePath && this.shouldUseSemiAdditiveAggregationForMeasurePath(measurePath);
+    });
   }
 
   /**
@@ -5927,20 +7127,7 @@ export class BaseQuery {
     if (!names || !names.length) {
       return false;
     }
-    return names.some((path) => {
-      if (!path || typeof path !== 'string') {
-        return false;
-      }
-      if (!this.cubeEvaluator.isMeasure(path)) {
-        return false;
-      }
-      try {
-        const m = this.newMeasure(path);
-        return typeof m.isSemiAdditive === 'function' && m.isSemiAdditive();
-      } catch (e) {
-        return false;
-      }
-    });
+    return names.some((path) => this.shouldUseSemiAdditiveAggregationForMeasurePath(path));
   }
 
   /**
@@ -6056,6 +7243,16 @@ export class BaseQuery {
       unaggregatedColumns.push(`${baseSql} as ${this.escapeColumnName(rawColumnName)}`);
     });
 
+    this.queryPeriodAverageMeasures(measures).forEach((paMeasure) => {
+      const baseSql = this.periodAverageSemiAdditiveBaseRawSql(paMeasure);
+      if (!baseSql) {
+        return;
+      }
+      unaggregatedColumns.push(
+        `${baseSql} as ${this.periodAverageSemiAdditiveBaseColumnAlias(paMeasure)}`,
+      );
+    });
+
     const timeDimensionsForOrdering = new Set();
 
     semiAdditiveMeasuresForCte.forEach(measure => {
@@ -6078,7 +7275,15 @@ export class BaseQuery {
       });
     }
 
-    measures.filter(m => !(m.isSemiAdditive && m.isSemiAdditive())).forEach((measure) => {
+    measures.filter((m) => {
+      if (m.isSemiAdditive && m.isSemiAdditive()) {
+        return false;
+      }
+      if (this.isPeriodAverageMeasure(m)) {
+        return false;
+      }
+      return true;
+    }).forEach((measure) => {
       const def = measure.measureDefinition();
       const baseSql = def && def.sql;
       if (baseSql == null || baseSql === '') {
@@ -6120,6 +7325,29 @@ export class BaseQuery {
    * @returns {string}
    */
   rewriteSemiAdditiveOuterMeasureSql(measure, sql) {
+    if (this.isPeriodAverageMeasure(measure)) {
+      const basePath = this.periodAverageBaseMeasurePath(measure);
+      if (basePath) {
+        const baseMeasure = this.newMeasure(basePath);
+        const baseDef = baseMeasure.measureDefinition();
+        const baseEvaluated = baseDef?.sql && this.evaluateSql(baseMeasure.cube().name, baseDef.sql);
+        if (baseEvaluated != null) {
+          const rawStr = String(baseEvaluated).trim();
+          const cubeAlias = this.cubeAlias(baseMeasure.cube().name);
+          const replacement = this.periodAverageSemiAdditiveBaseColumnAlias(measure);
+          const prefixedUnquoted = `${cubeAlias}.${rawStr}`;
+          if (sql.includes(prefixedUnquoted)) {
+            return sql.split(prefixedUnquoted).join(replacement);
+          }
+          const prefixedQuoted = `${cubeAlias}.${this.escapeColumnName(rawStr)}`;
+          if (sql.includes(prefixedQuoted)) {
+            return sql.split(prefixedQuoted).join(replacement);
+          }
+        }
+      }
+      return sql;
+    }
+
     const def = measure.measureDefinition();
     const baseSql = def && def.sql;
     if (baseSql == null || baseSql === '') {
@@ -6186,7 +7414,10 @@ export class BaseQuery {
     semiAdditiveMeasuresForCte = null,
   ) {
     const semiAdditiveMeasures = semiAdditiveMeasuresForCte ||
-      measures.filter(m => m.isSemiAdditive && m.isSemiAdditive());
+      measures.filter((m) => {
+        const measurePath = m?.expressionPath && m.expressionPath();
+        return measurePath && this.shouldUseSemiAdditiveAggregationForMeasurePath(measurePath);
+      });
 
     if (semiAdditiveMeasures.length === 0) {
       return originalQuery;
@@ -6276,19 +7507,36 @@ export class BaseQuery {
     // 对于半累加指标，使用 measureSql()（包含聚合逻辑）
     const dimensionColumns = this.dimensionsForSelect().map(d => d.aliasName());
     const measureColumns = measures.map(m => {
-      if (m.isSemiAdditive && m.isSemiAdditive()) {
+      if (this.shouldUseSemiAdditiveAggregation(m)) {
         // 半累加指标：使用 measureSql() 生成聚合表达式
         const sql = m.measureSql();
         const alias = m.aliasName();
         return `${sql} as ${alias}`;
-      } else {
-        const sql = this.evaluateSymbolSqlWithContext(
-          () => m.measureSql(),
-          { renderedReference: semiAdditiveCteRenderedReference },
-        );
-        const rewritten = this.rewriteSemiAdditiveOuterMeasureSql(m, sql);
-        return `${rewritten} as ${m.aliasName()}`;
       }
+      if (this.isPeriodAverageMeasure(m)) {
+        const rendered = this.renderPeriodAverageSemiAdditiveMeasureSql(m);
+        if (rendered) {
+          return rendered;
+        }
+      }
+      const sql = this.evaluateSymbolSqlWithContext(
+        () => m.measureSql(),
+        { renderedReference: semiAdditiveCteRenderedReference },
+      );
+      let rewritten = this.rewriteSemiAdditiveOuterMeasureSql(m, sql);
+      if (this.semiAdditiveOuterSqlReferencesMainCubeAlias(rewritten) && this.isPeriodAverageMeasure(m)) {
+        const rendered = this.renderPeriodAverageSemiAdditiveMeasureSql(m);
+        if (rendered) {
+          return rendered;
+        }
+      }
+      if (this.semiAdditiveOuterSqlReferencesMainCubeAlias(rewritten)) {
+        throw new UserError(
+          `Measure '${m.measure}' references the base table inside semi-additive windowed_data aggregation. `
+          + 'Ensure period_average is configured on this measure and recompile the schema.',
+        );
+      }
+      return `${rewritten} as ${m.aliasName()}`;
     });
     const selectColumns = [...dimensionColumns, ...measureColumns].join(', ');
 

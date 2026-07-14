@@ -1,3 +1,4 @@
+use super::Compiler;
 use super::ParamsAllocator;
 use crate::cube_bridge::base_query_options::MaskedMemberItem;
 use crate::cube_bridge::base_tools::BaseTools;
@@ -9,12 +10,13 @@ use crate::cube_bridge::sql_templates_render::SqlTemplatesRender;
 use crate::planner::filter::FilterItem;
 use crate::planner::join_hints::JoinHints;
 use crate::planner::sql_templates::PlanSqlTemplates;
+use crate::planner::MemberSymbol;
 use chrono_tz::Tz;
 use cubenativeutils::CubeError;
 use itertools::Itertools;
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct JoinKey {
@@ -38,6 +40,7 @@ pub struct QueryTools {
     // so this cache forms no reference cycle. It stays here only until the
     // early-compilation refactor resolves mask filters up front.
     member_mask_filters: RefCell<HashMap<String, FilterItem>>,
+    compiler: OnceCell<Weak<RefCell<Compiler>>>,
 }
 
 impl QueryTools {
@@ -81,7 +84,23 @@ impl QueryTools {
             convert_tz_for_raw_time_dimension,
             masked_members: masked_set,
             member_mask_filters: RefCell::new(HashMap::new()),
+            compiler: OnceCell::new(),
         }))
+    }
+
+    pub(crate) fn set_compiler(&self, compiler: Weak<RefCell<Compiler>>) {
+        let _ = self.compiler.set(compiler);
+    }
+
+    pub fn resolve_measure(&self, path: &str) -> Result<Rc<MemberSymbol>, CubeError> {
+        let weak = self.compiler.get().ok_or_else(|| {
+            CubeError::internal("Compiler is not attached to QueryTools".to_string())
+        })?;
+        let compiler = weak.upgrade().ok_or_else(|| {
+            CubeError::internal("Compiler is detached from QueryTools".to_string())
+        })?;
+        let mut compiler_ref = compiler.borrow_mut();
+        compiler_ref.add_measure_evaluator(path.to_string())
     }
 
     /// Installs the compiled mask filters. Called once by `State` after it

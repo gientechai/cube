@@ -517,4 +517,151 @@ describe('DmQuery', () => {
     expect(sql).toMatch(/CAST\(TRUNC\([^)]*, 'DD'\) AS TIMESTAMP\)/);
     expect(sql).toMatch(/created_at\s+>=\s+CAST\(TO_TIMESTAMP_TZ/);
   });
+
+  it('Rewrites owned cube qualified references for DM quoted identifiers', async () => {
+    await compiler.compile();
+
+    const query = new DmQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      { measures: ['visitors.count'], timeDimensions: [], filters: [] },
+    );
+
+    const quoted = query.withCubeAliasPrefix(
+      'main',
+      () => query.autoPrefixWithCubeName('visitors', '"visitors"."amount"'),
+    );
+    const unquoted = query.withCubeAliasPrefix(
+      'main',
+      () => query.autoPrefixWithCubeName('visitors', 'visitors.amount'),
+    );
+
+    expect(quoted).toEqual('main__visitors."amount"');
+    expect(unquoted).toEqual('main__visitors.amount');
+  });
+});
+
+describe('DmQuery period_average SQL dialect', () => {
+  const periodAvgSchema = `
+    cube(\`period_avg_facts\`, {
+      sql: \`SELECT TIMESTAMP '2025-06-01 10:00:00' AS stat_dt, 100 AS amount FROM DUAL\`,
+      dimensions: {
+        stat_dt: { type: 'time', sql: 'stat_dt' },
+      },
+      measures: {
+        total_amount: { type: 'sum', sql: 'amount' },
+        period_daily_avg_calendar: {
+          type: 'number',
+          sql: \`\${total_amount}\`,
+          period_average: {
+            avg_unit: 'day',
+            interval: 'month',
+            denominator: 'calendar',
+            time_dimension: 'stat_dt',
+          },
+        },
+        period_monthly_avg_calendar: {
+          type: 'number',
+          sql: \`\${total_amount}\`,
+          period_average: {
+            avg_unit: 'month',
+            interval: 'month',
+            denominator: 'calendar',
+            time_dimension: 'stat_dt',
+          },
+        },
+      },
+    })
+  `;
+
+  it('calendar/day month bucket uses LAST_DAY instead of Postgres INTERVAL', async () => {
+    const { compiler, joinGraph, cubeEvaluator } = prepareJsCompiler(periodAvgSchema, { adapter: 'dm' });
+    await compiler.compile();
+
+    const query = new DmQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['period_avg_facts.period_daily_avg_calendar'],
+        timeDimensions: [{
+          dimension: 'period_avg_facts.stat_dt',
+          granularity: 'month',
+          dateRange: ['2025-06-01', '2025-06-30'],
+        }],
+        timezone: 'UTC',
+      },
+    );
+
+    const groupByExpr = query.timeDimensions[0].dimensionSql();
+    const divisor = query.periodAverageDivisor('day', 'month', 'calendar', 'period_avg_facts.stat_dt', null, false);
+
+    expect(divisor).toContain('LAST_DAY');
+    expect(divisor).toMatch(/MIN\s*\(/i);
+    expect(divisor).not.toMatch(/INTERVAL\s+'1 month'/i);
+    expect(divisor).not.toMatch(/::date/);
+    expect(divisor).toContain(groupByExpr);
+  });
+
+  it('range month divisor uses MONTHS_BETWEEN instead of AGE', async () => {
+    const { compiler, joinGraph, cubeEvaluator } = prepareJsCompiler(periodAvgSchema, { adapter: 'dm' });
+    await compiler.compile();
+
+    const query = new DmQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['period_avg_facts.period_monthly_avg_calendar'],
+        timeDimensions: [{
+          dimension: 'period_avg_facts.stat_dt',
+          dateRange: ['2025-04-01', '2025-06-30'],
+        }],
+        timezone: 'UTC',
+      },
+    );
+
+    const divisor = query.periodAverageDivisor('month', 'month', 'calendar', 'period_avg_facts.stat_dt', null, false);
+
+    expect(divisor).toMatch(/MONTHS_BETWEEN/i);
+    expect(divisor).not.toMatch(/\bAGE\s*\(/i);
+    expect(divisor).not.toMatch(/::date/);
+  });
+
+  it('cumulative day/month uses TRUNC instead of DATE_TRUNC', async () => {
+    const { compiler, joinGraph, cubeEvaluator } = prepareJsCompiler(periodAvgSchema, { adapter: 'dm' });
+    await compiler.compile();
+
+    const query = new DmQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['period_avg_facts.period_daily_avg_calendar'],
+        timeDimensions: [{
+          dimension: 'period_avg_facts.stat_dt',
+          granularity: 'day',
+          dateRange: ['2025-06-01', '2025-06-30'],
+        }],
+        timezone: 'UTC',
+      },
+    );
+
+    const bucketSql = query.timeDimensions[0].dimensionSql();
+    const numerator = query.periodAverageNumerator(
+      'SUM("period_avg_facts".amount)',
+      'day',
+      'month',
+      'period_avg_facts.stat_dt',
+      bucketSql,
+    );
+    const divisor = query.periodAverageDivisor(
+      'day',
+      'month',
+      'calendar',
+      'period_avg_facts.stat_dt',
+      bucketSql,
+      false,
+    );
+
+    expect(numerator).toMatch(/OVER\s*\(/i);
+    expect(numerator).toMatch(/TRUNC/i);
+    expect(numerator).not.toMatch(/DATE_TRUNC/i);
+    expect(divisor).toMatch(/TRUNC/i);
+    expect(divisor).not.toMatch(/DATE_TRUNC/i);
+    expect(numerator).not.toMatch(/MIN\s*\(\s*MIN/i);
+  });
 });
