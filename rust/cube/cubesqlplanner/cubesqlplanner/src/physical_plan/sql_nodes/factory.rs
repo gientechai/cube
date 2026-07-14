@@ -1,9 +1,9 @@
 use super::{
     AutoPrefixSqlNode, CaseSqlNode, EvaluateSqlNode, FinalMeasureSqlNode,
     FinalPreAggregationMeasureSqlNode, GeoDimensionSqlNode, MaskedSqlNode, MeasureFilterSqlNode,
-    MultiStageRankNode, MultiStageWindowNode, ParenthesizeSqlNode, RenderReferencesSqlNode,
-    RenderReferencesType, RollingWindowNode, RootSqlNode, SegmentDimensionSqlNode, SqlNode,
-    TimeDimensionNode, TimeShiftSqlNode, UngroupedMeasureSqlNode,
+    MultiStageRankNode, MultiStageWindowNode, ParenthesizeSqlNode, PeriodAverageMeasureNode,
+    RenderReferencesSqlNode, RenderReferencesType, RollingWindowNode, RootSqlNode,
+    SegmentDimensionSqlNode, SqlNode, TimeDimensionNode, TimeShiftSqlNode, UngroupedMeasureSqlNode,
     UngroupedQueryFinalMeasureSqlNode,
 };
 use crate::physical_plan::cube_ref_evaluator::CubeRefEvaluator;
@@ -270,7 +270,7 @@ impl SqlNodesFactory {
             if self.rolling_window {
                 RollingWindowNode::new(input, final_processor)
             } else {
-                final_processor
+                PeriodAverageMeasureNode::new(input, final_processor)
             }
         }
     }

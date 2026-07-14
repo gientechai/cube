@@ -150,3 +150,159 @@ cubes:
     );
   });
 });
+
+describe('period_average MySQL SQL dialect', () => {
+  const periodAvgSchema = `
+cubes:
+  - name: period_avg_facts
+    sql: "SELECT TIMESTAMP '2025-06-01 10:00:00' AS stat_dt, 100 AS amount"
+    dimensions:
+      - name: stat_dt
+        sql: stat_dt
+        type: time
+    measures:
+      - name: total_amount
+        type: sum
+        sql: amount
+      - name: period_daily_avg_calendar
+        type: number
+        sql: "{total_amount}"
+        period_average:
+          avg_unit: day
+          interval: month
+          denominator: calendar
+          time_dimension: stat_dt
+      - name: period_daily_avg_data
+        type: number
+        sql: "{total_amount}"
+        period_average:
+          avg_unit: day
+          interval: month
+          denominator: data
+          time_dimension: stat_dt
+      - name: period_monthly_avg_data
+        type: number
+        sql: "{total_amount}"
+        period_average:
+          avg_unit: month
+          interval: month
+          denominator: data
+          time_dimension: stat_dt
+`;
+
+  const compilers = prepareYamlCompiler(periodAvgSchema);
+  const bucketSql = 'CAST(DATE_FORMAT(stat_dt, \'%Y-%m-01T00:00:00.000\') AS DATETIME)';
+
+  beforeAll(async () => {
+    await compilers.compiler.compile();
+  });
+
+  it('calendar/day divisor uses query time dimension expression (ONLY_FULL_GROUP_BY)', () => {
+    const query = new MysqlQuery(compilers, {
+      measures: ['period_avg_facts.period_daily_avg_calendar'],
+      timeDimensions: [{
+        dimension: 'period_avg_facts.stat_dt',
+        granularity: 'month',
+        dateRange: ['2025-06-01', '2025-06-30'],
+      }],
+      timezone: 'UTC',
+    });
+
+    const groupByExpr = query.timeDimensions[0].dimensionSql();
+    const divisor = query.periodAverageDivisor('day', 'month', 'calendar', 'period_avg_facts.stat_dt', null, false);
+
+    expect(divisor).toContain(groupByExpr);
+    expect(divisor).toMatch(/MIN\(/i);
+    expect(divisor).not.toMatch(/CONVERT_TZ\(stat_dt,/);
+    expect(divisor).toMatch(/DAY\s*\(\s*LAST_DAY/i);
+  });
+
+  it('calendar/day divisor uses MySQL date functions', () => {
+    const query = new MysqlQuery(compilers, {
+      measures: ['period_avg_facts.period_daily_avg_calendar'],
+      timeDimensions: [{
+        dimension: 'period_avg_facts.stat_dt',
+        granularity: 'month',
+        dateRange: ['2025-06-01', '2025-06-30'],
+      }],
+      timezone: 'UTC',
+    });
+
+    const divisor = query.periodAverageDivisor('day', 'month', 'calendar', 'period_avg_facts.stat_dt', bucketSql, false);
+
+    expect(divisor).not.toMatch(/::date/);
+    expect(divisor).not.toMatch(/DATE_TRUNC/i);
+    expect(divisor).toMatch(/DAY\s*\(\s*LAST_DAY/i);
+  });
+
+  it('data/day divisor uses DATE() instead of ::date cast', () => {
+    const query = new MysqlQuery(compilers, {
+      measures: ['period_avg_facts.period_daily_avg_data'],
+      timeDimensions: [{
+        dimension: 'period_avg_facts.stat_dt',
+        granularity: 'month',
+        dateRange: ['2025-06-01', '2025-06-30'],
+      }],
+      timezone: 'UTC',
+    });
+
+    const divisor = query.periodAverageDivisor('day', 'month', 'data', 'period_avg_facts.stat_dt', bucketSql, false);
+
+    expect(divisor).not.toMatch(/::date/);
+    expect(divisor).toMatch(/COUNT\(DISTINCT DATE\(/i);
+  });
+
+  it('data/month divisor uses DATE() for distinct month buckets', () => {
+    const query = new MysqlQuery(compilers, {
+      measures: ['period_avg_facts.period_monthly_avg_data'],
+      timeDimensions: [{
+        dimension: 'period_avg_facts.stat_dt',
+        granularity: 'month',
+        dateRange: ['2025-06-01', '2025-06-30'],
+      }],
+      timezone: 'UTC',
+    });
+
+    const divisor = query.periodAverageDivisor('month', 'month', 'data', 'period_avg_facts.stat_dt', bucketSql, false);
+
+    expect(divisor).not.toMatch(/::date/);
+    expect(divisor).toMatch(/COUNT\(DISTINCT DATE\(/i);
+  });
+
+  it('cumulative window uses MIN() for ONLY_FULL_GROUP_BY without nested MIN()', () => {
+    const query = new MysqlQuery(compilers, {
+      measures: ['period_avg_facts.period_daily_avg_calendar'],
+      timeDimensions: [{
+        dimension: 'period_avg_facts.stat_dt',
+        granularity: 'day',
+        dateRange: ['2025-06-01', '2025-06-30'],
+      }],
+      timezone: 'UTC',
+    });
+
+    const bucketSql = query.timeDimensions[0].dimensionSql();
+    const numerator = query.periodAverageNumerator(
+      'SUM(`period_avg_facts`.amount)',
+      'day',
+      'month',
+      'period_avg_facts.stat_dt',
+      bucketSql,
+    );
+    const divisor = query.periodAverageDivisor(
+      'day',
+      'month',
+      'calendar',
+      'period_avg_facts.stat_dt',
+      bucketSql,
+      false,
+    );
+
+    expect(numerator).toMatch(/OVER\s*\(/i);
+    expect(numerator).toMatch(/PARTITION BY\s+MIN\s*\(/i);
+    expect(numerator).toMatch(/ORDER BY\s+MIN\s*\(/i);
+    expect(numerator).not.toMatch(/PARTITION BY\s+MIN\s*\(\s*MIN/i);
+    expect(divisor).toMatch(/DATEDIFF/i);
+    expect(divisor).toMatch(/MIN\s*\(/i);
+    expect(divisor).not.toMatch(/MIN\s*\(\s*MIN/i);
+  });
+});

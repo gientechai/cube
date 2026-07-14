@@ -49,6 +49,14 @@ export interface ExtendedCubeSymbolDefinition extends CubeSymbolDefinition {
   drillMemberReferences?: any;
   cumulative?: boolean;
   aggType?: string;
+  periodAverage?: {
+    avgUnit: string;
+    interval: string;
+    denominator: string;
+    timeDimension: string;
+    baseMeasure?: string;
+    baseAggType?: string;
+  };
   keyReference?: string;
   currency?: string;
   links?: Array<{
@@ -461,7 +469,8 @@ export class CubeToMetaTransformer implements CompilerInterface {
       drillMembers: drillMembersArray,
       drillMembersGrouped,
       aliasMember: extendedMetricDef.aliasMember,
-      meta: extendedMetricDef.meta
+      meta: extendedMetricDef.meta,
+      ...(extendedMetricDef.periodAverage ? { periodAverage: extendedMetricDef.periodAverage } : {}),
     };
   }
 

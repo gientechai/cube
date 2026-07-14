@@ -1,6 +1,6 @@
 use crate::cube_bridge::case_variant::CaseVariant;
 use crate::cube_bridge::measure_definition::{
-    MeasureDefinition, MeasureDefinitionStatic, RollingWindow, TimeShiftReference,
+    MeasureDefinition, MeasureDefinitionStatic, PeriodAverage, RollingWindow, TimeShiftReference,
 };
 use crate::cube_bridge::member_order_by::MemberOrderBy;
 use crate::cube_bridge::member_sql::MemberSql;
@@ -35,6 +35,8 @@ pub struct MockMeasureDefinition {
     time_shift_references: Option<Vec<TimeShiftReference>>,
     #[builder(default)]
     rolling_window: Option<RollingWindow>,
+    #[builder(default)]
+    period_average: Option<PeriodAverage>,
 
     #[builder(default, setter(strip_option(fallback = sql_opt)))]
     sql: Option<String>,
@@ -64,7 +66,8 @@ impl_static_data!(
     add_group_by_references,
     group_by_references,
     time_shift_references,
-    rolling_window
+    rolling_window,
+    period_average
 );
 
 impl MockMeasureDefinition {

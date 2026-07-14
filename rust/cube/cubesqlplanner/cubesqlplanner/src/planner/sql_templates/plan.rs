@@ -143,6 +143,42 @@ impl PlanSqlTemplates {
         self.driver_tools.count_distinct_approx(sql)
     }
 
+    pub fn period_average_divisor(
+        &self,
+        avg_unit: String,
+        interval: String,
+        denominator: String,
+        time_dimension: String,
+        bucket_sql: Option<String>,
+        identity: bool,
+    ) -> Result<String, CubeError> {
+        self.driver_tools.period_average_divisor(
+            avg_unit,
+            interval,
+            denominator,
+            time_dimension,
+            bucket_sql,
+            identity,
+        )
+    }
+
+    pub fn period_average_numerator(
+        &self,
+        inner_agg_sql: String,
+        avg_unit: String,
+        interval: String,
+        time_dimension: String,
+        bucket_sql: Option<String>,
+    ) -> Result<String, CubeError> {
+        self.driver_tools.period_average_numerator(
+            inner_agg_sql,
+            avg_unit,
+            interval,
+            time_dimension,
+            bucket_sql,
+        )
+    }
+
     pub fn alias_name(name: &str) -> String {
         let res = name
             .with_boundaries(&[

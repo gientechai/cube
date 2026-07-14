@@ -35,6 +35,20 @@ pub struct RollingWindow {
     pub granularity: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PeriodAverage {
+    #[serde(rename = "avgUnit", alias = "avg_unit")]
+    pub avg_unit: String,
+    pub interval: String,
+    pub denominator: String,
+    #[serde(rename = "timeDimension", alias = "time_dimension")]
+    pub time_dimension: String,
+    #[serde(rename = "baseMeasure")]
+    pub base_measure: Option<String>,
+    #[serde(rename = "baseAggType")]
+    pub base_agg_type: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, nativebridge::NativeBridgeStatic)]
 pub struct MeasureDefinitionStatic {
     #[serde(rename = "type")]
@@ -53,6 +67,8 @@ pub struct MeasureDefinitionStatic {
     pub time_shift_references: Option<Vec<TimeShiftReference>>,
     #[serde(rename = "rollingWindow")]
     pub rolling_window: Option<RollingWindow>,
+    #[serde(rename = "periodAverage")]
+    pub period_average: Option<PeriodAverage>,
 }
 
 #[nativebridge::native_bridge(MeasureDefinitionStatic, with_static_meta)]

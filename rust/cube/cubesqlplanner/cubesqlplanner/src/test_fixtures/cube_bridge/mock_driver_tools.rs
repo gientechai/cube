@@ -242,4 +242,34 @@ impl DriverTools for MockDriverTools {
             origin, interval, source, origin, interval
         ))
     }
+
+    fn period_average_divisor(
+        &self,
+        avg_unit: String,
+        interval: String,
+        denominator: String,
+        time_dimension: String,
+        _bucket_sql: Option<String>,
+        identity: bool,
+    ) -> Result<String, CubeError> {
+        if identity {
+            return Ok("1".to_string());
+        }
+        Ok(format!(
+            "period_average_divisor({avg_unit}, {interval}, {denominator}, {time_dimension})"
+        ))
+    }
+
+    fn period_average_numerator(
+        &self,
+        inner_agg_sql: String,
+        avg_unit: String,
+        interval: String,
+        time_dimension: String,
+        _bucket_sql: Option<String>,
+    ) -> Result<String, CubeError> {
+        Ok(format!(
+            "period_average_numerator({inner_agg_sql}, {avg_unit}, {interval}, {time_dimension})"
+        ))
+    }
 }

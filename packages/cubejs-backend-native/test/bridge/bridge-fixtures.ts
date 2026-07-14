@@ -236,6 +236,8 @@ export const driverToolsFixture = (): unknown => ({
   countDistinctApprox: () => 'c',
   supportGeneratedSeriesForCustomTd: () => false,
   dateBin: () => 'b',
+  periodAverageDivisor: () => '1',
+  periodAverageNumerator: (inner: string) => inner,
 });
 
 export const baseToolsFixture = (): unknown => ({
