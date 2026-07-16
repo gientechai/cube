@@ -8,6 +8,7 @@ use crate::planner::collectors::collect_calc_group_dims_from_nodes;
 use crate::planner::get_filtered_values;
 use cubenativeutils::CubeError;
 use itertools::Itertools as _;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 pub struct KeysSubQueryProcessor<'a> {
@@ -74,18 +75,31 @@ impl<'a> LogicalNodeProcessor<'a, KeysSubQuery> for KeysSubQueryProcessor<'a> {
             &references_builder,
             &mut context_factory,
         )?;
-        for member in keys_subquery.schema().all_dimensions() {
+        let schema_dimensions = keys_subquery
+            .schema()
+            .all_dimensions()
+            .cloned()
+            .collect_vec();
+        let schema_dimension_names: HashSet<String> = schema_dimensions
+            .iter()
+            .map(|member| member.full_name())
+            .collect();
+
+        for member in schema_dimensions {
             let alias = member.alias();
             references_builder.resolve_references_for_member(
                 member.clone(),
                 &None,
                 context_factory.render_references_mut(),
             )?;
-            select_builder.add_projection_member(member, Some(alias));
+            select_builder.add_projection_member(&member, Some(alias));
         }
 
         if !context.dimensions_query {
             for member in keys_subquery.primary_keys_dimensions().iter() {
+                if schema_dimension_names.contains(&member.full_name()) {
+                    continue;
+                }
                 let alias = member.alias();
                 references_builder.resolve_references_for_member(
                     member.clone(),
