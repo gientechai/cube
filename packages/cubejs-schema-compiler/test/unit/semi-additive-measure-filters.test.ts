@@ -55,9 +55,13 @@ describe('semi-additive measure schema filters', () => {
     const [sql] = query.buildSqlAndParams();
 
     expect(sql).toMatch(/CASE WHEN .*subject.*=.*'语文'.*THEN.*score/i);
-    // 期初/期末时点在同一时间桶内全局统一；filter 只收窄 raw 取值，窗口 min/max 仍看全部分区行
-    expect(sql).toMatch(/MAX\("_score1__exam_date_for_ordering"\) OVER/i);
+    // 期初/期末时点在同一时间桶内全局统一；filter 只收窄 raw 取值，边界 min/max 仍看全部分区行
+    // JOIN 路径：partition_bounds 上 MAX(...)，不再使用 OVER
+    expect(sql).toMatch(/MAX\("_score1__exam_date_for_ordering"\)/i);
+    expect(sql).toMatch(/partition_bounds_/i);
+    expect(sql).toMatch(/matched_data AS/i);
     expect(sql).not.toMatch(/MAX\(CASE WHEN.*_raw IS NOT NULL/i);
+    expect(sql).not.toMatch(/OVER\s*\(/i);
   });
 });
 
@@ -116,9 +120,11 @@ describe('semi-additive calculated measure references', () => {
     const [sql] = query.buildSqlAndParams();
 
     expect(sql).toMatch(/WITH base_data AS/i);
-    expect(sql).toMatch(/windowed_data AS/i);
-    expect(sql).toMatch(/MAX\("_score1__exam_date_for_ordering"\) OVER/i);
-    expect(sql).toMatch(/MIN\("_score1__exam_date_for_ordering"\) OVER/i);
+    expect(sql).toMatch(/matched_data AS/i);
+    expect(sql).toMatch(/partition_bounds_/i);
+    expect(sql).toMatch(/MAX\("_score1__exam_date_for_ordering"\)/i);
+    expect(sql).toMatch(/MIN\("_score1__exam_date_for_ordering"\)/i);
+    expect(sql).not.toMatch(/OVER\s*\(/i);
     expect(sql).not.toMatch(/sum\("score1"\.score\)\s*\/\s*count\(distinct "score1"\.score\)/i);
   });
 
@@ -198,7 +204,8 @@ describe('semi-additive calculated measure references', () => {
     const [sql] = query.buildSqlAndParams();
 
     expect(sql).toMatch(/^WITH base_data AS/i);
-    expect(sql).toMatch(/windowed_data AS/i);
+    expect(sql).toMatch(/matched_data AS/i);
+    expect(sql).toMatch(/partition_bounds_/i);
     expect(sql).not.toMatch(/FROM\s*\(\s*WITH/i);
     expect(sql).toMatch(/q_0[\s\S]*ORDER BY "score1__fuhezhibiao" DESC NULLS LAST/i);
     expect(sql).not.toMatch(/ORDER BY[\s\S]*sum\("score1"\.score\)/i);
@@ -301,8 +308,15 @@ describe('semi-additive multiple time granularities in base_data', () => {
 
     const [sql] = query.buildSqlAndParams();
 
-    expect(sql).toMatch(/PARTITION BY[\s\S]*%Y-%m-01/i);
-    expect(sql).not.toMatch(/PARTITION BY[\s\S]*%Y-01-01T00:00:00\.000/i);
+    // JOIN 路径：bounds GROUP BY 用最细粒度（month），year 仅作为展示列出现在 SELECT
+    expect(sql).toMatch(/partition_bounds_/i);
+    expect(sql).toMatch(
+      /partition_bounds_0 AS \(\s*SELECT[\s\S]*%Y-%m-01[\s\S]*GROUP BY[\s\S]*%Y-%m-01/i
+    );
+    expect(sql).not.toMatch(
+      /partition_bounds_0 AS \(\s*SELECT[\s\S]*%Y-01-01T00:00:00\.000/i
+    );
+    expect(sql).not.toMatch(/OVER\s*\(/i);
   });
 });
 
@@ -356,6 +370,10 @@ describe('semi-additive windowGroupings dimensions in base_data', () => {
     expect(sql).toMatch(/WITH base_data AS/i);
     expect(sql).toMatch(/"facts__city"/i);
     expect(sql).toMatch(/"facts__city_code"/i);
-    expect(sql).toMatch(/PARTITION BY "facts__city"/i);
+    expect(sql).toMatch(/partition_bounds_/i);
+    expect(sql).toMatch(/matched_data AS/i);
+    // windowGroupings 进入 bounds 的 GROUP BY（JOIN 路径不再使用 PARTITION BY）
+    expect(sql).toMatch(/GROUP BY[\s\S]*"facts__city"/i);
+    expect(sql).not.toMatch(/OVER\s*\(/i);
   });
 });
