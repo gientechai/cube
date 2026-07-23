@@ -62,6 +62,13 @@ export class MysqlQuery extends BaseQuery {
       ) {
         return super.getFieldOrderExpr(id);
       }
+      // period_average + denominator:'data' 走 period_avg_data_daily 预聚合 CTE 路径时，
+      // 外层 SELECT/GROUP BY 作用在 CTE 上（仅暴露别名）。MySQL 不能用 positional ORDER BY，
+      // 直接展开 measureSql() 会引用 CTE 中不存在的原始表列（如 `cube`.amount），触发
+      // ER_BAD_FIELD_ERROR: Unknown column … in 'order clause'。须委托 super 用 SELECT 别名。
+      if (this.shouldUsePeriodAverageDataPreAggregatePath()) {
+        return super.getFieldOrderExpr(id);
+      }
       // Non-semi-additive aggregates on simpleQuery must repeat measureSql() on MySQL.
       return measure.measureSql();
     }
