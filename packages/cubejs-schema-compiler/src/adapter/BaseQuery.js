@@ -6071,10 +6071,11 @@ export class BaseQuery {
         const cubeName = contextMeasure.cube().name;
         const dimensionPath = dimensionName.includes('.') ? dimensionName : `${cubeName}.${dimensionName}`;
         const dimension = this.newDimension(dimensionPath);
-        const dimensionSql = this.dimensionSql(dimension);
+        // Layer B: ordering 用裸列（不做 CONVERT_TZ），MAX/MIN 比较更便宜且语义与同偏移 TZ 一致
+        const orderingSql = this.semiAdditiveOrderingColumnSql(dimension);
         const unescapedAlias = dimension.unescapedAliasName();
         const columnAlias = `_${unescapedAlias}_for_ordering`;
-        unaggregatedColumns.push(`${dimensionSql} as ${this.escapeColumnName(columnAlias)}`);
+        unaggregatedColumns.push(`${orderingSql} as ${this.escapeColumnName(columnAlias)}`);
       });
     }
 
@@ -6167,7 +6168,9 @@ export class BaseQuery {
   }
 
   /**
-   * 为半累加指标构建 CTE 重写的查询
+   * 为半累加指标构建 CTE 重写的查询。
+   * max/min/first/last 优先走 partition_bounds + JOIN（避免对全量行做窗口函数）；
+   * avg 等场景回退到 windowed_data + OVER。
    *
    * @param {string} originalQuery - 未聚合的内部查询
    * @param {BaseMeasure[]} measures - 所有measures
@@ -6192,77 +6195,107 @@ export class BaseQuery {
       return originalQuery;
     }
 
-    // 为每个半累加指标生成窗口函数表达式
-    // 生成两个窗口函数：
-    // 1. 计算 MIN(ds) 或 MAX(ds)（根据 windowChoice）
-    // 2. 原始 balance 列（用于后续过滤和聚合）
-    const windowExpressions = semiAdditiveMeasures.flatMap(measure => {
+    if (this.canUseSemiAdditiveJoinPath(semiAdditiveMeasures)) {
+      return this.buildSemiAdditiveJoinQuery(
+        originalQuery,
+        measures,
+        baseColumns,
+        timeDimensionsForOrdering,
+        dimensionsForSemiAdditiveRemap,
+        semiAdditiveMeasures,
+      );
+    }
+
+    return this.buildSemiAdditiveWindowQuery(
+      originalQuery,
+      measures,
+      baseColumns,
+      timeDimensionsForOrdering,
+      dimensionsForSemiAdditiveRemap,
+      semiAdditiveMeasures,
+    );
+  }
+
+  /**
+   * max/min/first/last 可用 GROUP BY + JOIN 等价替换窗口函数；avg 需保留 OVER。
+   *
+   * @param {BaseMeasure[]} semiAdditiveMeasures
+   * @returns {boolean}
+   */
+  canUseSemiAdditiveJoinPath(semiAdditiveMeasures) {
+    if (!semiAdditiveMeasures || !semiAdditiveMeasures.length) {
+      return false;
+    }
+    const joinCompatible = ['max', 'min', 'first', 'last'];
+    return semiAdditiveMeasures.every((measure) => {
       const config = measure.nonAdditiveConfig;
-      if (!config) return [];
-
-      const partitionBy = this.buildSemiAdditivePartitionBy(measure, config, timeDimensionsForOrdering);
-
-      // 获取用于 ORDER BY 的时间维度列
-      const timeDimColumn = this.getSemiAdditiveTimeDimensionColumn(measure, config, timeDimensionsForOrdering);
-
-      if (!timeDimColumn) {
-        return [];
+      if (!config || !config.windowChoice) {
+        return false;
       }
-
-      // 生成两个窗口表达式：
-      // 1. MIN(ds) 或 MAX(ds) 窗口函数
-      // 2. 原始 balance 列（使用转义的列名，无需窗口函数）
-      const windowColumnName = this.escapeColumnName(`${measure.unescapedAliasName()}_min_ds`);
-      const rawColumnName = this.escapeColumnName(`_${measure.unescapedAliasName()}_raw`);
-
-      // 根据 windowChoice 选择窗口函数类型
-      // first/min: 使用 MIN(ds) - 找最早时间
-      // last/max: 使用 MAX(ds) - 找最晚时间
-      // 期初/期末时点在同一时间桶内全局统一（不按 measure.filters 子集分别取 min/max）
-      const ascendingChoices = ['first', 'min'];
-      const descendingChoices = ['last', 'max'];
-
-      let timeWindowFunc;
-      if (ascendingChoices.includes(config.windowChoice)) {
-        timeWindowFunc = `MIN(${timeDimColumn}) OVER (${partitionBy})`;
-      } else if (descendingChoices.includes(config.windowChoice)) {
-        timeWindowFunc = `MAX(${timeDimColumn}) OVER (${partitionBy})`;
-      } else {
-        // avg 比较特殊，需要不同的处理
-        timeWindowFunc = `MIN(${timeDimColumn}) OVER (${partitionBy})`;
-      }
-
-      return [
-        `${timeWindowFunc} as ${windowColumnName}`,
-        // 原始 balance 列不需要窗口函数，它已经在 base_data 中有了
-        // 这里返回空字符串，因为我们会从 baseColumnAliases 中引用它
-      ];
+      return joinCompatible.includes(config.windowChoice);
     });
+  }
 
-    // 提取 baseColumns 中的列别名
-    const baseColumnAliases = baseColumns.map(colExpr => {
-      // 匹配 "expression as alias" 格式
+  /**
+   * Layer B: 半累加 ordering 列尽量用维度裸 SQL（不做 CONVERT_TZ）。
+   * 同一偏移下 MAX/MIN 选型不变，但全量扫描时少一轮时区转换。
+   *
+   * @param {*} dimension
+   * @returns {string}
+   */
+  semiAdditiveOrderingColumnSql(dimension) {
+    try {
+      const def = dimension.dimensionDefinition && dimension.dimensionDefinition();
+      if (def && def.sql) {
+        const cubeName = dimension.path()[0];
+        return this.autoPrefixWithCubeName(
+          cubeName,
+          this.evaluateSql(cubeName, def.sql),
+          false,
+        );
+      }
+    } catch (e) {
+      // fall through
+    }
+    return this.dimensionSql(dimension);
+  }
+
+  /**
+   * 提取 baseColumns 中的列别名列表。
+   *
+   * @param {string[]} baseColumns
+   * @returns {string[]}
+   */
+  semiAdditiveBaseColumnAliases(baseColumns) {
+    return baseColumns.map(colExpr => {
       const asMatch = colExpr.match(/ as\s+(\S+?)$/i);
       let alias;
       if (asMatch) {
         alias = asMatch[1].trim();
       } else {
-        // 匹配 "expression alias" 格式（无 as 关键字）
         const parts = colExpr.split(/\s+/);
         alias = parts[parts.length - 1];
       }
       alias = this.unquotedColumnName(alias);
       return alias ? this.escapeColumnName(alias) : null;
     }).filter(alias => alias);
+  }
 
+  /**
+   * 构建半累加最终 SELECT 的维度/指标列（JOIN / Window 路径共用）。
+   *
+   * @param {BaseMeasure[]} measures
+   * @param {BaseMeasure[]} semiAdditiveMeasures
+   * @param {unknown[]} dimensionsForSemiAdditiveRemap
+   * @returns {{ dimensionColumns: string[], selectColumns: string, groupByClause: string }}
+   */
+  buildSemiAdditiveOuterSelect(measures, semiAdditiveMeasures, dimensionsForSemiAdditiveRemap) {
     const renderedRefFromDims = R.fromPairs(
       (dimensionsForSemiAdditiveRemap || [])
         .filter(d => d.expressionPath && d.aliasName && d.aliasName())
         .map(d => [d.expressionPath(), d.aliasName()])
     );
 
-    // 计算类 measure（number/string/…）展开子 measure 时会走 renderSqlMeasure；默认生成 sum("main__…")
-    // 在半累加 CTE 外层 FROM 仅为 windowed_data，需让对已选半累加指标的引用改为同一套 windowed_data 上的 measureSql()。
     const renderedRefFromSemiAdditiveMeasures = R.fromPairs(
       semiAdditiveMeasures.map((m) => [m.measure, m.measureSql()])
     );
@@ -6272,62 +6305,54 @@ export class BaseQuery {
       ...renderedRefFromSemiAdditiveMeasures,
     };
 
-    // 构建最终查询的 SELECT 子句（包含聚合）
-    // 对于半累加指标，使用 measureSql()（包含聚合逻辑）
     const dimensionColumns = this.dimensionsForSelect().map(d => d.aliasName());
     const measureColumns = measures.map(m => {
       if (m.isSemiAdditive && m.isSemiAdditive()) {
-        // 半累加指标：使用 measureSql() 生成聚合表达式
         const sql = m.measureSql();
         const alias = m.aliasName();
         return `${sql} as ${alias}`;
-      } else {
-        const sql = this.evaluateSymbolSqlWithContext(
-          () => m.measureSql(),
-          { renderedReference: semiAdditiveCteRenderedReference },
-        );
-        const rewritten = this.rewriteSemiAdditiveOuterMeasureSql(m, sql);
-        return `${rewritten} as ${m.aliasName()}`;
       }
+      const sql = this.evaluateSymbolSqlWithContext(
+        () => m.measureSql(),
+        { renderedReference: semiAdditiveCteRenderedReference },
+      );
+      const rewritten = this.rewriteSemiAdditiveOuterMeasureSql(m, sql);
+      return `${rewritten} as ${m.aliasName()}`;
     });
     const selectColumns = [...dimensionColumns, ...measureColumns].join(', ');
-
-    // 构建 CTE：windowed_data 包含窗口函数结果
-    // 然后执行最终查询（包含聚合）
-    //
-    // IMPORTANT:
-    // Some dialects (e.g. Oracle/DM) override groupByClause() to use full expressions
-    // instead of indexes. In the semi-additive CTE, the final SELECT reads from
-    // `windowed_data`, so base table aliases (e.g. main__cube) are out of scope.
-    // Group by the projected dimension aliases to keep the SQL valid across dialects.
-    const semiAdditiveGroupByClause = (this.ungrouped || !dimensionColumns.length)
+    const groupByClause = (this.ungrouped || !dimensionColumns.length)
       ? ''
       : ` GROUP BY ${dimensionColumns.join(', ')}`;
-    const cteQuery = `WITH base_data AS (
-  ${originalQuery}
-), windowed_data AS (
-  SELECT ${baseColumnAliases.join(', ')}, ${windowExpressions.join(', ')}
-  FROM base_data
-)
-SELECT ${selectColumns} FROM windowed_data${semiAdditiveGroupByClause}`;
 
-    return cteQuery;
+    return { dimensionColumns, selectColumns, groupByClause };
   }
 
   /**
-   * 为半累加指标构建 PARTITION BY 子句
+   * 解析 partition 表达式列表（不含 PARTITION BY 关键字）。
+   * 直接复用 buildSemiAdditivePartitionBy 的 clauses 构建逻辑，避免按逗号拆分破坏 DATE_FORMAT 等表达式。
    *
    * @param {BaseMeasure} measure
-   * @param {NonAdditiveDimensionConfig} config
-   * @returns {string}
+   * @param {object} config
+   * @param {string[]|Set} timeDimensionsForOrdering
+   * @returns {string[]}
    */
-  buildSemiAdditivePartitionBy(measure, config, timeDimensionsForOrdering = []) {
+  buildSemiAdditivePartitionExprs(measure, config, timeDimensionsForOrdering = []) {
+    return this.collectSemiAdditivePartitionClauses(measure, config, timeDimensionsForOrdering);
+  }
+
+  /**
+   * 收集半累加 PARTITION BY / bounds GROUP BY 表达式（有序数组）。
+   *
+   * @param {BaseMeasure} measure
+   * @param {object} config
+   * @param {string[]|Set} timeDimensionsForOrdering
+   * @returns {string[]}
+   */
+  collectSemiAdditivePartitionClauses(measure, config, timeDimensionsForOrdering = []) {
     const clauses = [];
     const cubeName = measure.cube().name;
     const dimensionPath = config.name.includes('.') ? config.name : `${cubeName}.${config.name}`;
 
-    // 从查询的 timeDimensions 中获取粒度信息
-    // 在 regularMeasuresSubQuery 的上下文中，this.timeDimensions 应该包含查询的时间维度
     const queryTimeDimensions = this.timeDimensions || [];
 
     const matchingTimeDims = queryTimeDimensions.filter(td => {
@@ -6345,7 +6370,6 @@ SELECT ${selectColumns} FROM windowed_data${semiAdditiveGroupByClause}`;
     });
 
     if (finestGranularity) {
-      // 多粒度联查时窗口按最细粒度分区（如 year+month → month；day+month → day）
       const dimension = this.newDimension(dimensionPath);
       const unescapedAlias = dimension.unescapedAliasName();
       const columnAlias = `_${unescapedAlias}_for_ordering`;
@@ -6355,18 +6379,239 @@ SELECT ${selectColumns} FROM windowed_data${semiAdditiveGroupByClause}`;
       clauses.push(timeGroupedSql);
     }
 
-    // 添加 windowGroupings
     if (config.windowGroupings) {
       config.windowGroupings.forEach(grouping => {
         const groupingPath = grouping.includes('.') ? grouping : `${cubeName}.${grouping}`;
-        const dimension = this.newDimension(groupingPath);
-        // 在 windowed_data CTE 中，使用维度列的别名而不是 dimensionSql
-        // dimensionSql 可能包含表名引用，但在 windowed_data 中应该使用列别名
         const dimensionAlias = this.aliasName(groupingPath);
         clauses.push(this.escapeColumnName(dimensionAlias));
       });
     }
 
+    return clauses;
+  }
+
+  /**
+   * windowChoice → MIN/MAX 聚合函数。
+   *
+   * @param {string} windowChoice
+   * @returns {'MIN'|'MAX'}
+   */
+  semiAdditiveBoundaryAggFunc(windowChoice) {
+    const ascendingChoices = ['first', 'min'];
+    return ascendingChoices.includes(windowChoice) ? 'MIN' : 'MAX';
+  }
+
+  /**
+   * NULL-safe 等值（与窗口 PARTITION BY NULL 行为一致）。
+   * 标准 SQL：`a = b OR (a IS NULL AND b IS NULL)`，全库通用。
+   *
+   * @param {string} leftSql
+   * @param {string} rightSql
+   * @returns {string}
+   */
+  semiAdditiveNullSafeEqual(leftSql, rightSql) {
+    return `((${leftSql}) = (${rightSql}) OR ((${leftSql}) IS NULL AND (${rightSql}) IS NULL))`;
+  }
+
+  /**
+   * Layer A: partition_bounds（GROUP BY 求边界）+ JOIN，替代全量窗口函数。
+   * 边界列名仍为 `${alias}_min_ds`，与 BaseMeasure.semiAdditiveMeasureSql 兼容。
+   */
+  buildSemiAdditiveJoinQuery(
+    originalQuery,
+    measures,
+    baseColumns,
+    timeDimensionsForOrdering = [],
+    dimensionsForSemiAdditiveRemap = [],
+    semiAdditiveMeasures = [],
+  ) {
+    const baseColumnAliases = this.semiAdditiveBaseColumnAliases(baseColumns);
+    const { selectColumns, groupByClause } = this.buildSemiAdditiveOuterSelect(
+      measures,
+      semiAdditiveMeasures,
+      dimensionsForSemiAdditiveRemap,
+    );
+
+    // 按 partition 签名分组，同分区的 max/min 合并进一个 bounds CTE
+    const partitionGroups = [];
+    const groupKeyToIndex = new Map();
+
+    semiAdditiveMeasures.forEach((measure) => {
+      const config = measure.nonAdditiveConfig;
+      if (!config) {
+        return;
+      }
+      const timeDimColumn = this.getSemiAdditiveTimeDimensionColumn(
+        measure,
+        config,
+        timeDimensionsForOrdering,
+      );
+      if (!timeDimColumn) {
+        return;
+      }
+      const partitionExprs = this.buildSemiAdditivePartitionExprs(
+        measure,
+        config,
+        timeDimensionsForOrdering,
+      );
+      const signature = partitionExprs.join('\u0001');
+      let groupIndex = groupKeyToIndex.get(signature);
+      if (groupIndex == null) {
+        groupIndex = partitionGroups.length;
+        groupKeyToIndex.set(signature, groupIndex);
+        partitionGroups.push({
+          partitionExprs,
+          boundaries: [],
+        });
+      }
+      const aggFunc = this.semiAdditiveBoundaryAggFunc(config.windowChoice);
+      const boundaryAlias = this.escapeColumnName(`${measure.unescapedAliasName()}_min_ds`);
+      partitionGroups[groupIndex].boundaries.push({
+        measure,
+        timeDimColumn,
+        aggFunc,
+        boundaryAlias,
+      });
+    });
+
+    // 无可用 boundary（缺少 ordering 列）时回退窗口路径
+    if (!partitionGroups.length || partitionGroups.every(g => !g.boundaries.length)) {
+      return this.buildSemiAdditiveWindowQuery(
+        originalQuery,
+        measures,
+        baseColumns,
+        timeDimensionsForOrdering,
+        dimensionsForSemiAdditiveRemap,
+        semiAdditiveMeasures,
+      );
+    }
+
+    const boundsCteParts = [];
+    const joinClauses = [];
+    const boundarySelectAliases = [];
+
+    partitionGroups.forEach((group, groupIndex) => {
+      const boundsAlias = `partition_bounds_${groupIndex}`;
+      const partitionSelectParts = group.partitionExprs.map((expr, i) => (
+        `${expr} as ${this.escapeColumnName(`__sa_p${groupIndex}_${i}`)}`
+      ));
+      const boundarySelectParts = group.boundaries.map((b) => (
+        `${b.aggFunc}(${b.timeDimColumn}) as ${b.boundaryAlias}`
+      ));
+      const selectParts = partitionSelectParts.concat(boundarySelectParts);
+      const groupByClauseBounds = group.partitionExprs.length
+        ? ` GROUP BY ${group.partitionExprs.join(', ')}`
+        : '';
+
+      boundsCteParts.push(
+        `${boundsAlias} AS (\n  SELECT ${selectParts.join(', ')}\n  FROM base_data${groupByClauseBounds}\n)`
+      );
+
+      if (group.partitionExprs.length) {
+        // NULL-safe：分区键为 NULL 时仍匹配（与窗口 PARTITION BY NULL 行为一致）
+        const nullSafeOnParts = group.partitionExprs.map((expr, i) => {
+          const pbCol = `${boundsAlias}.${this.escapeColumnName(`__sa_p${groupIndex}_${i}`)}`;
+          return this.semiAdditiveNullSafeEqual(expr, pbCol);
+        });
+        joinClauses.push(`INNER JOIN ${boundsAlias} ON ${nullSafeOnParts.join(' AND ')}`);
+      } else {
+        // 无 PARTITION BY → 全局边界，CROSS JOIN 单行
+        joinClauses.push(`CROSS JOIN ${boundsAlias}`);
+      }
+
+      group.boundaries.forEach((b) => {
+        boundarySelectAliases.push(
+          `${boundsAlias}.${b.boundaryAlias} as ${b.boundaryAlias}`
+        );
+      });
+    });
+
+    const matchedSelect = [
+      ...baseColumnAliases.map(a => `base_data.${a}`),
+      ...boundarySelectAliases,
+    ].join(', ');
+
+    const cteQuery = `WITH base_data AS (
+  ${originalQuery}
+), ${boundsCteParts.join(',\n')}, matched_data AS (
+  SELECT ${matchedSelect}
+  FROM base_data
+  ${joinClauses.join('\n  ')}
+)
+SELECT ${selectColumns} FROM matched_data${groupByClause}`;
+
+    return cteQuery;
+  }
+
+  /**
+   * Layer D / fallback: 原 windowed_data + OVER 路径。
+   */
+  buildSemiAdditiveWindowQuery(
+    originalQuery,
+    measures,
+    baseColumns,
+    timeDimensionsForOrdering = [],
+    dimensionsForSemiAdditiveRemap = [],
+    semiAdditiveMeasures = [],
+  ) {
+    const windowExpressions = semiAdditiveMeasures.flatMap(measure => {
+      const config = measure.nonAdditiveConfig;
+      if (!config) return [];
+
+      const partitionBy = this.buildSemiAdditivePartitionBy(measure, config, timeDimensionsForOrdering);
+      const timeDimColumn = this.getSemiAdditiveTimeDimensionColumn(measure, config, timeDimensionsForOrdering);
+
+      if (!timeDimColumn) {
+        return [];
+      }
+
+      const windowColumnName = this.escapeColumnName(`${measure.unescapedAliasName()}_min_ds`);
+      const ascendingChoices = ['first', 'min'];
+      const descendingChoices = ['last', 'max'];
+
+      let timeWindowFunc;
+      if (ascendingChoices.includes(config.windowChoice)) {
+        timeWindowFunc = `MIN(${timeDimColumn}) OVER (${partitionBy})`;
+      } else if (descendingChoices.includes(config.windowChoice)) {
+        timeWindowFunc = `MAX(${timeDimColumn}) OVER (${partitionBy})`;
+      } else {
+        timeWindowFunc = `MIN(${timeDimColumn}) OVER (${partitionBy})`;
+      }
+
+      return [
+        `${timeWindowFunc} as ${windowColumnName}`,
+      ];
+    });
+
+    const baseColumnAliases = this.semiAdditiveBaseColumnAliases(baseColumns);
+    const { selectColumns, groupByClause } = this.buildSemiAdditiveOuterSelect(
+      measures,
+      semiAdditiveMeasures,
+      dimensionsForSemiAdditiveRemap,
+    );
+
+    return `WITH base_data AS (
+  ${originalQuery}
+), windowed_data AS (
+  SELECT ${baseColumnAliases.join(', ')}, ${windowExpressions.join(', ')}
+  FROM base_data
+)
+SELECT ${selectColumns} FROM windowed_data${groupByClause}`;
+  }
+
+  /**
+   * 为半累加指标构建 PARTITION BY 子句
+   *
+   * @param {BaseMeasure} measure
+   * @param {NonAdditiveDimensionConfig} config
+   * @returns {string}
+   */
+  buildSemiAdditivePartitionBy(measure, config, timeDimensionsForOrdering = []) {
+    const clauses = this.collectSemiAdditivePartitionClauses(
+      measure,
+      config,
+      timeDimensionsForOrdering,
+    );
     return clauses.length > 0 ? `PARTITION BY ${clauses.join(', ')}` : '';
   }
 
