@@ -82,10 +82,21 @@ const PERIOD_AVG_SCHEMA = `
           sql: \`\${total_amount}\`,
           period_average: { avg_unit: 'month', interval: 'year', denominator: 'calendar', time_dimension: 'created_at' },
         },
+        period_year_avg_data: {
+          type: 'number',
+          sql: \`\${total_amount}\`,
+          period_average: { avg_unit: 'day', interval: 'year', denominator: 'data', time_dimension: 'created_at' },
+        },
       },
       dimensions: {
         id: { type: 'number', sql: 'id', primaryKey: true },
         created_at: { type: 'time', sql: 'created_at' },
+        // 用 CASE 表达式构造一个字符串维度，模拟线上「city」等普通维度分组场景，
+        // 无需改动上面 VALUES 的列结构。
+        category: {
+          type: 'string',
+          sql: \`CASE WHEN amount >= 200 THEN 'big' ELSE 'small' END\`,
+        },
       },
       preAggregations: {},
     })
@@ -180,6 +191,35 @@ describe('PostgresPeriodAverage', () => {
       expect(sql).toMatch(/NULLIF/i);
       expect(sql).toMatch(/COUNT\s*\(\s*"__pa_unit_/i);
       expect(sql).not.toMatch(/COUNT\s*\(\s*DISTINCT/i);
+    });
+
+    it('#3b data/day+year/A/带普通维度 → 外层维度不可双重转义（BUG 回归）', () => {
+      if (skipUnlessNative()) return;
+
+      // 复现 query：period_year_avg_data（denominator=data）+ 非时间维度 + this year
+      // 修复前外层 SELECT 产生 ""period_avg_facts__category"" 双重引号，PG 报
+      // 「长度为 0 的分隔标示符」。
+      const sql = buildSql({
+        measures: ['period_avg_facts.period_year_avg_data'],
+        timeDimensions: [{
+          dimension: 'period_avg_facts.created_at',
+          dateRange: '2025 year',
+        }],
+        dimensions: ['period_avg_facts.category'],
+        timezone: 'UTC',
+      });
+
+      expect(sql).toContain('period_avg_data_daily');
+      // 外层维度 SELECT / GROUP BY 必须是单层引号标识符，禁止 ""xxx"" 双重转义
+      expect(sql).not.toMatch(/""[a-zA-Z_]/);
+      expect(sql).toMatch(/"period_avg_facts__category"\s+AS\s+"period_avg_facts__category"/);
+      // 外层按该维度分组
+      expect(sql).toMatch(/GROUP BY[^]*"period_avg_facts__category"/);
+      // Postgres 走 positional ORDER BY（ORDER BY 2），引用 SELECT 第 2 列（measure 别名），
+      // 天然合法、不会展开 measureSql() 引用 CTE 中不存在的原始表列。
+      // （ORDER BY 展开公式的 bug 是 MySQL 专属，由 mysql-query.test.ts 覆盖。）
+      expect(sql).toMatch(/ORDER BY\s+2\s+DESC/);
+      expect(sql).not.toMatch(/ORDER BY[^]*\.amount/);
     });
 
     it('#4 calendar/month/B/2025-04-01~06-30 → 自然月数（AGE/EXTRACT）', () => {
@@ -427,6 +467,28 @@ describe('PostgresPeriodAverage', () => {
 
       expect(rows).toHaveLength(1);
       expectClose(rows[0].period_avg_facts__period_daily_avg_data, JULY_SUM / 11);
+    });
+
+    it('#3b data/day+year/A/带普通维度 → 分组多行、SQL 不再双重转义', async () => {
+      if (skipUnlessNative() || skipUnlessLocalPg()) return;
+
+      // 修复前该 query 在 PG 报「长度为 0 的分隔标示符」，根本执行不了。
+      // 2025 全年按 category 分组：big(amount>=200)/small 两组，分母=各组有数据天数。
+      const rows = await runQuery({
+        measures: ['period_avg_facts.period_year_avg_data'],
+        timeDimensions: [{
+          dimension: 'period_avg_facts.created_at',
+          dateRange: ['2025-01-01', '2025-12-31'],
+        }],
+        dimensions: ['period_avg_facts.category'],
+        timezone: 'UTC',
+      });
+
+      // 两组分组
+      expect(rows).toHaveLength(2);
+      const byCat = Object.fromEntries(rows.map((r: any) => [r.period_avg_facts__category, r]));
+      expect(byCat.big).toBeDefined();
+      expect(byCat.small).toBeDefined();
     });
 
     it('#4 calendar/month/B/2025-04-01~06-30 → 1 行 SUM÷3', async () => {

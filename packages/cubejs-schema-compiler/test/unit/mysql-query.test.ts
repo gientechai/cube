@@ -160,6 +160,9 @@ cubes:
       - name: stat_dt
         sql: stat_dt
         type: time
+      - name: region
+        sql: "'default'"
+        type: string
     measures:
       - name: total_amount
         type: sum
@@ -304,5 +307,31 @@ cubes:
     expect(divisor).toMatch(/DATEDIFF/i);
     expect(divisor).toMatch(/MIN\s*\(/i);
     expect(divisor).not.toMatch(/MIN\s*\(\s*MIN/i);
+  });
+
+  it('data 分母 + 普通维度分组：外层 ORDER BY 用别名，不展开 measureSql()', () => {
+    // 回归 BUG：denominator='data' 走 period_avg_data_daily 预聚合 CTE 时，外层
+    // SELECT/GROUP BY 作用在 CTE 上（仅暴露别名）。MySQL 不能用 positional ORDER BY，
+    // 默认按 measure 排序时若展开 measureSql() 会引用 CTE 中不存在的原始表列
+    // （如 `period_avg_facts`.amount），触发 ER_BAD_FIELD_ERROR: Unknown column … in 'order clause'。
+    const query = new MysqlQuery(compilers, {
+      measures: ['period_avg_facts.period_daily_avg_data'],
+      // 带普通维度 + 仅 dateRange（无 granularity）→ 默认按 measure DESC 排序
+      dimensions: ['period_avg_facts.region'],
+      timeDimensions: [{
+        dimension: 'period_avg_facts.stat_dt',
+        dateRange: ['2025-06-01', '2025-06-30'],
+      }],
+      timezone: 'UTC',
+    });
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).toContain('period_avg_data_daily');
+    // 外层维度别名不得双重转义
+    expect(sql).not.toMatch(/``[a-zA-Z_]/);
+    // ORDER BY 必须引用 SELECT 中已投影的别名，不得展开原始表列
+    expect(sql).toMatch(/ORDER BY[^]*`period_avg_facts__period_daily_avg_data`/);
+    expect(sql).not.toMatch(/ORDER BY[^]*\.amount/);
   });
 });

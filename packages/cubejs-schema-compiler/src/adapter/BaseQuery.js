@@ -4611,10 +4611,13 @@ export class BaseQuery {
       if (dimension instanceof BaseTimeDimension) {
         return;
       }
+      // aliasName() 已对标识符做 escapeColumnName 转义（见 BaseDimension.aliasName），
+      // 此处不可再包一次 escapeColumnName，否则会产生 ""alias"" 双重引号，
+      // 触发 PG「长度为 0 的分隔标示符」错误。与下方时间维度/measure 写法保持一致。
       const alias = dimension.aliasName();
       pushOuterGroupExpr(
-        this.escapeColumnName(alias),
-        `${this.escapeColumnName(alias)} AS ${this.escapeColumnName(alias)}`,
+        alias,
+        `${alias} AS ${alias}`,
       );
     });
 
