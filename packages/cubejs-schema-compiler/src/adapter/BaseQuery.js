@@ -330,11 +330,31 @@ export class BaseQuery {
     const filters = this.extractFiltersAsTree(this.options.filters || []);
 
     // measure_filter (the one extracted from filters parameter on measure and
-    // used in drill-downs) should go to WHERE instead of HAVING
+    // used in drill-downs) should go to WHERE instead of HAVING.
+    //
+    // A grouped filter (and/or) whose every leaf is a measure_filter operator
+    // is treated the same way: its leaves expand to base-table predicates via
+    // measureFilterToWhere(), so it must be applied as a row-level WHERE (and,
+    // for semi-additive CTEs, pushed down into base_data) rather than as an
+    // outer HAVING that references columns unavailable in the outer scope.
+    const isMeasureFilterGroup = (f) => {
+      if (!f || (f.operator !== 'and' && f.operator !== 'or') || !Array.isArray(f.values)) {
+        return false;
+      }
+      return f.values.length > 0 && f.values.every((leaf) => {
+        if (leaf && (leaf.operator === 'and' || leaf.operator === 'or')) {
+          return isMeasureFilterGroup(leaf);
+        }
+        return leaf && (leaf.operator === 'measure_filter' || leaf.operator === 'measureFilter');
+      });
+    };
+    const isMeasureFilterBranch = (f) => f.dimensionGroup || f.dimension
+      || f.operator === 'measure_filter' || f.operator === 'measureFilter'
+      || isMeasureFilterGroup(f);
     /** @type {(BaseFilter|BaseGroupFilter)[]} */
-    this.filters = filters.filter(f => f.dimensionGroup || f.dimension || f.operator === 'measure_filter' || f.operator === 'measureFilter').map(this.initFilter.bind(this));
+    this.filters = filters.filter(isMeasureFilterBranch).map(this.initFilter.bind(this));
     /** @type {(BaseFilter|BaseGroupFilter)[]} */
-    this.measureFilters = filters.filter(f => (f.measureGroup || f.measure) && f.operator !== 'measure_filter' && f.operator !== 'measureFilter').map(this.initFilter.bind(this));
+    this.measureFilters = filters.filter(f => (f.measureGroup || f.measure) && !isMeasureFilterBranch(f)).map(this.initFilter.bind(this));
     /** @type {import('./BaseTimeDimension').BaseTimeDimension[]} */
     this.timeDimensions = (this.options.timeDimensions || []).map(dimension => {
       if (!dimension.dimension) {
