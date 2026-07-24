@@ -320,6 +320,128 @@ describe('semi-additive multiple time granularities in base_data', () => {
   });
 });
 
+// queryRewrite (measureFilterOrQueryRewrite) injects `{ or: [{member, operator: 'measureFilter'}, ...] }`
+// when a measure references several source measures that each carry schema filters. Such a grouped
+// filter must be treated as a row-level WHERE (pushed down into base_data) — NOT as an outer HAVING —
+// otherwise the outer q_0 scope references base-table columns (e.g. `loan_detail_1.cust_type`) that
+// only exist as projected aliases inside the semi-additive CTE, producing
+// ER_BAD_FIELD_ERROR: Unknown column ... in 'where clause'.
+describe('grouped measure_filter pushed down into semi-additive base_data', () => {
+  const { compiler, joinGraph, cubeEvaluator } = prepareJsCompiler(`
+    cube(\`loan_detail_1\`, {
+      sql_table: \`loan_stand_book_detail_list_320\`,
+
+      dimensions: {
+        distr_date: {
+          sql: \`\${CUBE}.distr_date\`,
+          type: 'time',
+        },
+        cust_type: {
+          sql: \`\${CUBE}.cust_type\`,
+          type: 'string',
+        },
+        id: {
+          sql: \`\${CUBE}.id\`,
+          type: 'number',
+          primary_key: true,
+        },
+      },
+
+      measures: {
+        loan_bal1: {
+          type: 'sum',
+          sql: 'loan_bal',
+          filters: [{ sql: \`\${CUBE}.cust_type = '民营企业'\` }],
+          nonAdditiveDimension: {
+            name: 'distr_date',
+            windowChoice: 'max',
+          },
+        },
+        xxsxaw: {
+          type: 'sum',
+          sql: 'loan_bal',
+          filters: [{
+            sql: \`\${CUBE}.cust_type = '外资企业' AND (\${CUBE}.distr_date >= '2026-01-01' AND \${CUBE}.distr_date <= '2026-12-31')\`,
+          }],
+          nonAdditiveDimension: {
+            name: 'distr_date',
+            windowChoice: 'max',
+          },
+        },
+        fu_11: {
+          type: 'number',
+          sql: \`(\${loan_detail_1.loan_bal1} + \${loan_detail_1.xxsxaw}) / 2\`,
+        },
+      },
+    })
+  `);
+
+  beforeAll(async () => {
+    await compiler.compile();
+  });
+
+  it('pushes OR measure_filter predicates into base_data WHERE with the main__ alias (MySQL)', () => {
+    const query = new MysqlQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['loan_detail_1.fu_11'],
+        timeDimensions: [
+          { dimension: 'loan_detail_1.distr_date', granularity: 'week' },
+          { dimension: 'loan_detail_1.distr_date', granularity: 'day' },
+          { dimension: 'loan_detail_1.distr_date', granularity: 'month' },
+          { dimension: 'loan_detail_1.distr_date', granularity: 'quarter' },
+          { dimension: 'loan_detail_1.distr_date', granularity: 'year' },
+        ],
+        filters: [{
+          or: [
+            { member: 'loan_detail_1.loan_bal1', operator: 'measureFilter' },
+            { member: 'loan_detail_1.xxsxaw', operator: 'measureFilter' },
+          ],
+        }],
+        timezone: 'Asia/Shanghai',
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).toMatch(/WITH base_data AS/i);
+    // The OR predicate must live inside base_data WHERE, using the main__ alias.
+    expect(sql).toMatch(
+      /FROM loan_stand_book_detail_list_320 AS `main__loan_detail_1`\s+WHERE \(\(\(`main__loan_detail_1`\.cust_type = '民营企业'\)\) OR \(\(`main__loan_detail_1`\.cust_type = '外资企业' AND \(`main__loan_detail_1`\.distr_date >= '2026-01-01' AND `main__loan_detail_1`\.distr_date <= '2026-12-31'\)\)\)\)/i
+    );
+    // No outer HAVING/WHERE on the q_0 wrapper that references the un-aliased cube column.
+    expect(sql).not.toMatch(/\) AS q_0\s+WHERE/i);
+    expect(sql).not.toMatch(/\) AS q_0[\s\S]*HAVING[\s\S]*cust_type/i);
+  });
+
+  it('pushes OR measure_filter predicates into base_data WHERE (Postgres)', () => {
+    const query = new PostgresQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['loan_detail_1.fu_11'],
+        timeDimensions: [
+          { dimension: 'loan_detail_1.distr_date', granularity: 'month' },
+        ],
+        filters: [{
+          or: [
+            { member: 'loan_detail_1.loan_bal1', operator: 'measureFilter' },
+            { member: 'loan_detail_1.xxsxaw', operator: 'measureFilter' },
+          ],
+        }],
+        timezone: 'UTC',
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).toMatch(/WITH base_data AS/i);
+    expect(sql).toMatch(/"main__loan_detail_1"\.cust_type = '民营企业'/i);
+    expect(sql).toMatch(/"main__loan_detail_1"\.cust_type = '外资企业'/i);
+    // Outer scope must not reference the un-aliased cube column.
+    expect(sql).not.toMatch(/[\s)]loan_detail_1"\.cust_type/i);
+  });
+});
+
 describe('semi-additive windowGroupings dimensions in base_data', () => {
   const { compiler, joinGraph, cubeEvaluator } = prepareJsCompiler(`
     cube(\`facts\`, {
