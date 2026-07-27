@@ -556,12 +556,62 @@ export class BaseMeasure {
       clauses.push(partitionExpr);
     }
 
+    // 收集已加入分区的维度路径，用于与查询维度、windowGroupings 去重
+    const partitionedPaths = new Set<string>();
+
+    // 若上面已按时间粒度表达式分区，记录该时间维度路径，避免后续重复加入
+    if (granularity && dimensionSql) {
+      const cubeName = this.cube().name;
+      const dimensionPath = config.name.includes('.') ? config.name : `${cubeName}.${config.name}`;
+      partitionedPaths.add(dimensionPath);
+    }
+
+    // 自动加入查询实际 group by 的普通维度，使 max/min 时间按这些维度分区计算。
+    // 例如查询带了"学科"，则期末值应是"各学科内最大日期"对应的值，而不是全局最大日期。
+    // 仅处理 query.dimensions（普通查询维度），不处理 timeDimensions，保持
+    // "只有 config.name 时间维度按粒度分桶"的语义。
+    const queryDimensions = (this.query as any).dimensions;
+    if (queryDimensions && queryDimensions.length > 0) {
+      const cubeName = this.cube().name;
+      const configDimPath = config.name.includes('.') ? config.name : `${cubeName}.${config.name}`;
+      queryDimensions.forEach((d: any) => {
+        if (!d || !d.path) {
+          return;
+        }
+        let dimPath: string[] | null;
+        try {
+          dimPath = d.path();
+        } catch (e) {
+          return;
+        }
+        if (!dimPath || dimPath.length < 2) {
+          return;
+        }
+        const fullDimPath = `${dimPath[0]}.${dimPath[1]}`;
+        // 跳过非可加时间维度本身（已由上面的时间粒度表达式处理）
+        if (fullDimPath === configDimPath || fullDimPath.endsWith(`.${config.name}`)) {
+          return;
+        }
+        if (partitionedPaths.has(fullDimPath)) {
+          return;
+        }
+        partitionedPaths.add(fullDimPath);
+        // 非 CTE 上下文：引用原始 dimensionSql（与下方 windowGroupings 处理一致）
+        clauses.push(this.query.dimensionSql(d));
+      });
+    }
+
     // 添加 windowGroupings
     if (config.windowGroupings) {
       config.windowGroupings.forEach(grouping => {
         // 构建完整的维度路径并创建维度对象
         const cubeName = this.cube().name;
         const groupingPath = grouping.includes('.') ? grouping : `${cubeName}.${grouping}`;
+        // 与上面已加入的查询维度去重
+        if (partitionedPaths.has(groupingPath)) {
+          return;
+        }
+        partitionedPaths.add(groupingPath);
         const dimension = this.query.newDimension(groupingPath);
         clauses.push(this.query.dimensionSql(dimension));
       });

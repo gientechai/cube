@@ -5914,10 +5914,60 @@ SELECT ${selectColumns} FROM windowed_data${semiAdditiveGroupByClause}`;
       clauses.push(timeGroupedSql);
     }
 
+    // 收集已加入分区的维度路径，用于与查询维度、windowGroupings 去重
+    const partitionedPaths = new Set();
+
+    // 若上面已按时间粒度表达式分区，记录该时间维度路径，避免后续重复加入
+    if (matchingTimeDim && matchingTimeDim.granularity) {
+      partitionedPaths.add(dimensionPath);
+    }
+
+    // 自动加入查询实际 group by 的普通维度，使 max/min 时间按这些维度分区计算。
+    // 例如查询带了"学科"，则期末值应是"各学科内最大日期"对应的值，而不是全局最大日期。
+    // 仅处理 this.dimensions（普通查询维度），不处理 this.timeDimensions，保持
+    // "只有 config.name 时间维度按粒度分桶"的语义。
+    if (this.dimensions && this.dimensions.length > 0) {
+      this.dimensions.forEach(d => {
+        if (!d || !d.path) {
+          return;
+        }
+        let dimPath;
+        try {
+          dimPath = d.path();
+        } catch (e) {
+          return;
+        }
+        // 表达式维度（无 path）或无法解析的维度，跳过
+        if (!dimPath || dimPath.length < 2) {
+          return;
+        }
+        const fullDimPath = `${dimPath[0]}.${dimPath[1]}`;
+        // 跳过非可加时间维度本身（已由上面的时间粒度表达式处理）
+        if (fullDimPath === dimensionPath || fullDimPath.endsWith(`.${config.name}`)) {
+          return;
+        }
+        // 去重
+        if (partitionedPaths.has(fullDimPath)) {
+          return;
+        }
+        partitionedPaths.add(fullDimPath);
+        // 在 windowed_data CTE 中使用维度列别名（与 pushDimensionColumns 投影的别名一致）
+        const dimensionAlias = d.aliasName && d.aliasName();
+        if (dimensionAlias) {
+          clauses.push(dimensionAlias);
+        }
+      });
+    }
+
     // 添加 windowGroupings
     if (config.windowGroupings) {
       config.windowGroupings.forEach(grouping => {
         const groupingPath = grouping.includes('.') ? grouping : `${cubeName}.${grouping}`;
+        // 与上面已加入的查询维度去重
+        if (partitionedPaths.has(groupingPath)) {
+          return;
+        }
+        partitionedPaths.add(groupingPath);
         const dimension = this.newDimension(groupingPath);
         // 在 windowed_data CTE 中，使用维度列的别名而不是 dimensionSql
         // dimensionSql 可能包含表名引用，但在 windowed_data 中应该使用列别名
