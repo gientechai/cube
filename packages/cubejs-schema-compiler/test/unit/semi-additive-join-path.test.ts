@@ -128,6 +128,82 @@ describe('semi-additive join path (partition_bounds)', () => {
     expect(sql).toMatch(/`main__loan_debt`\.etl_date_date as `_loan_debt__etl_date_date_for_ordering`/i);
   });
 
+  it('produces valid SQL when time dimension has only dateRange (no granularity) and no dimensions', () => {
+    // Regression: a non-additive measure queried with a time dimension that only
+    // carries a dateRange (no granularity) and no group dimensions produced
+    // `SELECT , <measure> ... GROUP BY ` because BaseTimeDimension.aliasName()
+    // returns null when granularity is absent.
+    const query = new MysqlQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['loan_debt.dkye'],
+        timeDimensions: [{
+          dimension: 'loan_debt.etl_date_date',
+          dateRange: ['2026-05-02', '2026-07-31'],
+        }],
+        filters: [{
+          member: 'org.org_short_name',
+          operator: 'equals',
+          values: ['北京分行'],
+        }],
+        timezone: 'UTC',
+        limit: 10000,
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).toMatch(/WITH base_data AS/i);
+    expect(sql).toMatch(/partition_bounds_0 AS/i);
+    expect(sql).toMatch(/matched_data AS/i);
+    // No group dimension -> no GROUP BY clause, and SELECT must not start with a dangling comma.
+    expect(sql).not.toMatch(/SELECT\s*,/i);
+    expect(sql).not.toMatch(/GROUP BY\s*\)/i);
+    expect(sql).not.toMatch(/GROUP BY\s*`?\)/i);
+    // No group dimensions -> no GROUP BY in the final projection at all.
+    expect(sql).not.toMatch(/GROUP BY/i);
+    // Final projection is the semi-additive COALESCE(...) measure with its alias.
+    expect(sql).toMatch(/COALESCE\(SUM\(CASE WHEN/i);
+    expect(sql).toMatch(/as `loan_debt__dkye` FROM matched_data/i);
+  });
+
+  it('produces valid SQL when the time range is a pure filter (inDateRange) instead of a timeDimension', () => {
+    // 对照：把时间范围从 timeDimensions.dateRange 改写成 filters.inDateRange 后，
+    // this.timeDimensions 为空 → dimensionsForSelect() 不含无 granularity 的 timeDim，
+    // 即便旧逻辑未过滤 null 也不会产生 `SELECT ,` / `GROUP BY `。
+    // 该用例固定这种写法始终合法，避免后续改动让此路径回退。
+    const query = new MysqlQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['loan_debt.dkye'],
+        filters: [
+          {
+            member: 'loan_debt.etl_date_date',
+            operator: 'inDateRange',
+            values: ['2026-05-02', '2026-07-31'],
+          },
+          {
+            member: 'org.org_short_name',
+            operator: 'equals',
+            values: ['北京分行'],
+          },
+        ],
+        timezone: 'UTC',
+        limit: 10000,
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).toMatch(/WITH base_data AS/i);
+    expect(sql).toMatch(/partition_bounds_0 AS/i);
+    expect(sql).toMatch(/matched_data AS/i);
+    expect(sql).not.toMatch(/SELECT\s*,/i);
+    expect(sql).not.toMatch(/GROUP BY/i);
+    expect(sql).toMatch(/COALESCE\(SUM\(CASE WHEN/i);
+    expect(sql).toMatch(/as `loan_debt__dkye` FROM matched_data/i);
+  });
+
   it('falls back to windowed_data OVER for avg windowChoice', () => {
     const query = new MysqlQuery(
       { joinGraph, cubeEvaluator, compiler },
