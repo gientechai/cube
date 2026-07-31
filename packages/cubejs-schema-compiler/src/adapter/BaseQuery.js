@@ -6325,7 +6325,10 @@ export class BaseQuery {
       ...renderedRefFromSemiAdditiveMeasures,
     };
 
-    const dimensionColumns = this.dimensionsForSelect().map(d => d.aliasName());
+    // 时间维度无 granularity（仅 dateRange 用于过滤）时 aliasName() 返回 null，
+    // 它们不参与半累加最终 SELECT/GROUP BY 的投影。过滤掉空别名，避免生成
+    // 形如 `SELECT , <measure>` / `GROUP BY ` 的非法 SQL。
+    const dimensionColumns = this.dimensionsForSelect().map(d => d.aliasName()).filter(Boolean);
     const measureColumns = measures.map(m => {
       if (m.isSemiAdditive && m.isSemiAdditive()) {
         const sql = m.measureSql();
