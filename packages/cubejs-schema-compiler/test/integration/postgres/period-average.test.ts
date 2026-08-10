@@ -87,6 +87,26 @@ const PERIOD_AVG_SCHEMA = `
           sql: \`\${total_amount}\`,
           period_average: { avg_unit: 'day', interval: 'year', denominator: 'data', time_dimension: 'created_at' },
         },
+        period_daily_in_year_avg_calendar: {
+          type: 'number',
+          sql: \`\${total_amount}\`,
+          period_average: { avg_unit: 'day', interval: 'year', denominator: 'calendar', time_dimension: 'created_at' },
+        },
+        period_daily_in_year_avg_data: {
+          type: 'number',
+          sql: \`\${total_amount}\`,
+          period_average: { avg_unit: 'day', interval: 'year', denominator: 'data', time_dimension: 'created_at' },
+        },
+        period_daily_in_quarter_avg_calendar: {
+          type: 'number',
+          sql: \`\${total_amount}\`,
+          period_average: { avg_unit: 'day', interval: 'quarter', denominator: 'calendar', time_dimension: 'created_at' },
+        },
+        period_monthly_in_year_avg_data: {
+          type: 'number',
+          sql: \`\${total_amount}\`,
+          period_average: { avg_unit: 'month', interval: 'year', denominator: 'data', time_dimension: 'created_at' },
+        },
       },
       dimensions: {
         id: { type: 'number', sql: 'id', primaryKey: true },
@@ -410,6 +430,26 @@ describe('PostgresPeriodAverage', () => {
       expect(sql).not.toMatch(/PARTITION BY\s+date_trunc\('month',\s*\(\s*created_at/i);
       expect(sql).not.toMatch(/PARTITION BY\s+date_trunc\('month',\s*\(\s*stat_dt/i);
     });
+
+    it('#13 day/year 按 month 查 → 中间粒度累计，PARTITION BY year ORDER BY month 桶', () => {
+      if (skipUnlessNative()) return;
+
+      const sql = buildSql({
+        measures: ['period_avg_facts.period_daily_in_year_avg_calendar'],
+        timeDimensions: [{
+          dimension: 'period_avg_facts.created_at',
+          granularity: 'month',
+          dateRange: ['2025-01-01', '2025-12-31'],
+        }],
+        timezone: 'UTC',
+      });
+
+      // 分子：SUM(...) OVER (PARTITION BY year ORDER BY month ROWS UNBOUNDED PRECEDING..CURRENT)
+      expect(sql).toMatch(/OVER\s*\(/i);
+      expect(sql).toMatch(/PARTITION BY\s+date_trunc\('year'/i);
+      // 分母：年初到当月末天数（bucket end 表达式，含 + INTERVAL '1 month' - INTERVAL '1 day'）
+      expect(sql).toMatch(/\+\s*INTERVAL\s*'1 month'\s*-\s*INTERVAL\s*'1 day'/i);
+    });
   });
 
   describe('数值执行矩阵（TEST_LOCAL=1 + Postgres）', () => {
@@ -627,6 +667,208 @@ describe('PostgresPeriodAverage', () => {
       expectClose(byDay['2025-06-01'], 100 / 1);
       expectClose(byDay['2025-06-15'], (100 + 200) / 15);
       expectClose(byDay['2025-06-30'], (100 + 200 + 300) / 30);
+    });
+
+    it('#14 day/year 按 month 查（中间粒度累计 calendar）/ 年日均 → 按月累计', async () => {
+      if (skipUnlessNative() || skipUnlessLocalPg()) return;
+
+      const rows = await runQuery({
+        measures: ['period_avg_facts.period_daily_in_year_avg_calendar'],
+        timeDimensions: [{
+          dimension: 'period_avg_facts.created_at',
+          granularity: 'month',
+          dateRange: ['2025-01-01', '2025-12-31'],
+        }],
+        timezone: 'UTC',
+      });
+
+      // 2025 各月：分子为年初累计 SUM，分母为年初到当月末自然天数（calendar）。
+      // 数据：1/2/3 月各 10；4 月 100；5 月无；6 月 600；7 月 1300。
+      const cumSum: Record<string, number> = {
+        '2025-01': 10, '2025-02': 20, '2025-03': 30, '2025-04': 130,
+        '2025-05': 130, '2025-06': 730, '2025-07': 2030,
+      };
+      const cumDays: Record<string, number> = {
+        '2025-01': 31, '2025-02': 59, '2025-03': 90, '2025-04': 120,
+        '2025-05': 151, '2025-06': 181, '2025-07': 212,
+      };
+      const byMonth = Object.fromEntries(
+        rows.map((r: Record<string, unknown>) => [
+          String(r.period_avg_facts__created_at).slice(0, 7),
+          Number(r.period_avg_facts__period_daily_in_year_avg_calendar),
+        ]),
+      );
+      Object.keys(cumSum).forEach((m) => {
+        expectClose(byMonth[m], cumSum[m] / cumDays[m]);
+      });
+    });
+
+    it('#15 day/year 按 month 查（中间粒度累计 data）/ 年日均 → 按月累计有数据天数', async () => {
+      if (skipUnlessNative() || skipUnlessLocalPg()) return;
+
+      const rows = await runQuery({
+        measures: ['period_avg_facts.period_daily_in_year_avg_data'],
+        timeDimensions: [{
+          dimension: 'period_avg_facts.created_at',
+          granularity: 'month',
+          dateRange: ['2025-01-01', '2025-12-31'],
+        }],
+        timezone: 'UTC',
+      });
+
+      // 2025 各月：分子为年初累计 SUM，分母为年初到当月末「有数据天数」（data）。
+      // 数据：1/2/3 月各 10（各 1 天）；4 月 100（1 天）；5 月无（不产生行）；
+      // 6 月 600（3 天）；7 月 1300（7/1~7/10 + 7/13 = 11 天，7/11–12 无数据）。
+      const cumSum: Record<string, number> = {
+        '2025-01': 10, '2025-02': 20, '2025-03': 30, '2025-04': 130,
+        '2025-06': 730, '2025-07': 2030,
+      };
+      const cumDataDays: Record<string, number> = {
+        '2025-01': 1, '2025-02': 2, '2025-03': 3, '2025-04': 4,
+        '2025-06': 7, '2025-07': 18,
+      };
+      const byMonth = Object.fromEntries(
+        rows.map((r: Record<string, unknown>) => [
+          String(r.period_avg_facts__created_at).slice(0, 7),
+          Number(r.period_avg_facts__period_daily_in_year_avg_data),
+        ]),
+      );
+      Object.keys(cumSum).forEach((m) => {
+        expectClose(byMonth[m], cumSum[m] / cumDataDays[m]);
+      });
+    });
+
+    // quarter 桶返回季度首日，用月份映射成 Q1/Q2/Q3 标签。
+    const quarterKey = (v: unknown) => {
+      const m = Number(String(v).slice(5, 7));
+      return `${String(v).slice(0, 4)}-Q${Math.ceil(m / 3)}`;
+    };
+
+    it('#16 day/year 按 quarter 查（中间粒度累计 calendar）→ 按季累计', async () => {
+      if (skipUnlessNative() || skipUnlessLocalPg()) return;
+
+      const rows = await runQuery({
+        measures: ['period_avg_facts.period_daily_in_year_avg_calendar'],
+        timeDimensions: [{
+          dimension: 'period_avg_facts.created_at', granularity: 'quarter', dateRange: ['2025-01-01', '2025-12-31'],
+        }],
+        timezone: 'UTC',
+      });
+      // 分子=年初累计 SUM；分母=年初到当季末自然天数（calendar）。Q4 无数据不产生行。
+      const cumSum: Record<string, number> = { '2025-Q1': 30, '2025-Q2': 730, '2025-Q3': 2030 };
+      const cumDays: Record<string, number> = { '2025-Q1': 90, '2025-Q2': 181, '2025-Q3': 273 };
+      const byQuarter = Object.fromEntries(
+        rows.map((r: Record<string, unknown>) => [
+          quarterKey(r.period_avg_facts__created_at),
+          Number(r.period_avg_facts__period_daily_in_year_avg_calendar),
+        ]),
+      );
+      Object.keys(cumSum).forEach((q) => {
+        expectClose(byQuarter[q], cumSum[q] / cumDays[q]);
+      });
+    });
+
+    it('#17 day/year 按 quarter 查（中间粒度累计 data）→ 按季累计有数据天数', async () => {
+      if (skipUnlessNative() || skipUnlessLocalPg()) return;
+
+      const rows = await runQuery({
+        measures: ['period_avg_facts.period_daily_in_year_avg_data'],
+        timeDimensions: [{
+          dimension: 'period_avg_facts.created_at', granularity: 'quarter', dateRange: ['2025-01-01', '2025-12-31'],
+        }],
+        timezone: 'UTC',
+      });
+      const cumSum: Record<string, number> = { '2025-Q1': 30, '2025-Q2': 730, '2025-Q3': 2030 };
+      const cumDataDays: Record<string, number> = { '2025-Q1': 3, '2025-Q2': 7, '2025-Q3': 18 };
+      const byQuarter = Object.fromEntries(
+        rows.map((r: Record<string, unknown>) => [
+          quarterKey(r.period_avg_facts__created_at),
+          Number(r.period_avg_facts__period_daily_in_year_avg_data),
+        ]),
+      );
+      Object.keys(cumSum).forEach((q) => {
+        expectClose(byQuarter[q], cumSum[q] / cumDataDays[q]);
+      });
+    });
+
+    it('#18 day/quarter 按 month 查（中间粒度累计 calendar）→ 季内按月累计', async () => {
+      if (skipUnlessNative() || skipUnlessLocalPg()) return;
+
+      const rows = await runQuery({
+        measures: ['period_avg_facts.period_daily_in_quarter_avg_calendar'],
+        timeDimensions: [{
+          dimension: 'period_avg_facts.created_at', granularity: 'month', dateRange: ['2025-01-01', '2025-12-31'],
+        }],
+        timezone: 'UTC',
+      });
+      // 分子=季初累计 SUM（PARTITION BY quarter，每季独立）；分母=季初到当月末自然天数（calendar）。
+      // 季内天数：Q1→1月31/2月59/3月90；Q2→4月30/6月91；Q3→7月31。
+      const cumSum: Record<string, number> = {
+        '2025-01': 10, '2025-02': 20, '2025-03': 30,
+        '2025-04': 100, '2025-06': 700, '2025-07': 1300,
+      };
+      const cumDays: Record<string, number> = {
+        '2025-01': 31, '2025-02': 59, '2025-03': 90,
+        '2025-04': 30, '2025-06': 91, '2025-07': 31,
+      };
+      const byMonth = Object.fromEntries(
+        rows.map((r: Record<string, unknown>) => [
+          String(r.period_avg_facts__created_at).slice(0, 7),
+          Number(r.period_avg_facts__period_daily_in_quarter_avg_calendar),
+        ]),
+      );
+      Object.keys(cumSum).forEach((m) => {
+        expectClose(byMonth[m], cumSum[m] / cumDays[m]);
+      });
+    });
+
+    it('#19 month/year 按 quarter 查（中间粒度累计 calendar）→ 按季累计月均', async () => {
+      if (skipUnlessNative() || skipUnlessLocalPg()) return;
+
+      const rows = await runQuery({
+        measures: ['period_avg_facts.period_monthly_in_year_avg_calendar'],
+        timeDimensions: [{
+          dimension: 'period_avg_facts.created_at', granularity: 'quarter', dateRange: ['2025-01-01', '2025-12-31'],
+        }],
+        timezone: 'UTC',
+      });
+      // 分子=年初累计 SUM；分母=年初到当季末自然月数（calendar）。
+      const cumSum: Record<string, number> = { '2025-Q1': 30, '2025-Q2': 730, '2025-Q3': 2030 };
+      const cumMonths: Record<string, number> = { '2025-Q1': 3, '2025-Q2': 6, '2025-Q3': 9 };
+      const byQuarter = Object.fromEntries(
+        rows.map((r: Record<string, unknown>) => [
+          quarterKey(r.period_avg_facts__created_at),
+          Number(r.period_avg_facts__period_monthly_in_year_avg_calendar),
+        ]),
+      );
+      Object.keys(cumSum).forEach((q) => {
+        expectClose(byQuarter[q], cumSum[q] / cumMonths[q]);
+      });
+    });
+
+    it('#20 month/year 按 quarter 查（中间粒度累计 data）→ 按季累计有数据月数', async () => {
+      if (skipUnlessNative() || skipUnlessLocalPg()) return;
+
+      const rows = await runQuery({
+        measures: ['period_avg_facts.period_monthly_in_year_avg_data'],
+        timeDimensions: [{
+          dimension: 'period_avg_facts.created_at', granularity: 'quarter', dateRange: ['2025-01-01', '2025-12-31'],
+        }],
+        timezone: 'UTC',
+      });
+      // 分子=年初累计 SUM；分母=年初到当季末「有数据月数」（data）。
+      // Q1: 3 个有数据月；Q2: +4/6 月（5 月无）→ 5；Q3: +7 月 → 6。
+      const cumSum: Record<string, number> = { '2025-Q1': 30, '2025-Q2': 730, '2025-Q3': 2030 };
+      const cumDataMonths: Record<string, number> = { '2025-Q1': 3, '2025-Q2': 5, '2025-Q3': 6 };
+      const byQuarter = Object.fromEntries(
+        rows.map((r: Record<string, unknown>) => [
+          quarterKey(r.period_avg_facts__created_at),
+          Number(r.period_avg_facts__period_monthly_in_year_avg_data),
+        ]),
+      );
+      Object.keys(cumSum).forEach((q) => {
+        expectClose(byQuarter[q], cumSum[q] / cumDataMonths[q]);
+      });
     });
   });
 });

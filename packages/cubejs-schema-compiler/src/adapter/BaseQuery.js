@@ -4513,7 +4513,7 @@ export class BaseQuery {
         periodAverage.interval,
         td?.granularity,
       );
-      return viewMode === 'interval_bucket' || viewMode === 'range';
+      return viewMode === 'interval_bucket' || viewMode === 'range' || viewMode === 'cumulative';
     });
   }
 
@@ -4545,16 +4545,30 @@ export class BaseQuery {
     return this.periodAverageToDateExpr(this.timeGroupedColumn(periodAverage.avgUnit, tdSql));
   }
 
-  periodAverageDataPreAggregateOuterMeasureSql(measure) {
+  periodAverageDataPreAggregateOuterMeasureSql(measure, options = {}) {
     const sumCol = this.periodAverageDataPreAggregateSumColumnAlias(measure);
     const unitCol = this.periodAverageDataPreAggregateUnitColumnAlias(measure);
     const periodAverage = measure.measureDefinition().periodAverage;
     const baseMeasure = this.newMeasure(periodAverage.baseMeasure);
     const aggType = (periodAverage.baseAggType || baseMeasure.measureDefinition().type || 'sum').toUpperCase();
-    const numerator = aggType === 'SUM' || aggType === 'COUNT'
+    const innerAgg = aggType === 'SUM' || aggType === 'COUNT'
       ? `SUM(${sumCol})`
       : `${aggType}(${sumCol})`;
-    return `(${numerator}) / NULLIF(COUNT(${unitCol}), 0)`;
+
+    // cumulative（区间内累计，含中间粒度）：分子与分母均为「分组聚合 + 窗口累计」。
+    // 外层 GROUP BY query 桶后，innerAgg（如 SUM(sumCol)）= 当前桶内聚合值、
+    // COUNT(unitCol) = 当前桶内有数据 avgUnit 数；再套 SUM(...) OVER(...) 窗口即在
+    // interval 分区内从起点累计到当前桶。此为标准 SQL「窗口套分组聚合」语法。
+    if (options.viewMode === 'cumulative' && options.queryBucketSql && options.intervalBucketSql) {
+      const partitionBy = this.periodAverageGroupedBucketExpr(options.intervalBucketSql);
+      const orderBy = this.periodAverageGroupedBucketExpr(options.queryBucketSql);
+      const frame = `PARTITION BY ${partitionBy} ORDER BY ${orderBy} ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`;
+      const numerator = `SUM(${innerAgg}) OVER (${frame})`;
+      const divisor = `SUM(COUNT(${unitCol})) OVER (${frame})`;
+      return `(${numerator}) / NULLIF(${divisor}, 0)`;
+    }
+
+    return `(${innerAgg}) / NULLIF(COUNT(${unitCol}), 0)`;
   }
 
   buildPeriodAverageDataQuery() {
@@ -4645,6 +4659,10 @@ export class BaseQuery {
     const primaryPeriodAverage = primaryPaMeasure.measureDefinition().periodAverage;
     const schemaTimeDimension = primaryPeriodAverage.timeDimension;
     const primaryUnitCol = this.periodAverageDataPreAggregateUnitColumnAlias(primaryPaMeasure);
+    // PA 时间维在「外层 query 粒度」上的桶表达式（基于内层 avgUnit 桶列推导），
+    // cumulative 模式下作为窗口 ORDER BY 列。仅 PA 时间维带 granularity 时有值。
+    let paQueryBucketSql = null;
+    let paQueryGranularity = null;
 
     (this.timeDimensions || []).forEach((td) => {
       if (!this.periodAverageTimeDimensionMemberMatches(schemaTimeDimension, td.dimension)) {
@@ -4662,6 +4680,8 @@ export class BaseQuery {
       if (td.granularity) {
         const tdInstance = this.newTimeDimension(td);
         const outerBucket = this.timeGroupedColumn(td.granularity, primaryUnitCol);
+        paQueryBucketSql = outerBucket;
+        paQueryGranularity = td.granularity;
         pushOuterGroupExpr(
           outerBucket,
           `${outerBucket} AS ${tdInstance.aliasName()}`,
@@ -4676,8 +4696,20 @@ export class BaseQuery {
         && periodAverage.denominator === 'data'
         && this.collectPeriodAverageDataPreAggregateMeasures([measure]).length
       ) {
+        const avgUnit = periodAverage.avgUnit || periodAverage.avg_unit || periodAverage.unit;
+        const viewMode = this.periodAverageViewMode(
+          avgUnit, periodAverage.interval, paQueryGranularity,
+        );
+        // cumulative：从 query 桶推导 interval 桶，作为窗口 PARTITION BY 列。
+        const intervalBucketSql = paQueryBucketSql && viewMode === 'cumulative'
+          ? this.periodAverageIntervalBucketFromAvgUnit(paQueryBucketSql, periodAverage.interval)
+          : null;
         outerSelectParts.push(
-          `${this.periodAverageDataPreAggregateOuterMeasureSql(measure)} AS ${measure.aliasName()}`,
+          `${this.periodAverageDataPreAggregateOuterMeasureSql(measure, {
+            viewMode,
+            queryBucketSql: paQueryBucketSql,
+            intervalBucketSql,
+          })} AS ${measure.aliasName()}`,
         );
         return;
       }
@@ -4761,10 +4793,14 @@ export class BaseQuery {
 
     if (viewMode === 'cumulative') {
       if (denominator === 'data') {
+        // data + cumulative 走 data 预聚合 CTE 路径（shouldUsePeriodAverageDataPreAggregatePath），
+        // 分子/分母在 CTE 外层以「分组聚合 + 窗口累计」生成（见 buildPeriodAverageDataQuery）。
+        // 此处为标准路径（非 CTE，如与半累加/复合指标混查）的兜底：COUNT(*) OVER 数 granularity
+        // 桶数 —— 中间粒度下≠有数据 avgUnit 数，属既有限制，建议改用纯 data PA 查询以走 CTE。
         const intervalBucket = this.periodAverageIntervalBucketFromAvgUnit(bucketColumn, interval);
         return this.periodAverageCumulativeDataDivisor(intervalBucket, bucketColumn);
       }
-      return this.periodAverageCumulativeCalendarDivisor(avgUnit, interval, bucketColumn);
+      return this.periodAverageCumulativeCalendarDivisor(avgUnit, interval, bucketColumn, queryGranularity);
     }
 
     // interval_bucket / range + data：外层已按 avg_unit 预聚合时，分母为普通 COUNT
@@ -4950,6 +4986,11 @@ export class BaseQuery {
     }
   }
 
+  periodAverageGranularityRank(g) {
+    const rank = { day: 0, week: 1, month: 2, quarter: 3, year: 4 };
+    return rank[g] ?? 99;
+  }
+
   periodAverageViewMode(avgUnit, interval, queryGranularity) {
     if (!queryGranularity) {
       return 'range';
@@ -4957,7 +4998,12 @@ export class BaseQuery {
     if (queryGranularity === interval) {
       return 'interval_bucket';
     }
-    if (queryGranularity === avgUnit && avgUnit !== interval) {
+    // queryGranularity ∈ [avgUnit, interval)（含 avgUnit、不含 interval）→ cumulative。
+    // 覆盖「中间粒度累计」：如 day/year 按 month/quarter 查、day/month 按 day 查。
+    const ra = this.periodAverageGranularityRank(avgUnit);
+    const ri = this.periodAverageGranularityRank(interval);
+    const rq = this.periodAverageGranularityRank(queryGranularity);
+    if (rq >= ra && rq < ri) {
       return 'cumulative';
     }
     return 'interval_bucket';
@@ -4970,11 +5016,20 @@ export class BaseQuery {
     if (['week', 'hour'].includes(queryGranularity)) {
       throw new UserError(`period_average does not support query granularity '${queryGranularity}'`);
     }
-    if (queryGranularity !== interval && queryGranularity !== avgUnit) {
-      throw new UserError(
-        `period_average on '${timeDimension}' is configured as avg_unit='${avgUnit}' over interval='${interval}'; query granularity must be '${interval}' or '${avgUnit}', got '${queryGranularity}'`
-      );
+    // granularity === interval → interval_bucket；granularity ∈ [avgUnit, interval) → cumulative。
+    if (queryGranularity === interval) {
+      return;
     }
+    const ra = this.periodAverageGranularityRank(avgUnit);
+    const ri = this.periodAverageGranularityRank(interval);
+    const rq = this.periodAverageGranularityRank(queryGranularity);
+    if (rq >= ra && rq < ri) {
+      return;
+    }
+    throw new UserError(
+      `period_average on '${timeDimension}' is configured as avg_unit='${avgUnit}' over interval='${interval}'; `
+        + `query granularity must be between '${avgUnit}' (inclusive) and '${interval}' (exclusive), got '${queryGranularity}'`
+    );
   }
 
   periodAverageIntervalBucketSql(timeDimension, interval) {
@@ -5007,20 +5062,27 @@ export class BaseQuery {
     }
   }
 
-  periodAverageCumulativeCalendarDivisor(avgUnit, interval, avgUnitBucket) {
+  /**
+   * cumulative（区间内累计）calendar 分母。
+   * `queryGranularity` 为当前查询桶粒度（可能是 avgUnit 本身，也可能是 avgUnit~interval 之间的中间粒度，
+   * 如 day/year 按 month 查）。分母 = 从 interval 起点到「当前 query 桶末（闭区间）」的自然 avgUnit 数；
+   * 因此 current 取桶末而非桶首 —— 否则中间粒度（如 month 桶）会少算当月天数。
+   * 当 queryGranularity === avgUnit（如 day）时，桶末即当日，与历史行为一致。
+   */
+  periodAverageCumulativeCalendarDivisor(avgUnit, interval, avgUnitBucket, queryGranularity) {
     const grouped = this.periodAverageGroupedBucketExpr(avgUnitBucket);
-    const current = this.periodAverageToDateExpr(grouped);
+    const bucketEnd = this.periodAverageBucketEndExpr(queryGranularity || avgUnit, grouped, false);
     const intervalStart = this.periodAverageIntervalStartExpr(interval, grouped);
     const optimized = this.periodAverageCumulativeCalendarUnitCount(
       avgUnit,
       interval,
       intervalStart,
-      current,
+      bucketEnd,
     );
     if (optimized) {
       return optimized;
     }
-    return this.periodAverageCalendarUnitCount(avgUnit, intervalStart, current);
+    return this.periodAverageCalendarUnitCount(avgUnit, intervalStart, bucketEnd);
   }
 
   periodAverageCumulativeDataDivisor(intervalBucket, avgUnitBucket) {

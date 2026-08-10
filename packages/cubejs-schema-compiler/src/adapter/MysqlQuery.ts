@@ -377,7 +377,9 @@ export class MysqlQuery extends BaseQuery {
     return `GREATEST(DATEDIFF(DATE(CONCAT(YEAR(${bucketColumn}), '-12-31')), DATE(CONCAT(YEAR(${bucketColumn}), '-01-01'))) + 1, 0)`;
   }
 
-  periodAverageBucketEndExpr(granularity: string, bucketColumn: string): string {
+  periodAverageBucketEndExpr(granularity: string, bucketColumn: string, bucketAlreadyAtInterval = false): string {
+    // MySQL 各桶末表达式（LAST_DAY / DATE_ADD / CONCAT）已对 bucket 列做归一化，
+    // 与 bucketAlreadyAtInterval 无关，故忽略该参数。
     switch (granularity) {
       case 'day':
         return `DATE(${bucketColumn})`;

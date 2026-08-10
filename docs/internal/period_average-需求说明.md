@@ -1,8 +1,8 @@
 # period_average 原生参数 — 需求说明
 
-> **文档状态**：Draft v1.0  
+> **文档状态**：Draft v1.1  
 > **创建日期**：2026-07-13  
-> **最后修订**：2026-07-14  
+> **最后修订**：2026-08-10 （v1.1：放开中间粒度累计查看）  
 > **关联能力**：Cube Core 数据模型 / Measures  
 > **后续文档**：[period_average-设计方案.md](./period_average-设计方案.md) v3.0
 
@@ -227,6 +227,65 @@ measures:
 
 **注意**：月日均（`interval: month`）**不能**按 `year` 查询 — 应报错。
 
+### 5.5 年日均 — 按中间粒度（月/季）查看（v1.1 新增）
+
+**配置**：`avg_unit: day`，`interval: year`
+
+| 查询粒度 | 行为 |
+|---------|------|
+| `year` | 每年一行：分子 = 当年 SUM，分母 = 当年自然天数（整区间） |
+| `quarter` | 每季一行：分子 = 年初至当季末累计 SUM，分母 = 年初至当季末自然天数（如 Q2→÷181） |
+| `month` | 每月一行：分子 = 年初至当月末累计 SUM，分母 = 年初至当月末自然天数（如 3 月→÷90） |
+| `day` | 每日一行：分子 = 年初至当日累计 SUM，分母 = 年初至当日自然天数 |
+
+**示例**（`denominator: calendar`，按 `month` 查 2025）：
+
+| 月份 | 分子（累计 SUM） | 分母（年初到当月末天数） | 日均 |
+|------|----------------|----------------------|------|
+| 1 月 | SUM(1 月) | 31 | ÷31 |
+| 2 月 | SUM(1~2 月) | 59 | ÷59 |
+| 3 月 | SUM(1~3 月) | 90 | ÷90 |
+| 12 月 | SUM(全年) | 365 | ÷365 |
+
+**注意**：`denominator: data` 的中间粒度累计同样支持（走 data 预聚合 CTE，分母为「年初到当月末有数据天数」）。
+
+### 5.6 季日均 — 按月查看（v1.1 新增）
+
+**配置**：`avg_unit: day`，`interval: quarter`
+
+| 查询粒度 | 行为 |
+|---------|------|
+| `quarter` | 每季一行：分子 = 当季 SUM，分母 = 当季自然天数（整区间） |
+| `month` | 每月一行：分子 = **季初**至当月末累计 SUM（PARTITION BY quarter，每季独立累计），分母 = 季初至当月末自然天数 |
+| `day` | 每日一行：分子 = 季初至当日累计 SUM，分母 = 季初至当日自然天数 |
+
+**示例**（`denominator: calendar`，按 `month` 查 2025 Q2 = 4/5/6 月）：
+
+| 月份 | 分子（季内累计 SUM） | 分母（季初到当月末天数） | 日均 |
+|------|---------------------|----------------------|------|
+| 4 月 | SUM(4 月) | 30 | ÷30 |
+| 6 月 | SUM(4 月+6 月) | 91 | ÷91 |
+
+> 注意：Q2 的 5 月若无数据则不产生行，4 月与 6 月为窗口相邻行；分母从**季初**（4/1）起算，而非年初。
+
+### 5.7 年月均 — 按季查看（v1.1 新增）
+
+**配置**：`avg_unit: month`，`interval: year`
+
+| 查询粒度 | 行为 |
+|---------|------|
+| `year` | 每年一行：分子 = 当年 SUM，分母 = 12（整区间） |
+| `quarter` | 每季一行：分子 = 年初至当季末累计 SUM，分母 = 年初至当季末自然月数（如 Q2→÷6）/ 有数据月数（data） |
+| `month` | 每月一行：分子 = 年初至当月累计 SUM，分母 = 年初至当月自然月数（如 6 月→÷6） |
+
+**示例**（`denominator: calendar`，按 `quarter` 查 2025）：
+
+| 季度 | 分子（累计 SUM） | 分母（年初到当季末月数） | 月均 |
+|------|----------------|----------------------|------|
+| Q1 | SUM(Q1) | 3 | ÷3 |
+| Q2 | SUM(Q1+Q2) | 6 | ÷6 |
+| Q3 | SUM(Q1+Q2+Q3) | 9 | ÷9 |
+
 ---
 
 ## 6. Schema API 与编译约束
@@ -243,7 +302,7 @@ period_average:
 |------|------|
 | 缺 `interval` / `avg_unit` / `denominator` / `time_dimension` | 编译报错 |
 | `avg_unit` 细于 `interval` 不成立且二者不等 | 编译报错 |
-| 查询 `granularity` ∉ {`interval`, `avg_unit`} | 查询报错 |
+| 查询 `granularity` ∉ [`avg_unit`, `interval`)（即不在「含 avg_unit、不含 interval」的粒度区间内，且 ≠ `interval`） | 查询报错 |
 | `granularity` 为 `week` / `hour` | 查询报错 |
 | 形态 B 无日期 filter | 查询报错 |
 
@@ -257,8 +316,10 @@ period_average:
 |------|---------|
 | 无 `granularity`，有日期 filter | **形态 B**（整段） |
 | `granularity = interval` | **整区间** |
-| `granularity = avg_unit` 且 `avg_unit < interval` | **区间内累计** |
+| `avg_unit` ≤ `granularity` < `interval`（即 `granularity` ∈ [`avg_unit`, `interval`)） | **区间内累计** |
 | `granularity = avg_unit = interval` | **整区间**（分母 1） |
+
+> v1.1 放开：累计查看不再要求 `granularity = avg_unit`，而是允许 `granularity` 为 `avg_unit` 到 `interval` 之间的**任意中间粒度**。如年日均（`day/year`）可按 `day` / `month` / `quarter` 查（累计），月日均（`day/month`）可按 `day` 查（累计）。
 
 ### 7.2 整区间查看（`granularity = interval`）
 
@@ -266,11 +327,16 @@ period_average:
 
 **分子** = 桶内基础 measure 的 `{AGG}`。
 
-### 7.3 区间内累计查看（`granularity = avg_unit`）
+### 7.3 区间内累计查看（`granularity` ∈ [`avg_unit`, `interval`)）
 
-**分子** = `SUM({AGG}) OVER (PARTITION BY interval ORDER BY avg_unit ROWS UNBOUNDED PRECEDING)`  
-**分母 calendar** = 从 interval 起点到当前 avg_unit 桶的自然 `avg_unit` 数  
-**分母 data** = 从 interval 起点到当前桶的有数据 `avg_unit` 数（窗口计数）
+**分子** = `SUM({AGG}) OVER (PARTITION BY interval ORDER BY <granularity 桶> ROWS UNBOUNDED PRECEDING)`  
+　　（`granularity = avg_unit` 时为逐 avg_unit 累计；`granularity` 为中间粒度时为逐中间桶累计，如年日均按月查 → 月内聚合后按月累计）
+
+**分母 calendar** = 从 interval 起点到**当前 granularity 桶末（闭区间）**的自然 `avg_unit` 数  
+　　（如 `day/year` 按 `month` 查，3 月行分母 = 1/1 至 3/31 的自然天数 = 90）
+
+**分母 data** = 从 interval 起点到当前桶末的有数据 `avg_unit` 数（窗口累计计数）  
+　　实现走 data 预聚合 CTE 路径：内层按 `avg_unit` 分组保留日级粒度，外层按 `granularity` 桶 GROUP BY 后，以「窗口套分组聚合」（`SUM(SUM(col)) OVER(...)` / `SUM(COUNT(unit)) OVER(...)`）在 interval 分区内累计。
 
 ### 7.4 形态 B
 
@@ -304,12 +370,21 @@ period_average:
 | 17 | day / month | — | — | **week** | 2025-06 | **报错**（不支持 week） |
 | 18 | day / month | — | — | **year** | 2025 | **报错**（粒度与配置不符） |
 | 19 | month / month | — | — | **day** | 2025-06 | **报错**（粒度与配置不符） |
+| 20 | day / year | calendar | **累计（中间粒度）** | **month** | 2025 | 每月一行；分子=年初到当月末累计 SUM，分母=年初到当月末自然天数（如 3 月→÷90） |
+| 21 | day / year | calendar | **累计（中间粒度）** | **quarter** | 2025 | 每季一行；分子=年初到当季末累计 SUM，分母=年初到当季末自然天数（如 Q1→÷90，Q2→÷181） |
+| 22 | day / year | data | **累计（中间粒度）** | **month** | 2025 | 每月一行；分子=年初到当月末累计 SUM，分母=年初到当月末有数据天数（走 data 预聚合 CTE） |
+| 23 | day / year | data | **累计（中间粒度）** | **quarter** | 2025 | 每季一行；分子=年初到当季末累计 SUM，分母=年初到当季末有数据天数 |
+| 24 | day / **quarter** | calendar | **累计（中间粒度）** | **month** | 2025 | 每月一行；分子=**季初**累计 SUM（每季独立 PARTITION），分母=季初到当月末自然天数（如 Q2 的 6 月→÷91） |
+| 25 | **month** / year | calendar | **累计（中间粒度）** | **quarter** | 2025 | 每季一行；分子=年初累计 SUM，分母=年初到当季末自然月数（如 Q2→÷6） |
+| 26 | **month** / year | data | **累计（中间粒度）** | **quarter** | 2025 | 每季一行；分子=年初累计 SUM，分母=年初到当季末有数据月数（5 月无数据时 Q2→÷5） |
 
 **场景覆盖说明**：
 
 - **day/month 配置**（最典型「月日均」）：三种查看方式 × 两口径 = #1–#6，全覆盖。
 - **month/month 配置**（avg_unit = interval）：整区间分母恒为 1；形态 B 跨区间 = #7–#10。
-- **month/year 配置**（跨年月均）：三种查看方式 × 两口径 = #11–#15，全覆盖（补充了原缺失的 data 口径整区间/累计/形态 B）。
+- **month/year 配置**（跨年月均）：三种查看方式 × 两口径 = #11–#15，全覆盖（补充了原缺失的 data 口径整区间/累计/形态 B）；**按季中间粒度累计** = #25–#26（v1.1）。
+- **day/year 配置**（年日均）：整区间（按 year）；**中间粒度累计**（按 month/quarter）= #20–#23（v1.1 新增，calendar + data 均支持）。
+- **day/quarter 配置**（季日均）：整区间（按 quarter）；**按月中间粒度累计** = #24（v1.1，每季独立 PARTITION）。
 - **avg 基础 measure**：#16。
 - **报错场景**：#17–#19（week / 粒度不匹配）。
 
