@@ -4573,6 +4573,9 @@ export class BaseQuery {
 
   buildPeriodAverageDataQuery() {
     const paMeasures = this.collectPeriodAverageDataPreAggregateMeasures();
+    const primaryPaMeasure = paMeasures[0];
+    const primaryPeriodAverage = primaryPaMeasure.measureDefinition().periodAverage;
+    const schemaTimeDimension = primaryPeriodAverage.timeDimension;
     const inlineWhereConditions = [];
     const subQueryDimensions = this.collectFrom(
       this.dimensionsForSelect()
@@ -4602,7 +4605,15 @@ export class BaseQuery {
 
     this.dimensionsForSelect().forEach((dimension) => {
       if (dimension instanceof BaseTimeDimension) {
-        return;
+        // PA 时间维（schemaTimeDimension）在内层被替换为 avgUnit 桶（见下方 paMeasures 循环），跳过。
+        // 非 PA 时间维（如查询用了与 PA 不同的时间列分组）需在内层保留 granularity 桶列，供外层引用。
+        if (this.periodAverageTimeDimensionMemberMatches(schemaTimeDimension, dimension.dimension)) {
+          return;
+        }
+        // 无 granularity 的时间维（仅 dateRange filter）无需在内层选取
+        if (!dimension.granularity) {
+          return;
+        }
       }
       const cols = dimension.selectColumns && dimension.selectColumns();
       if (cols) {
@@ -4655,9 +4666,6 @@ export class BaseQuery {
       );
     });
 
-    const primaryPaMeasure = paMeasures[0];
-    const primaryPeriodAverage = primaryPaMeasure.measureDefinition().periodAverage;
-    const schemaTimeDimension = primaryPeriodAverage.timeDimension;
     const primaryUnitCol = this.periodAverageDataPreAggregateUnitColumnAlias(primaryPaMeasure);
     // PA 时间维在「外层 query 粒度」上的桶表达式（基于内层 avgUnit 桶列推导），
     // cumulative 模式下作为窗口 ORDER BY 列。仅 PA 时间维带 granularity 时有值。
@@ -4666,13 +4674,12 @@ export class BaseQuery {
 
     (this.timeDimensions || []).forEach((td) => {
       if (!this.periodAverageTimeDimensionMemberMatches(schemaTimeDimension, td.dimension)) {
+        // 非 PA 时间维：内层 CTE 已按其 granularity 桶选取（别名同 aliasName()），
+        // 外层直接引用该别名做 GROUP BY/SELECT（不可用 dimensionSql()，因 FROM 是 CTE 而非原表）。
         if (td.granularity) {
           const tdInstance = this.newTimeDimension(td);
-          const bucketSql = tdInstance.dimensionSql();
-          pushOuterGroupExpr(
-            bucketSql,
-            `${bucketSql} AS ${tdInstance.aliasName()}`,
-          );
+          const alias = tdInstance.aliasName();
+          pushOuterGroupExpr(alias, `${alias} AS ${alias}`);
         }
         return;
       }

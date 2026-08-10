@@ -117,6 +117,9 @@ const PERIOD_AVG_SCHEMA = `
           type: 'string',
           sql: \`CASE WHEN amount >= 200 THEN 'big' ELSE 'small' END\`,
         },
+        // 非 PA 时间维：与 created_at（PA time_dimension）不同的时间列，用于回归
+        // 「查询按非 PA 时间维分组 + data 口径 PA measure 走 CTE 预聚合」场景。
+        planned_date: { type: 'time', sql: \`(created_at + INTERVAL '1 month')\` },
       },
       preAggregations: {},
     })
@@ -868,6 +871,39 @@ describe('PostgresPeriodAverage', () => {
       );
       Object.keys(cumSum).forEach((q) => {
         expectClose(byQuarter[q], cumSum[q] / cumDataMonths[q]);
+      });
+    });
+
+    it('#21 data PA measure 按「非 PA 时间维」分组（BUG 回归：CTE 未选取非 PA 时间维）', async () => {
+      if (skipUnlessNative() || skipUnlessLocalPg()) return;
+
+      // PA measure = day/month/data（time_dimension=created_at）；查询按 planned_date（非 PA 时间维）的 month 分组。
+      // 回归：data 预聚合 CTE 此前跳过了所有时间维，导致外层引用 planned_date 报 Unknown column。
+      const rows = await runQuery({
+        measures: ['period_avg_facts.period_daily_avg_data'],
+        timeDimensions: [{
+          dimension: 'period_avg_facts.planned_date',
+          granularity: 'month',
+          dateRange: ['2025-01-01', '2025-12-31'],
+        }],
+        timezone: 'UTC',
+      });
+
+      // planned_date = created_at + 1 月；分母为该 planned_date 月内 created_at 的有数据天数（data）。
+      // planned 2月（created 1/15）→10/1；3月（2/15）→10/1；4月（3/15）→10/1；5月（4/1）→100/1；
+      // 7月（created 6/1,6/15,6/30 共 3 天）→600/3；8月（created 7/1~7/10+7/13 共 11 天）→1300/11。
+      const expected: Record<string, number> = {
+        '2025-02': 10, '2025-03': 10, '2025-04': 10, '2025-05': 100,
+        '2025-07': 200, '2025-08': 1300 / 11,
+      };
+      const byMonth = Object.fromEntries(
+        rows.map((r: Record<string, unknown>) => [
+          String(r.period_avg_facts__planned_date).slice(0, 7),
+          Number(r.period_avg_facts__period_daily_avg_data),
+        ]),
+      );
+      Object.keys(expected).forEach((m) => {
+        expectClose(byMonth[m], expected[m]);
       });
     });
   });
