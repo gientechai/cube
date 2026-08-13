@@ -208,7 +208,6 @@ jobs:
         id: prep
         run: |
           DOCKER_IMAGE=gientechai/cube
-          NEXUS_IMAGE=nexus-docker.gientechai.com/gientechai/cube
           VERSION=noop
 
           if [ "${{ github.event_name }}" = "schedule" ]; then
@@ -217,16 +216,16 @@ jobs:
             VERSION=${GITHUB_REF#refs/tags/}
           fi
 
-          TAGS="${DOCKER_IMAGE}:${VERSION},${NEXUS_IMAGE}:${VERSION}"
+          TAGS="${DOCKER_IMAGE}:${VERSION}"
 
           if [[ $VERSION =~ ^v[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
             MINOR=${VERSION%.*}
             MAJOR=${MINOR%.*}
-            TAGS="$TAGS,${DOCKER_IMAGE}:${MINOR},${DOCKER_IMAGE}:${MAJOR},${NEXUS_IMAGE}:${MINOR},${NEXUS_IMAGE}:${MAJOR}"
+            TAGS="$TAGS,${DOCKER_IMAGE}:${MINOR},${DOCKER_IMAGE}:${MAJOR}"
           fi
 
           if [ "${{ needs['detect_branch'].outputs.is_master }}" = "true" ]; then
-            TAGS="$TAGS,${DOCKER_IMAGE}:latest,${NEXUS_IMAGE}:latest"
+            TAGS="$TAGS,${DOCKER_IMAGE}:latest"
           fi
 
           {
@@ -239,12 +238,6 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Login to Nexus
-        uses: docker/login-action@v3
-        with:
-          registry: nexus-docker.gientechai.com
-          username: ${{ secrets.NEXUS_USERNAME }}
-          password: ${{ secrets.NEXUS_PASSWORD }}
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
@@ -305,7 +298,6 @@ jobs:
         id: prep
         run: |
           DOCKER_IMAGE=gientechai/cube
-          NEXUS_IMAGE=nexus-docker.gientechai.com/gientechai/cube
           VERSION=noop
 
           if [ "${{ github.event_name }}" = "schedule" ]; then
@@ -314,18 +306,18 @@ jobs:
             VERSION=${GITHUB_REF#refs/tags/}
           fi
 
-          TAGS="${DOCKER_IMAGE}:${VERSION}-jdk,${NEXUS_IMAGE}:${VERSION}-jdk"
+          TAGS="${DOCKER_IMAGE}:${VERSION}-jdk"
 
           if [[ $VERSION =~ ^v[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
             MINOR=${VERSION%.*}
             MAJOR=${MINOR%.*}
-            TAGS="$TAGS,${DOCKER_IMAGE}:${MINOR}-jdk,${DOCKER_IMAGE}:${MAJOR}-jdk,${NEXUS_IMAGE}:${MINOR}-jdk,${NEXUS_IMAGE}:${MAJOR}-jdk"
+            TAGS="$TAGS,${DOCKER_IMAGE}:${MINOR}-jdk,${DOCKER_IMAGE}:${MAJOR}-jdk"
           elif [ "${{ github.event_name }}" = "push" ]; then
-            TAGS="$TAGS,${DOCKER_IMAGE}:sha-${GITHUB_SHA::8}-jdk,${NEXUS_IMAGE}:sha-${GITHUB_SHA::8}-jdk"
+            TAGS="$TAGS,${DOCKER_IMAGE}:sha-${GITHUB_SHA::8}-jdk"
           fi
 
           if [ "${{ needs['detect_branch'].outputs.is_master }}" = "true" ]; then
-            TAGS="$TAGS,${DOCKER_IMAGE}:jdk,${NEXUS_IMAGE}:jdk"
+            TAGS="$TAGS,${DOCKER_IMAGE}:jdk"
           fi
 
           {
@@ -338,12 +330,6 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Login to Nexus
-        uses: docker/login-action@v3
-        with:
-          registry: nexus-docker.gientechai.com
-          username: ${{ secrets.NEXUS_USERNAME }}
-          password: ${{ secrets.NEXUS_PASSWORD }}
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       - name: Copy yarn.lock file
@@ -429,7 +415,6 @@ jobs:
           GITHUB_SHA: ${{ github.sha }}
         run: |
           DOCKER_IMAGE=gientechai/cubestore
-          NEXUS_IMAGE=nexus-docker.gientechai.com/gientechai/cubestore
           VERSION=noop
 
           if [ "${{ github.event_name }}" = "schedule" ]; then
@@ -438,16 +423,16 @@ jobs:
             VERSION=${GITHUB_REF#refs/tags/}
           fi
 
-          TAGS="${DOCKER_IMAGE}:${VERSION}${{ matrix.postfix }},${NEXUS_IMAGE}:${VERSION}${{ matrix.postfix }}"
+          TAGS="${DOCKER_IMAGE}:${VERSION}${{ matrix.postfix }}"
 
           if [[ $VERSION =~ ^v[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
             MINOR=${VERSION%.*}
             MAJOR=${MINOR%.*}
-            TAGS="$TAGS,${DOCKER_IMAGE}:${MINOR}${{ matrix.postfix }},${DOCKER_IMAGE}:${MAJOR}${{ matrix.postfix }},${NEXUS_IMAGE}:${MINOR}${{ matrix.postfix }},${NEXUS_IMAGE}:${MAJOR}${{ matrix.postfix }}"
+            TAGS="$TAGS,${DOCKER_IMAGE}:${MINOR}${{ matrix.postfix }},${DOCKER_IMAGE}:${MAJOR}${{ matrix.postfix }}"
           fi
 
           if [ "${{ needs['detect_branch'].outputs.is_master }}" = "true" ]; then
-            TAGS="$TAGS,${DOCKER_IMAGE}:${{ matrix.tag }},${NEXUS_IMAGE}:${{ matrix.tag }}"
+            TAGS="$TAGS,${DOCKER_IMAGE}:${{ matrix.tag }}"
           fi
 
           {
@@ -460,12 +445,6 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Login to Nexus
-        uses: docker/login-action@v3
-        with:
-          registry: nexus-docker.gientechai.com
-          username: ${{ secrets.NEXUS_USERNAME }}
-          password: ${{ secrets.NEXUS_PASSWORD }}
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Push to Docker Hub
