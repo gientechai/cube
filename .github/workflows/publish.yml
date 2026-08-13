@@ -207,6 +207,7 @@ jobs:
       - name: Prepare
         id: prep
         run: |
+          DOCKER_IMAGE=gientechai/cube
           NEXUS_IMAGE=nexus-docker.gientechai.com/gientechai/cube
           VERSION=noop
 
@@ -216,16 +217,16 @@ jobs:
             VERSION=${GITHUB_REF#refs/tags/}
           fi
 
-          TAGS="${NEXUS_IMAGE}:${VERSION}"
+          TAGS="${DOCKER_IMAGE}:${VERSION},${NEXUS_IMAGE}:${VERSION}"
 
           if [[ $VERSION =~ ^v[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
             MINOR=${VERSION%.*}
             MAJOR=${MINOR%.*}
-            TAGS="$TAGS,${NEXUS_IMAGE}:${MINOR},${NEXUS_IMAGE}:${MAJOR}"
+            TAGS="$TAGS,${DOCKER_IMAGE}:${MINOR},${DOCKER_IMAGE}:${MAJOR},${NEXUS_IMAGE}:${MINOR},${NEXUS_IMAGE}:${MAJOR}"
           fi
 
           if [ "${{ needs['detect_branch'].outputs.is_master }}" = "true" ]; then
-            TAGS="$TAGS,${NEXUS_IMAGE}:latest"
+            TAGS="$TAGS,${DOCKER_IMAGE}:latest,${NEXUS_IMAGE}:latest"
           fi
 
           {
@@ -233,6 +234,11 @@ jobs:
             echo "tags=${TAGS}"
             echo "created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           } >> "$GITHUB_OUTPUT"
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Login to Nexus
         uses: docker/login-action@v3
         with:
@@ -280,7 +286,7 @@ jobs:
     needs: [npm, cubestore_linux, native_linux, detect_branch]
     name: Debian with jdk docker image
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:
@@ -298,6 +304,7 @@ jobs:
       - name: Prepare
         id: prep
         run: |
+          DOCKER_IMAGE=gientechai/cube
           NEXUS_IMAGE=nexus-docker.gientechai.com/gientechai/cube
           VERSION=noop
 
@@ -307,18 +314,18 @@ jobs:
             VERSION=${GITHUB_REF#refs/tags/}
           fi
 
-          TAGS="${NEXUS_IMAGE}:${VERSION}-jdk"
+          TAGS="${DOCKER_IMAGE}:${VERSION}-jdk,${NEXUS_IMAGE}:${VERSION}-jdk"
 
           if [[ $VERSION =~ ^v[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
             MINOR=${VERSION%.*}
             MAJOR=${MINOR%.*}
-            TAGS="$TAGS,${NEXUS_IMAGE}:${MINOR}-jdk,${NEXUS_IMAGE}:${MAJOR}-jdk"
+            TAGS="$TAGS,${DOCKER_IMAGE}:${MINOR}-jdk,${DOCKER_IMAGE}:${MAJOR}-jdk,${NEXUS_IMAGE}:${MINOR}-jdk,${NEXUS_IMAGE}:${MAJOR}-jdk"
           elif [ "${{ github.event_name }}" = "push" ]; then
-            TAGS="$TAGS,${NEXUS_IMAGE}:sha-${GITHUB_SHA::8}-jdk"
+            TAGS="$TAGS,${DOCKER_IMAGE}:sha-${GITHUB_SHA::8}-jdk,${NEXUS_IMAGE}:sha-${GITHUB_SHA::8}-jdk"
           fi
 
           if [ "${{ needs['detect_branch'].outputs.is_master }}" = "true" ]; then
-            TAGS="$TAGS,${NEXUS_IMAGE}:jdk"
+            TAGS="$TAGS,${DOCKER_IMAGE}:jdk,${NEXUS_IMAGE}:jdk"
           fi
 
           {
@@ -326,6 +333,11 @@ jobs:
             echo "tags=${TAGS}"
             echo "created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           } >> "$GITHUB_OUTPUT"
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Login to Nexus
         uses: docker/login-action@v3
         with:
@@ -416,6 +428,7 @@ jobs:
         env:
           GITHUB_SHA: ${{ github.sha }}
         run: |
+          DOCKER_IMAGE=gientechai/cubestore
           NEXUS_IMAGE=nexus-docker.gientechai.com/gientechai/cubestore
           VERSION=noop
 
@@ -425,16 +438,16 @@ jobs:
             VERSION=${GITHUB_REF#refs/tags/}
           fi
 
-          TAGS="${NEXUS_IMAGE}:${VERSION}${{ matrix.postfix }}"
+          TAGS="${DOCKER_IMAGE}:${VERSION}${{ matrix.postfix }},${NEXUS_IMAGE}:${VERSION}${{ matrix.postfix }}"
 
           if [[ $VERSION =~ ^v[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
             MINOR=${VERSION%.*}
             MAJOR=${MINOR%.*}
-            TAGS="$TAGS,${NEXUS_IMAGE}:${MINOR}${{ matrix.postfix }},${NEXUS_IMAGE}:${MAJOR}${{ matrix.postfix }}"
+            TAGS="$TAGS,${DOCKER_IMAGE}:${MINOR}${{ matrix.postfix }},${DOCKER_IMAGE}:${MAJOR}${{ matrix.postfix }},${NEXUS_IMAGE}:${MINOR}${{ matrix.postfix }},${NEXUS_IMAGE}:${MAJOR}${{ matrix.postfix }}"
           fi
 
           if [ "${{ needs['detect_branch'].outputs.is_master }}" = "true" ]; then
-            TAGS="$TAGS,${NEXUS_IMAGE}:${{ matrix.tag }}"
+            TAGS="$TAGS,${DOCKER_IMAGE}:${{ matrix.tag }},${NEXUS_IMAGE}:${{ matrix.tag }}"
           fi
 
           {
@@ -442,6 +455,11 @@ jobs:
             echo "tags=${TAGS}"
             echo "created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           } >> "$GITHUB_OUTPUT"
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Login to Nexus
         uses: docker/login-action@v3
         with:
@@ -470,6 +488,13 @@ jobs:
             org.opencontainers.image.created=${{ steps.prep.outputs.created }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=${{ fromJson(steps.repo.outputs.result).license.spdx_id }}
+      - name: Update repo description
+        uses: peter-evans/dockerhub-description@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: gientechai/cubestore
+          readme-filepath: ./rust/cubestore/README.md
 
   cubestore_linux:
     runs-on: ${{ matrix.os }}
