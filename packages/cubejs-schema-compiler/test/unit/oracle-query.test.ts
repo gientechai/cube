@@ -1175,4 +1175,39 @@ describe('OracleQuery period_average SQL dialect', () => {
     expect(divisor).not.toMatch(/DATE_TRUNC/i);
     expect(divisor).not.toMatch(/::\w+/);
   });
+
+  it('measure filter: wraps subquery without AS keyword, no HAVING window function', async () => {
+    // 回归：period_average（窗口函数）measure filter 不能进 HAVING（Oracle 同样禁止）。
+    // Oracle 子查询别名不能用 AS 关键字，须用 asSyntaxJoin（空字符串）。
+    const { compiler, joinGraph, cubeEvaluator } = prepareJsCompiler(periodAvgSchema, { adapter: 'oracle' });
+    await compiler.compile();
+
+    const query = new OracleQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['period_avg_facts.period_daily_avg_calendar'],
+        timeDimensions: [{
+          dimension: 'period_avg_facts.stat_dt',
+          granularity: 'day',
+          dateRange: ['2025-06-01', '2025-06-30'],
+        }],
+        filters: [{
+          member: 'period_avg_facts.period_daily_avg_calendar',
+          operator: 'equals',
+          values: ['1'],
+        }],
+        timezone: 'UTC',
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    // 不得在 HAVING 中出现窗口函数
+    expect(sql).not.toMatch(/HAVING[\s\S]*OVER\s*\(/i);
+    // 外层子查询 WHERE 引用 measure 别名
+    expect(sql).toMatch(/WHERE[\s\S]*period_daily_avg_calendar/i);
+    // Oracle 子查询别名不能用 AS 关键字
+    expect(sql).not.toMatch(/\)\s+AS\s+"q_pa"/i);
+    expect(sql).toMatch(/\)\s+"q_pa"/i);
+  });
 });

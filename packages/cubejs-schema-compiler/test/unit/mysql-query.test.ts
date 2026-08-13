@@ -334,4 +334,106 @@ cubes:
     expect(sql).toMatch(/ORDER BY[^]*`period_avg_facts__period_daily_avg_data`/);
     expect(sql).not.toMatch(/ORDER BY[^]*\.amount/);
   });
+
+  it('calendar denominator + measure filter: wraps subquery, no HAVING window function', () => {
+    // 回归 BUG：period_average（窗口函数）指标的 measure filter 不能进 HAVING
+    // （MySQL ERROR 3593: You cannot use the window function 'sum' in this context.）。
+    // 必须包外层子查询，filter 改写到外层 WHERE（引用内层投影别名）。
+    const query = new MysqlQuery(compilers, {
+      measures: ['period_avg_facts.period_daily_avg_calendar'],
+      timeDimensions: [{
+        dimension: 'period_avg_facts.stat_dt',
+        granularity: 'day',
+        dateRange: ['2025-06-01', '2025-06-30'],
+      }],
+      filters: [{
+        member: 'period_avg_facts.period_daily_avg_calendar',
+        operator: 'equals',
+        values: ['1'],
+      }],
+      timezone: 'UTC',
+    });
+
+    const [sql, params] = query.buildSqlAndParams();
+
+    // 不得在 HAVING 中出现窗口函数
+    expect(sql).not.toMatch(/HAVING[\s\S]*OVER\s*\(/i);
+    // 外层子查询 WHERE 引用 measure 别名
+    expect(sql).toMatch(/WHERE[\s\S]*`period_avg_facts__period_daily_avg_calendar`\s*=\s*\?/i);
+    // 过滤值进入参数
+    expect(params).toContain('1');
+  });
+
+  it('data denominator + measure filter: wraps subquery, no HAVING window function', () => {
+    const query = new MysqlQuery(compilers, {
+      measures: ['period_avg_facts.period_daily_avg_data'],
+      timeDimensions: [{
+        dimension: 'period_avg_facts.stat_dt',
+        granularity: 'day',
+        dateRange: ['2025-06-01', '2025-06-30'],
+      }],
+      filters: [{
+        member: 'period_avg_facts.period_daily_avg_data',
+        operator: 'gt',
+        values: ['0'],
+      }],
+      timezone: 'UTC',
+    });
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).not.toMatch(/HAVING[\s\S]*OVER\s*\(/i);
+    expect(sql).toMatch(/WHERE[\s\S]*`period_avg_facts__period_daily_avg_data`\s*>\s*\?/i);
+  });
+
+  it('measure filter without period_average still uses HAVING (regression)', () => {
+    // 非 period_average 的常规 measure filter 仍走 HAVING，行为不变。
+    const query = new MysqlQuery(compilers, {
+      measures: ['period_avg_facts.total_amount'],
+      timeDimensions: [{
+        dimension: 'period_avg_facts.stat_dt',
+        granularity: 'day',
+        dateRange: ['2025-06-01', '2025-06-30'],
+      }],
+      filters: [{
+        member: 'period_avg_facts.total_amount',
+        operator: 'gt',
+        values: ['50'],
+      }],
+      timezone: 'UTC',
+    });
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).toMatch(/HAVING[\s\S]*SUM\s*\(/i);
+    expect(sql).not.toMatch(/q_pa/i);
+  });
+
+  it('useNativeSqlPlanner + period_average measure filter: falls back to JS (no HAVING window)', () => {
+    // 回归：CUBEJS_TESSERACT_SQL_PLANNER=true 时，period_average（窗口函数）measure filter
+    // 在 Tesseract 路径下会进 HAVING（MySQL ERROR 3593）。须回退到 JS 生成器，
+    // 由 JS 的外层子查询包装将过滤改写为外层 WHERE。
+    const query = new MysqlQuery(compilers, {
+      measures: ['period_avg_facts.period_daily_avg_calendar'],
+      timeDimensions: [{
+        dimension: 'period_avg_facts.stat_dt',
+        granularity: 'day',
+        dateRange: ['2025-06-01', '2025-06-30'],
+      }],
+      filters: [{
+        member: 'period_avg_facts.period_daily_avg_calendar',
+        operator: 'equals',
+        values: ['1'],
+      }],
+      timezone: 'UTC',
+      useNativeSqlPlanner: true,
+    });
+
+    expect(query.useNativeSqlPlanner).toBe(true);
+    expect(query.hasPeriodAverageMeasureFilters()).toBe(true);
+    // buildSqlAndParams 应回退到 JS（native Rust binding 在单测环境不可用时也走 JS）
+    const [sql] = query.buildSqlAndParams();
+    expect(sql).not.toMatch(/HAVING[\s\S]*OVER\s*\(/i);
+    expect(sql).toMatch(/WHERE[\s\S]*period_daily_avg_calendar/i);
+  });
 });

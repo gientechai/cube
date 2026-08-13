@@ -69,6 +69,12 @@ export class MysqlQuery extends BaseQuery {
       if (this.shouldUsePeriodAverageDataPreAggregatePath()) {
         return super.getFieldOrderExpr(id);
       }
+      // period_average 指标的 measure filter 走外层子查询包装（hasPeriodAverageMeasureFilters），
+      // 外层 ORDER BY 只能看到内层投影别名；展开 measureSql()（含窗口函数）会引用子查询中
+      // 不存在的列且重复窗口表达式，须委托 super 用 SELECT 别名。
+      if (this.hasPeriodAverageMeasureFilters()) {
+        return super.getFieldOrderExpr(id);
+      }
       // Non-semi-additive aggregates on simpleQuery must repeat measureSql() on MySQL.
       return measure.measureSql();
     }

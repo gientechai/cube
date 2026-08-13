@@ -405,3 +405,60 @@ describe('PostgresQuery', () => {
     expect(sql).toMatch(/\s+AS\s+q_0\s+/);
   });
 });
+
+describe('PostgresQuery period_average measure filter', () => {
+  const periodAvgSchema = `
+    cube(\`period_avg_facts\`, {
+      sql: \`SELECT TIMESTAMP '2025-06-01 10:00:00' AS stat_dt, 100 AS amount\`,
+      dimensions: {
+        stat_dt: { type: 'time', sql: 'stat_dt' },
+      },
+      measures: {
+        total_amount: { type: 'sum', sql: 'amount' },
+        period_daily_avg_calendar: {
+          type: 'number',
+          sql: \`\${total_amount}\`,
+          period_average: {
+            avg_unit: 'day',
+            interval: 'month',
+            denominator: 'calendar',
+            time_dimension: 'stat_dt',
+          },
+        },
+      },
+    })
+  `;
+
+  it('measure filter: wraps subquery with AS keyword, no HAVING window function', async () => {
+    // 回归：period_average（窗口函数）measure filter 不能进 HAVING（Postgres 同样禁止）。
+    const { compiler, joinGraph, cubeEvaluator } = prepareJsCompiler(periodAvgSchema);
+    await compiler.compile();
+
+    const query = new PostgresQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['period_avg_facts.period_daily_avg_calendar'],
+        timeDimensions: [{
+          dimension: 'period_avg_facts.stat_dt',
+          granularity: 'day',
+          dateRange: ['2025-06-01', '2025-06-30'],
+        }],
+        filters: [{
+          member: 'period_avg_facts.period_daily_avg_calendar',
+          operator: 'equals',
+          values: ['1'],
+        }],
+        timezone: 'UTC',
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    // 不得在 HAVING 中出现窗口函数
+    expect(sql).not.toMatch(/HAVING[\s\S]*OVER\s*\(/i);
+    // 外层子查询 WHERE 引用 measure 别名
+    expect(sql).toMatch(/WHERE[\s\S]*period_daily_avg_calendar/i);
+    // Postgres 子查询别名用 AS 关键字
+    expect(sql).toMatch(/\)\s+AS\s+"q_pa"/i);
+  });
+});

@@ -986,6 +986,14 @@ export class BaseQuery {
         return this.newQueryWithoutNative().buildSqlAndParams(exportAnnotatedSql);
       }
 
+      // period_average（含窗口函数 SUM(...) OVER(...)）的 measure filter 在 Tesseract 路径下
+      // 会进入 HAVING 子句，而 MySQL/Postgres/达梦/Oracle 均不允许 HAVING 中使用窗口函数
+      // （MySQL ERROR 3593）。JS 生成器已通过外层子查询将此类过滤改写为外层 WHERE，
+      // 故回退到 JS 生成器以保证正确性。
+      if (this.hasPeriodAverageMeasureFilters()) {
+        return this.newQueryWithoutNative().buildSqlAndParams(exportAnnotatedSql);
+      }
+
       return this.buildSqlAndParamsRust(exportAnnotatedSql);
     }
 
@@ -1341,6 +1349,12 @@ export class BaseQuery {
     }
     const query = `${commonQuery} ${this.baseWhere(this.allFilters.concat(inlineWhereConditions))}` +
       this.groupByClause();
+    // period_average（窗口函数）指标的 measure filter 不能进 HAVING
+    // （MySQL ERROR 3593 等），改走外层子查询 WHERE。
+    if (this.hasPeriodAverageMeasureFilters()) {
+      const wrapped = this.wrapWithOuterMeasureFilters(query);
+      return wrapped + this.orderBy() + this.groupByDimensionLimit();
+    }
     return this.baseHaving(query, this.measureFilters) +
       this.orderBy() +
       this.groupByDimensionLimit();
@@ -2062,6 +2076,90 @@ export class BaseQuery {
   baseHaving(query, filters) {
     const filterClause = filters.map(t => t.filterToWhere()).filter(R.identity).map(f => `(${f})`);
     return filterClause.length ? query + ` HAVING ${filterClause.join(' AND ')}` : query;
+  }
+
+  /**
+   * 判断 measure filter 中是否存在引用 period_average（含窗口函数）指标的过滤。
+   *
+   * period_average 指标的 measureSql 含 `SUM(...) OVER (...)` 窗口函数，MySQL/Postgres/
+   * 达梦/Oracle 均不允许在 HAVING 中使用窗口函数（MySQL 报 ERROR 3593:
+   * "You cannot use the window function 'sum' in this context."）。
+   * 此类 filter 必须改走外层子查询 WHERE（见 wrapWithOuterMeasureFilters）。
+   *
+   * @returns {boolean}
+   */
+  hasPeriodAverageMeasureFilters() {
+    if (!this.measureFilters || !this.measureFilters.length) {
+      return false;
+    }
+    return this.measureFilters.some((f) => {
+      const measure = this.findMeasureForFilter(f);
+      return !!(measure && typeof measure.isPeriodAverage === 'function' && measure.isPeriodAverage());
+    });
+  }
+
+  /**
+   * 根据 filter.measure 路径在 this.measures 中查找对应的 measure 对象。
+   * @param {{ measure?: string }} filter
+   * @returns {BaseMeasure|undefined}
+   */
+  findMeasureForFilter(filter) {
+    const target = filter && filter.measure;
+    if (!target) {
+      return undefined;
+    }
+    return this.measures.find(
+      (m) => m.measure === target || m.expressionName === target
+    );
+  }
+
+  /**
+   * 内层 GROUP BY 查询投影的列别名集合（dimensions + measures），
+   * 用于外层子查询 SELECT 引用。
+   * @returns {string[]}
+   */
+  periodAverageOuterSelectAliases() {
+    const dimensionAliases = this.dimensionAliasNames();
+    const measureAliases = this.measures
+      .filter((m) => m && typeof m.aliasName === 'function')
+      .map((m) => m.aliasName());
+    return dimensionAliases.concat(measureAliases);
+  }
+
+  /**
+   * 当 measure filter 引用 period_average（窗口函数）指标时，将内层 GROUP BY 查询
+   * 包成子查询，filter 从 HAVING 改写到外层 WHERE（引用内层投影别名）。
+   *
+   * 窗口函数结果在内层已物化为一列，外层 WHERE 引用别名对所有数据库均合法。
+   * 复用半累加 q_0 包装模式。ORDER BY / LIMIT 由调用方拼接到返回值之后（外层）。
+   *
+   * @param {string} innerQuery 内层查询（含 GROUP BY，不含 HAVING/ORDER BY/LIMIT）
+   * @param {string[]} [innerColumns] 内层投影别名列表，默认取 periodAverageOuterSelectAliases()
+   * @returns {string} `SELECT <cols> FROM (<innerQuery>) AS <alias> [WHERE ...]`
+   */
+  wrapWithOuterMeasureFilters(innerQuery, innerColumns) {
+    const columns = innerColumns || this.periodAverageOuterSelectAliases();
+    const outerAlias = this.escapeColumnName(this.aliasName('q_pa'));
+    const selectList = columns.map((c) => `${outerAlias}.${c}`).join(', ');
+    const whereClause = this.measureFilters
+      .map((f) => {
+        const measure = this.findMeasureForFilter(f);
+        // 外层引用内层投影的 measure 别名；非 measure filter（不应出现于此）兜底用 filterToWhere
+        if (measure && typeof measure.aliasName === 'function') {
+          const columnSql = `${outerAlias}.${measure.aliasName()}`;
+          return f.conditionSql ? `(${f.conditionSql(columnSql)})` : null;
+        }
+        const w = f.filterToWhere ? f.filterToWhere() : null;
+        return w ? `(${w})` : null;
+      })
+      .filter(R.identity)
+      .join(' AND ');
+    const asSyntax = this.asSyntaxJoin ? `${this.asSyntaxJoin} ` : '';
+    let sql = `SELECT ${selectList} FROM (${innerQuery}) ${asSyntax}${outerAlias}`;
+    if (whereClause) {
+      sql += ` WHERE ${whereClause}`;
+    }
+    return sql;
   }
 
   timeStampInClientTz(dateParam) {
@@ -3348,6 +3446,7 @@ export class BaseQuery {
       && (
         (typeof measure.isSemiAdditive === 'function' && measure.isSemiAdditive())
         || this.queryReferencesSemiAdditiveMeasures()
+        || this.hasPeriodAverageMeasureFilters()
       )
     ) {
       return measure.aliasName();
@@ -4733,6 +4832,12 @@ export class BaseQuery {
       query += ` GROUP BY ${outerGroupByParts.join(', ')}`;
     }
 
+    // period_average（窗口函数）指标的 measure filter 不能进 HAVING
+    // （MySQL ERROR 3593 等），改走外层子查询 WHERE。
+    if (this.hasPeriodAverageMeasureFilters()) {
+      const wrapped = this.wrapWithOuterMeasureFilters(query);
+      return wrapped + this.orderBy() + this.groupByDimensionLimit();
+    }
     query = this.baseHaving(query, this.measureFilters);
     return query + this.orderBy() + this.groupByDimensionLimit();
   }
