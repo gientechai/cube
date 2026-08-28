@@ -13,6 +13,10 @@ describe('semi-additive join path (partition_bounds)', () => {
           relationship: \`many_to_one\`,
           sql: \`\${CUBE.cust_no} = \${cust.cust_no}\`,
         },
+        loan_tag: {
+          relationship: \`one_to_many\`,
+          sql: \`\${CUBE.cust_no} = \${loan_tag.cust_no}\`,
+        },
       },
 
       dimensions: {
@@ -92,6 +96,21 @@ describe('semi-additive join path (partition_bounds)', () => {
           type: 'string',
         },
       },
+    }),
+
+    cube(\`loan_tag\`, {
+      sql_table: \`loan_tags\`,
+
+      dimensions: {
+        cust_no: {
+          sql: \`\${CUBE}.cust_no\`,
+          type: 'string',
+        },
+        tag_name: {
+          sql: \`\${CUBE}.tag_name\`,
+          type: 'string',
+        },
+      },
     })
   `, { adapter: 'mysql' });
 
@@ -165,6 +184,39 @@ describe('semi-additive join path (partition_bounds)', () => {
     // Final projection is the semi-additive COALESCE(...) measure with its alias.
     expect(sql).toMatch(/COALESCE\(SUM\(CASE WHEN/i);
     expect(sql).toMatch(/as `loan_debt__dkye` FROM matched_data/i);
+  });
+
+  it('produces valid SQL when aggregateSubQuery keys path has dateRange-only timeDim + multiplied dimension', () => {
+    // Regression: one_to_many 维度触发 aggregateSubQuery（keys 子查询）时，
+    // buildSemiAdditiveMeasuresQuery(dimensionSourceAlias=keys) 曾把无 granularity
+    // 的 timeDimension 投影成 `keys`.null as null（aliasName() === null）。
+    const query = new MysqlQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['loan_debt.dkye'],
+        dimensions: ['loan_tag.tag_name'],
+        timeDimensions: [{
+          dimension: 'loan_debt.etl_date_date',
+          dateRange: ['2026-05-02', '2026-07-31'],
+        }],
+        timezone: 'UTC',
+        limit: 10000,
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).toMatch(/WITH base_data AS/i);
+    expect(sql).toMatch(/partition_bounds_0 AS/i);
+    expect(sql).toMatch(/matched_data AS/i);
+    // keys 子查询路径（行倍增）；方言可能省略 AS，用 keys.列 引用判定
+    expect(sql).toMatch(/[`"]keys[`"]\s*\./);
+    // 修复前：`keys`.null as null
+    expect(sql).not.toMatch(/[`"]?keys[`"]?\s*\.\s*null\b/i);
+    expect(sql).not.toMatch(/\bnull\s+as\s+null\b/i);
+    expect(sql).not.toMatch(/SELECT\s*,/i);
+    expect(sql).toMatch(/COALESCE\(SUM\(CASE WHEN/i);
+    expect(sql).toMatch(/`loan_tag__tag_name`/);
   });
 
   it('produces valid SQL when the time range is a pure filter (inDateRange) instead of a timeDimension', () => {

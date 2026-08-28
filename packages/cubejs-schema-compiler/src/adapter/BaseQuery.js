@@ -7390,10 +7390,16 @@ export class BaseQuery {
         if (!path || pushedDimensionPaths.has(path)) {
           return;
         }
+        // timeDimension 仅 dateRange（无 granularity）时 aliasName() 为 null；
+        // 不可投影成 `${keys}.null as null`（JS 模板会把 null 拼成字面量 "null"）。
+        const alias = d.aliasName && d.aliasName();
+        if (!alias) {
+          return;
+        }
         pushedDimensionPaths.add(path);
         // Project keys columns under flat aliases so windowed_data can reference them
         // (base_data has no `keys` table alias — only the projected column names).
-        unaggregatedColumns.push(`${dimensionSourceAlias}.${d.aliasName()} as ${d.aliasName()}`);
+        unaggregatedColumns.push(`${dimensionSourceAlias}.${alias} as ${alias}`);
         dimensionsForSemiAdditiveRemap.push(d);
       });
     } else {
