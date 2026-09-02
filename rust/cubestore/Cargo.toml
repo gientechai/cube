@@ -9,6 +9,8 @@ members = [
     "cuberpc",
     "cuberockstore",
 ]
+# Vendored dependency trees must not join the workspace.
+exclude = ["vendor"]
 
 [profile.bench]
 debug = true

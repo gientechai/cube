@@ -667,7 +667,6 @@ checksum = "ace50bade8e6234aa140d9a2f552bbee1db4d353f69b8217bc503490fc1a9f26"
 [[package]]
 name = "aws-creds"
 version = "0.38.0"
-source = "git+https://github.com/cube-js/rust-s3.git?rev=c662b9c66c2929da185c46084fc5f455030ad75f#c662b9c66c2929da185c46084fc5f455030ad75f"
 dependencies = [
  "attohttpc",
  "home",
@@ -5849,7 +5848,6 @@ dependencies = [
 [[package]]
 name = "rust-s3"
 version = "0.32.3"
-source = "git+https://github.com/cube-js/rust-s3.git?rev=c662b9c66c2929da185c46084fc5f455030ad75f#c662b9c66c2929da185c46084fc5f455030ad75f"
 dependencies = [
  "async-trait",
  "aws-creds",

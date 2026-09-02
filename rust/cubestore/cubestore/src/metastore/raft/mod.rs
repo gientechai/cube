@@ -161,12 +161,25 @@ pub async fn write_via_raft(
 
     for attempt in 0..=RETRIES {
         match app.client_write(container.clone()).await {
-            Ok(resp) => return Ok(resp),
+            Ok(resp) => {
+                // Wait until THIS node applied the committed entry. Raft commit
+                // (quorum replication) returns before the local state machine
+                // applies, and callers read back what they wrote (e.g. job
+                // scheduling immediately after CREATE TABLE) — without this
+                // wait those reads hit the pre-write state (e2e-verified:
+                // "Row with id 1 is not found for TableRocksTable").
+                let index = resp.log_id.index;
+                wait_local_applied(app, index).await?;
+                return Ok(resp)
+            }
             Err(openraft::error::RaftError::APIError(
                 openraft::error::ClientWriteError::ForwardToLeader(f),
             )) => {
                 if let Some(node) = f.leader_node {
-                    return forward_write_to_leader(&node, container).await;
+                    let resp = forward_write_to_leader(&node, container).await?;
+                    let index = resp.log_id.index;
+                    wait_local_applied(app, index).await?;
+                    return Ok(resp);
                 }
                 tracing::info!(
                     node_id = app.id,
@@ -185,6 +198,28 @@ pub async fn write_via_raft(
         RETRIES,
         RETRIES as u64 * RETRY_INTERVAL_MS / 1000
     )))
+}
+
+async fn wait_local_applied(app: &Arc<App>, index: u64) -> Result<(), crate::CubeError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let applied = app
+            .raft
+            .metrics()
+            .borrow()
+            .last_applied
+            .map(|l| l.index)
+            .unwrap_or(0);
+        if applied >= index {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(crate::CubeError::internal(format!(
+                "Raft apply lag: index {index} not applied locally within 10s (applied={applied})"
+            )));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
 }
 
 async fn forward_write_to_leader(
