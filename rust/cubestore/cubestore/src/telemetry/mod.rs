@@ -355,7 +355,20 @@ pub async fn track_event(event: String, properties: HashMap<String, String>) {
 }
 
 pub fn track_event_spawn(event: String, properties: HashMap<String, String>) {
-    cube_ext::spawn(async move { SENDER.track_event(event, properties).await });
+    // ReportingLogger calls this for every error-level log, including from plain
+    // OS threads without a tokio context (e.g. the RocksStoreRWLoop write-error
+    // log). tokio::spawn panics there ("there is no reactor running"), which
+    // would take down the logging thread — drop the telemetry event instead.
+    let event_name = event.clone();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        cube_ext::spawn(async move { SENDER.track_event(event, properties).await });
+    }));
+    if res.is_err() {
+        eprintln!(
+            "telemetry: dropped event '{}' (caller thread has no tokio runtime)",
+            event_name
+        );
+    }
 }
 
 pub fn agent_event_spawn(event: String, properties: Map<String, Value>) {
