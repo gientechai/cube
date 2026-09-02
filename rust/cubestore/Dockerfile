@@ -21,14 +21,17 @@ RUN mkdir -p cubestore/src/bin && \
     echo "fn main() {print!(\"Dummy bench\");} // dummy file" > cubestore/src/bin/raft-bench.rs
 
 ARG WITH_AVX2=1
+# Parallel linker jobs; lower on memory-constrained builders (Docker Desktop,
+# 7GB CI runners) — cubestore's final link needs several GB per job.
+ARG BUILD_JOBS=8
 RUN [ "$WITH_AVX2" -eq "1" ] && export RUSTFLAGS="-C target-feature=+avx2"; \
-    cargo build --release -p cubestore
+    cargo build --release -j "$BUILD_JOBS" -p cubestore
 
 # Cube Store get version from his own package
 COPY cubestore/package.json package.json
 COPY cubestore/cubestore cubestore
 RUN [ "$WITH_AVX2" -eq "1" ] && export RUSTFLAGS="-C target-feature=+avx2"; \
-    cargo build --release -p cubestore
+    cargo build --release -j "$BUILD_JOBS" -p cubestore
 
 FROM debian:bookworm-slim
 
