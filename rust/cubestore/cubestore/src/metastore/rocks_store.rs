@@ -954,6 +954,9 @@ pub struct RocksStore {
     /// (see BatchPipe::batch_write_rows). Set after construction, once the
     /// Raft App is built in configure_meta_store (App depends on this store's DB).
     pub(crate) raft_app: Arc<Mutex<Option<Arc<crate::metastore::raft::App>>>>,
+    /// Live Raft metrics watch receiver, installed together with the Raft App.
+    /// Read via `raft_metrics_snapshot()` (e.g. by the /raftz status probe).
+    pub(crate) raft_metrics: Arc<Mutex<Option<crate::metastore::raft::RaftMetricsChannel>>>,
 }
 
 pub fn check_if_exists(name: &String, existing_keys_len: usize) -> Result<(), CubeError> {
@@ -1008,6 +1011,7 @@ impl RocksStore {
             rw_loop_default_cf: RocksStoreRWLoop::new("metastore", "default"),
             details,
             raft_app: Arc::new(Mutex::new(None)),
+            raft_metrics: Arc::new(Mutex::new(None)),
         };
 
         Ok(meta_store)
@@ -1016,7 +1020,20 @@ impl RocksStore {
     /// PoC Day 4 step 6 wiring: install the Raft App so subsequent writes route
     /// through Raft (BatchPipe::with_raft_app). Called once the App is constructed.
     pub fn set_raft_app(self: &Arc<Self>, app: Arc<crate::metastore::raft::App>) {
+        *self.raft_metrics.lock().unwrap() = Some(app.raft.metrics());
         *self.raft_app.lock().unwrap() = Some(app);
+    }
+
+    /// Current Raft metrics snapshot, or None when the Raft backend is not
+    /// enabled on this node.
+    pub fn raft_metrics_snapshot(
+        &self,
+    ) -> Option<openraft::metrics::RaftMetrics<crate::metastore::raft::NodeId, crate::metastore::raft::Node>> {
+        self.raft_metrics
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|rx| rx.borrow().clone())
     }
 
     pub fn new(
