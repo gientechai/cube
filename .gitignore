@@ -28,3 +28,4 @@ rust/cubesql/profile.json
 gen
 /cubejs
 .npmrc
+rustc-ice-*.txt
