@@ -12,6 +12,9 @@
 
 use std::fmt::Display;
 use std::io::Cursor;
+use std::sync::Arc;
+
+use self::raft::RaftServiceClientStub;
 
 use openraft::Raft;
 use serde::Deserialize;
@@ -72,7 +75,138 @@ pub use network::{Network, NetworkConnection};
 pub use raft::RaftService;
 pub use state_machine::StateMachineStore;
 
-// TODO(PoC Day 4 remaining):
-//   - rocks_store.rs hook: branch in BatchPipe::batch_write_rows to route via Raft when enabled.
-//   - config/mod.rs hook:  add `rocksdb-raft` branch in configure_meta_store.
-//   - node startup:        construct App + Raft at router init, serve toy_rpc WebSocket.
+/// Parse static cluster membership from `CUBESTORE_RAFT_NODES`, e.g.
+/// `1@10.0.0.1:22001,2@10.0.0.2:22001,3@10.0.0.3:22001`. Each entry is
+/// `node_id@rpc_addr`. `api_addr` is filled with `rpc_addr` — it is only
+/// consumed by ForwardToLeader responses, which are not wired up yet.
+pub fn parse_raft_members(spec: &str) -> Result<std::collections::BTreeMap<NodeId, Node>, String> {
+    let mut nodes = std::collections::BTreeMap::new();
+    for entry in spec.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let (id, rpc) = entry.split_once('@').ok_or_else(|| {
+            format!("invalid CUBESTORE_RAFT_NODES entry '{entry}' (expected 'node_id@host:port')")
+        })?;
+        let id: NodeId = id
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid node id '{id}' in CUBESTORE_RAFT_NODES entry '{entry}'"))?;
+        let rpc = rpc.trim().to_string();
+        if rpc.is_empty() {
+            return Err(format!("empty rpc addr in CUBESTORE_RAFT_NODES entry '{entry}'"));
+        }
+        nodes.insert(id, Node { rpc_addr: rpc.clone(), api_addr: rpc });
+    }
+    if nodes.is_empty() {
+        return Err("CUBESTORE_RAFT_NODES is set but contains no members".to_string());
+    }
+    Ok(nodes)
+}
+
+/// Idempotent cluster bootstrap (v4 Phase P1).
+///
+/// With `CUBESTORE_RAFT_NODES` unset this bootstraps a single-node cluster.
+/// With it set, every node attempts to bootstrap the same static voter set:
+/// the first node to start wins; the others get `InitializeError::NotAllowed`
+/// and simply join as members of the already-formed cluster.
+///
+/// Mismatched `CUBESTORE_RAFT_NODES` values across nodes are an operator
+/// error and can form two independent clusters — they are not detected here.
+pub async fn bootstrap_cluster(app: &App) -> Result<(), crate::CubeError> {
+    let members = match std::env::var("CUBESTORE_RAFT_NODES") {
+        Ok(spec) => parse_raft_members(&spec).map_err(crate::CubeError::internal)?,
+        Err(_) => {
+            let mut nodes = std::collections::BTreeMap::new();
+            nodes.insert(
+                app.id,
+                Node { rpc_addr: app.rpc_addr.clone(), api_addr: app.api_addr.clone() },
+            );
+            nodes
+        }
+    };
+
+    match app.initialize_with(members).await {
+        Ok(()) => tracing::info!(node_id = app.id, "Raft cluster bootstrapped"),
+        Err(openraft::error::RaftError::APIError(
+            openraft::error::InitializeError::NotAllowed(_),
+        )) => tracing::info!(node_id = app.id, "Raft cluster already initialized; joining as member"),
+        Err(e) => return Err(crate::CubeError::internal(format!("Raft initialize failed: {e:?}"))),
+    }
+    Ok(())
+}
+
+/// Propose a metastore WriteBatch through Raft, with ForwardToLeader handling
+/// and cold-start tolerance (v4 §3.1, P2):
+///
+/// - If this node is the leader, the write commits via local `client_write`.
+/// - If another node is the leader (`ForwardToLeader` with a known node), the
+///   batch is replayed on the leader over toy_rpc (`RaftService::client_write`),
+///   so writes accepted by any router eventually commit.
+/// - While no leader is elected yet (e.g. cluster cold start), the write is
+///   retried for a bounded window — Raft elections complete in well under a
+///   second, but process startup ordering is not guaranteed.
+pub async fn write_via_raft(
+    app: &Arc<App>,
+    container: WriteBatchContainer,
+) -> Result<openraft::raft::ClientWriteResponse<CubeStoreRaftTypeConfig>, crate::CubeError> {
+    const RETRIES: usize = 60;
+    const RETRY_INTERVAL_MS: u64 = 200;
+
+    for attempt in 0..=RETRIES {
+        match app.client_write(container.clone()).await {
+            Ok(resp) => return Ok(resp),
+            Err(openraft::error::RaftError::APIError(
+                openraft::error::ClientWriteError::ForwardToLeader(f),
+            )) => {
+                if let Some(node) = f.leader_node {
+                    return forward_write_to_leader(&node, container).await;
+                }
+                tracing::info!(
+                    node_id = app.id,
+                    attempt,
+                    "Raft write deferred: no leader elected yet, retrying"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(RETRY_INTERVAL_MS)).await;
+            }
+            Err(e) => {
+                return Err(crate::CubeError::internal(format!("Raft client_write failed: {e:?}")))
+            }
+        }
+    }
+    Err(crate::CubeError::internal(format!(
+        "Raft client_write: no leader elected after {} retries (~{}s)",
+        RETRIES,
+        RETRIES as u64 * RETRY_INTERVAL_MS / 1000
+    )))
+}
+
+async fn forward_write_to_leader(
+    node: &Node,
+    container: WriteBatchContainer,
+) -> Result<openraft::raft::ClientWriteResponse<CubeStoreRaftTypeConfig>, crate::CubeError> {
+    let addr = format!("ws://{}", node.rpc_addr);
+    let client = toy_rpc::Client::dial_websocket(&addr).await.map_err(|e| {
+        crate::CubeError::internal(format!(
+            "Raft forward: dial leader {} failed: {e:?}",
+            node.rpc_addr
+        ))
+    })?;
+    let raft = client.raft_service();
+    raft.client_write(container).await.map_err(|e| {
+        crate::CubeError::internal(format!(
+            "Raft forward: write via leader {} failed: {e:?}",
+            node.rpc_addr
+        ))
+    })
+}
+
+// Remaining HA work (beyond the P0 PoC and the P1 wiring above):
+//   - P2: ForwardToLeader handling in BatchPipe::batch_write_rows so writes
+//     accepted by a follower are forwarded to the leader (v4 §3.1).
+//   - P2: MetaStoreEvent fan-out — WriteBatchContainer should carry event
+//     metadata so state_machine::apply can fire events on followers too.
+//   - P4: snapshot persistence (RocksDB Checkpoint + upload_check_point)
+//     instead of the in-memory JSON dump; get_current_snapshot returns None.
+//   - P4: Raft metrics exposure (raft.metrics() → /metrics, v4 §8).

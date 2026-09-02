@@ -679,13 +679,24 @@ impl<'a, S> BatchPipe<'a, S> {
             let mut container = WriteBatchContainer::new();
             self.write_batch.iterate(&mut container);
 
-            // Bridge sync write_operation → async client_write. write_operation runs on
-            // the RocksStoreRWLoop's dedicated OS thread, where Handle::current() panics;
-            // use the Handle captured in App (set at router init) instead.
+            // Bridge sync write_operation → async write_via_raft. write_operation runs on
+            // the RocksStoreRWLoop's dedicated OS thread; running the future inline via
+            // Handle::block_on there breaks for futures that reach tokio::spawn or need
+            // a full reactor context (e2e-verified: cube_ext::spawn panics with
+            // "there is no reactor running" once Raft replication does network IO to
+            // followers). Instead, spawn the write onto the captured runtime — the task
+            // runs on a worker thread with full context — and block the RWLoop on a
+            // plain sync channel until the Raft commit (or leader forward) lands.
             let handle = app.tokio_handle.clone();
-            handle
-                .block_on(async move { app.client_write(container).await })
-                .map_err(|e| CubeError::internal(format!("Raft client_write failed: {e:?}")))?;
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), CubeError>>(1);
+            handle.spawn(async move {
+                let res = crate::metastore::raft::write_via_raft(&app, container)
+                    .await
+                    .map(|_| ());
+                let _ = tx.send(res);
+            });
+            rx.recv()
+                .map_err(|e| CubeError::internal(format!("Raft client_write channel closed: {e:?}")))??;
         } else {
             let db = self.db;
             db.write(self.write_batch)?;
