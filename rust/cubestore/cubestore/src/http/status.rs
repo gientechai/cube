@@ -35,25 +35,44 @@ pub fn serve_status_probes(c: &Config) {
         let p = p.clone();
         warp::path!("raftz")
             .and(warp::method())
-            .and_then(move |method: warp::http::Method| {
-                let p = p.clone();
-                async move {
-                    let result: Result<warp::reply::Response, Infallible> = match method.as_str() {
-                        "GET" => Ok(p.raft_status_reply().await),
-                        "POST" => Ok(p.raft_trigger_snapshot().await),
-                        _ => Ok(warp::reply::with_status(
-                            "method not allowed".to_string(),
-                            warp::http::StatusCode::METHOD_NOT_ALLOWED,
-                        )
-                        .into_response()),
-                    };
-                    result
-                }
-            })
+            .and(warp::body::bytes())
+            .and_then(
+                move |method: warp::http::Method,
+                      body: warp::hyper::body::Bytes| {
+                    let p = p.clone();
+                    async move {
+                        let req: Option<serde_json::Value> = if body.is_empty() {
+                            None
+                        } else {
+                            serde_json::from_slice(&body).ok()
+                        };
+                        let result: Result<warp::reply::Response, Infallible> = match method.as_str() {
+                            "GET" => Ok(p.raft_status_reply().await),
+                            "POST" => match req {
+                                None => Ok(p.raft_trigger_snapshot().await),
+                                Some(req) => Ok(p.raft_membership_action(req).await),
+                            },
+                            _ => Ok(warp::reply::with_status(
+                                "method not allowed".to_string(),
+                                warp::http::StatusCode::METHOD_NOT_ALLOWED,
+                            )
+                            .into_response()),
+                        };
+                        result
+                    }
+                },
+            )
+    };
+    let metrics = {
+        let p = p.clone();
+        warp::path!("metrics").and_then(move || {
+            let p = p.clone();
+            async move { Ok::<_, Infallible>(p.raft_metrics_reply().await) }
+        })
     };
 
     let addr: SocketAddr = addr.parse().expect("cannot parse status probe address");
-    match warp::serve(l.or(r).or(rf)).try_bind_ephemeral(addr) {
+    match warp::serve(l.or(r).or(rf).or(metrics)).try_bind_ephemeral(addr) {
         Ok((addr, f)) => {
             log::info!("Serving status probes at {}", addr);
             tokio::spawn(f);
@@ -77,6 +96,72 @@ pub fn status_probe_reply(probe: &str, r: Result<(), CubeError>) -> Result<Statu
 #[derive(Clone)]
 struct RouterProbes {
     services: Arc<Injector>,
+}
+
+/// Membership action execution for POST /raftz (see RouterProbes::raft_membership_action).
+async fn raft_membership_action_impl(
+    app: &std::sync::Arc<crate::metastore::raft::App>,
+    req: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let action = req.get("action").and_then(|a| a.as_str()).unwrap_or("");
+    match action {
+        "add_learner" => {
+            let id = req.get("id").and_then(|v| v.as_u64()).ok_or("missing 'id'")?;
+            let rpc_addr = req
+                .get("rpc_addr")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'rpc_addr'")?
+                .to_string();
+            app.raft
+                .add_learner(
+                    id,
+                    crate::metastore::raft::Node { rpc_addr: rpc_addr.clone(), api_addr: rpc_addr },
+                    true,
+                )
+                .await
+                .map(|_| serde_json::json!({"added_learner": id}))
+                .map_err(|e| format!("{:?}", e))
+        }
+        "change_membership" => {
+            let members: Vec<u64> = req
+                .get("members")
+                .and_then(|v| v.as_array())
+                .ok_or("missing 'members' array")?
+                .iter()
+                .filter_map(|v| v.as_u64())
+                .collect();
+            app.raft
+                .change_membership(members.clone(), true)
+                .await
+                .map(|_| serde_json::json!({"membership": members}))
+                .map_err(|e| format!("{:?}", e))
+        }
+        "remove_member" => {
+            let id = req.get("id").and_then(|v| v.as_u64()).ok_or("missing 'id'")?;
+            let current: Vec<u64> = app
+                .raft
+                .metrics()
+                .borrow()
+                .membership_config
+                .membership()
+                .nodes()
+                .map(|(k, _)| *k)
+                .collect();
+            let remaining: Vec<u64> = current.iter().copied().filter(|x| *x != id).collect();
+            if remaining.len() == current.len() {
+                Err(format!("node {id} is not a member"))
+            } else if remaining.is_empty() {
+                Err("cannot remove the last member".to_string())
+            } else {
+                app.raft
+                    .change_membership(remaining.clone(), true)
+                    .await
+                    .map(|_| serde_json::json!({"removed": id, "membership": remaining}))
+                    .map_err(|e| format!("{:?}", e))
+            }
+        }
+        other => Err(format!("unknown action '{other}'")),
+    }
 }
 
 impl RouterProbes {
@@ -184,5 +269,68 @@ impl RouterProbes {
             }
         };
         warp::reply::with_status(body, code).into_response()
+    }
+
+    /// POST /raftz with a JSON body — dynamic membership management
+    /// (v4 runbooks RB-1 add node / RB-2 remove node):
+    ///   {"action":"add_learner","id":4,"rpc_addr":"10.0.0.4:22001"}
+    ///   {"action":"change_membership","members":[1,2,3,4]}
+    ///   {"action":"remove_member","id":2}
+    /// All operations must be issued to the leader.
+    pub async fn raft_membership_action(&self, req: serde_json::Value) -> warp::reply::Response {
+        let m = self.services.try_get_service_typed::<RocksMetaStore>().await;
+        let app = m.as_ref().and_then(|m| m.store().raft_app_snapshot());
+        let (code, body) = match app {
+            None => (
+                warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                serde_json::json!({"enabled": false}).to_string(),
+            ),
+            Some(app) => match raft_membership_action_impl(&app, &req).await {
+                Ok(v) => (warp::http::StatusCode::OK, v.to_string()),
+                Err(e) => (
+                    warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({"error": e}).to_string(),
+                ),
+            },
+        };
+        warp::reply::with_status(body, code).into_response()
+    }
+
+    /// Prometheus text-format exposition of Raft metrics (v4 §8): node state,
+    /// leadership, term, log/apply positions and local apply lag.
+    pub async fn raft_metrics_reply(&self) -> warp::reply::Response {
+        let m = self
+            .services
+            .try_get_service_typed::<RocksMetaStore>()
+            .await
+            .and_then(|m| m.store().raft_metrics_snapshot());
+        let body = match m {
+            None => "# cubestore_raft_enabled 0\n".to_string(),
+            Some(m) => {
+                let is_leader = usize::from(m.current_leader == Some(m.id));
+                let state = format!("{:?}", m.state);
+                let last_log = m.last_log_index.unwrap_or(0);
+                let last_applied = m.last_applied.map(|l| l.index).unwrap_or(0);
+                format!(
+                    "# TYPE cubestore_raft_enabled gauge\ncubestore_raft_enabled 1\n\
+                     # TYPE cubestore_raft_is_leader gauge\ncubestore_raft_is_leader {is_leader}\n\
+                     # TYPE cubestore_raft_state gauge\ncubestore_raft_state{{state=\"{state}\"}} 1\n\
+                     # TYPE cubestore_raft_node gauge\ncubestore_raft_node {}\n\
+                     # TYPE cubestore_raft_leader gauge\ncubestore_raft_leader {}\n\
+                     # TYPE cubestore_raft_term gauge\ncubestore_raft_term {}\n\
+                     # TYPE cubestore_raft_last_log_index gauge\ncubestore_raft_last_log_index {last_log}\n\
+                     # TYPE cubestore_raft_last_applied gauge\ncubestore_raft_last_applied {last_applied}\n\
+                     # TYPE cubestore_raft_apply_lag gauge\ncubestore_raft_apply_lag {}\n\
+                     # TYPE cubestore_raft_running_state_ok gauge\ncubestore_raft_running_state_ok {}\n",
+                    m.id,
+                    m.current_leader.unwrap_or(0),
+                    m.current_term,
+                    last_log.saturating_sub(last_applied),
+                    usize::from(m.running_state.is_ok()),
+                )
+            }
+        };
+        warp::reply::with_status(body, warp::http::StatusCode::OK)
+            .into_response()
     }
 }
