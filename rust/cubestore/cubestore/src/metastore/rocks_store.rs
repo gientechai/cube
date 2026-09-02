@@ -977,6 +977,13 @@ pub struct RocksStore {
     pub(crate) raft_metrics: Arc<Mutex<Option<crate::metastore::raft::RaftMetricsChannel>>>,
 }
 
+fn env_bool_or_default(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(v) => v == "true" || v == "1",
+        Err(_) => default,
+    }
+}
+
 pub fn check_if_exists(name: &String, existing_keys_len: usize) -> Result<(), CubeError> {
     if existing_keys_len > 1 {
         let e = CubeError::user(format!(
@@ -1487,6 +1494,17 @@ impl RocksStore {
         F: for<'a> FnOnce(DbTableRef<'a>) -> Result<R, CubeError> + Send + Sync + 'static,
         R: Send + Sync + 'static,
     {
+        // v4 §3.2 leader linearizable reads via ReadIndex. Off by default:
+        // read-your-writes is already guaranteed by write_via_raft's local
+        // apply wait, and this adds a quorum round-trip per read on the
+        // leader. Enable for cross-session read-your-writes strictness.
+        if let Some(app) = self.raft_app_snapshot() {
+            if env_bool_or_default("CUBESTORE_RAFT_LINEARIZABLE_READS", false) {
+                if let Err(e) = app.raft.ensure_linearizable().await {
+                    log::warn!("Raft ensure_linearizable failed, serving possibly stale read: {:?}", e);
+                }
+            }
+        }
         self.read_operation_impl::<F, R>(&self.rw_loop_default_cf, op_name, f)
             .await
     }
