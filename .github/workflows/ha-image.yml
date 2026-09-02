@@ -58,6 +58,7 @@ jobs:
           # arm64 runners/qemu cannot use AVX2
           build-args: |
             ${{ matrix.platform == 'linux/arm64' && 'WITH_AVX2=0' || 'WITH_AVX2=1' }}
+            BUILD_JOBS=2
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
