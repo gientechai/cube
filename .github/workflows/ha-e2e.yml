@@ -1,0 +1,66 @@
+name: cubestore-ha-e2e
+
+# v4 §9 chaos regression as a CI gate: every push to the HA branch builds a
+# release cubestored, then runs scripts/ha-e2e.sh (3-node bootstrap, election,
+# /metrics, manual snapshot, kill -9 leader with <3s re-election SLO, RB-2
+# remove of the dead node, RB-1 add back, applied-index convergence) plus a
+# raft-bench smoke run.
+
+on:
+  push:
+    branches: [feature/openraft-metastore-poc]
+    paths:
+      - "rust/cubestore/**"
+      - ".github/workflows/ha-e2e.yml"
+  pull_request:
+    branches: [feature/openraft-metastore-poc]
+    paths:
+      - "rust/cubestore/**"
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ha-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: rust/cubestore
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/cubestore
+
+      - name: Build cubestored and raft-bench (release)
+        run: cargo build --release --bin cubestored --bin raft-bench
+
+      - name: HA chaos e2e (kill-leader SLO, membership ops)
+        run: ./scripts/ha-e2e.sh ./target/release/cubestored
+
+      - name: Raft bench smoke (plain vs raft3)
+        run: |
+          BENCH_MODE=plain BENCH_N=300 ./target/release/raft-bench | tee bench-plain.txt
+          BENCH_MODE=raft3  BENCH_N=300 ./target/release/raft-bench | tee bench-raft3.txt
+          # Regression guard: raft3 must sustain > 50 write QPS (peak metastore
+          # need is ~15 QPS; measured headroom on release builds is ~3000).
+          QPS=$(grep '^WRITE' bench-raft3.txt | sed -E 's/.*qps=([0-9]+).*/\1/')
+          echo "raft3 write QPS = $QPS"
+          if [ "$QPS" -lt 50 ]; then
+            echo "::error::raft3 write QPS regressed below 50 (got $QPS)"
+            exit 1
+          fi
+
+      - name: Upload bench results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: |
+            rust/cubestore/bench-plain.txt
+            rust/cubestore/bench-raft3.txt
