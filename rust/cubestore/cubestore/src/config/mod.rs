@@ -2557,6 +2557,9 @@ impl Config {
                             openraft::Config {
                                 heartbeat_interval: 250,
                                 election_timeout_min: 299,
+                                // Low-write metastore: snapshot every 1000 applied
+                                // entries to bound log growth and speed up joins.
+                                snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(1000),
                                 ..Default::default()
                             }
                             .validate()

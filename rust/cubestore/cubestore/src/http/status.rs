@@ -33,10 +33,23 @@ pub fn serve_status_probes(c: &Config) {
     });
     let rf = {
         let p = p.clone();
-        warp::path!("raftz").and_then(move || {
-            let p = p.clone();
-            async move { Ok::<_, Infallible>(p.raft_status_reply().await) }
-        })
+        warp::path!("raftz")
+            .and(warp::method())
+            .and_then(move |method: warp::http::Method| {
+                let p = p.clone();
+                async move {
+                    let result: Result<warp::reply::Response, Infallible> = match method.as_str() {
+                        "GET" => Ok(p.raft_status_reply().await),
+                        "POST" => Ok(p.raft_trigger_snapshot().await),
+                        _ => Ok(warp::reply::with_status(
+                            "method not allowed".to_string(),
+                            warp::http::StatusCode::METHOD_NOT_ALLOWED,
+                        )
+                        .into_response()),
+                    };
+                    result
+                }
+            })
     };
 
     let addr: SocketAddr = addr.parse().expect("cannot parse status probe address");
@@ -130,6 +143,45 @@ impl RouterProbes {
                 })
                 .to_string(),
             ),
+        };
+        warp::reply::with_status(body, code).into_response()
+    }
+
+    /// POST /raftz — manually trigger a Raft snapshot build on this node
+    /// (v4 runbook RB-4). Snapshots normally build automatically every
+    /// LogsSinceLast(1000) applied entries; the endpoint covers "snapshot
+    /// now" before maintenance or node replacement.
+    pub async fn raft_trigger_snapshot(&self) -> warp::reply::Response {
+        let m = self.services.try_get_service_typed::<RocksMetaStore>().await;
+        let app = m.as_ref().and_then(|m| m.store().raft_app_snapshot());
+        let (code, body) = match app {
+            None => (
+                warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                serde_json::json!({"enabled": false}).to_string(),
+            ),
+            Some(app) => {
+                // trigger_snapshot only builds on the leader; on followers it
+                // just updates the internal snapshot state — report which.
+                match app.raft.trigger().snapshot().await {
+                    Ok(()) => {
+                        let m = m.unwrap().store().raft_metrics_snapshot();
+                        (
+                            warp::http::StatusCode::OK,
+                            serde_json::json!({
+                                "triggered": true,
+                                "node": m.as_ref().map(|x| x.id),
+                                "is_leader": m.as_ref().map(|x| x.current_leader == Some(x.id)),
+                            })
+                            .to_string(),
+                        )
+                    }
+                    Err(e) => (
+                        warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        serde_json::json!({"triggered": false, "error": format!("{:?}", e)})
+                            .to_string(),
+                    ),
+                }
+            }
         };
         warp::reply::with_status(body, code).into_response()
     }

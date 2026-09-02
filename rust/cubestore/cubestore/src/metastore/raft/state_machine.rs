@@ -62,7 +62,13 @@ pub type Listeners = std::sync::Arc<
     tokio::sync::RwLock<Vec<tokio::sync::broadcast::Sender<crate::metastore::MetaStoreEvent>>>,
 >;
 
-/// On-disk snapshot representation (stored under the `raft_sm` key in `store` CF).
+/// Reserved key holding the persisted `StoredSnapshot` in the metastore
+/// default CF. Business keys are prefixed with a `TableId` (0x0100..0x1000),
+/// so a leading-`_` ASCII key never collides. Iterators that dump the CF for
+/// snapshotting must skip this key to avoid nesting snapshots.
+const SNAPSHOT_KEY: &[u8] = b"__raft_sm_snapshot__";
+
+/// On-disk snapshot representation, persisted under `SNAPSHOT_KEY`.
 /// The data blob is a serialized `Vec<(key, value)>` dump of the metastore default CF.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct StoredSnapshot {
@@ -72,10 +78,12 @@ struct StoredSnapshot {
 
 impl StateMachineStore {
     /// Construct with the metastore RocksDB handle and the RocksStore's event
-    /// listeners. If a prior Raft snapshot is persisted in the DB, the state
-    /// machine is restored from it.
+    /// listeners. Restores `last_applied`/`last_membership` from the persisted
+    /// snapshot meta when present, so a restarted node does not force Raft to
+    /// replay the entire log from index 0. The business data itself is already
+    /// in the DB — only the Raft positions are restored.
     pub async fn new(db: Arc<DB>, listeners: Listeners) -> Self {
-        let sm = Self {
+        let mut sm = Self {
             data: StateMachineData {
                 last_applied_log_id: None,
                 last_membership: Default::default(),
@@ -84,10 +92,54 @@ impl StateMachineStore {
             db,
             listeners,
         };
-        // TODO(PoC): restore last_applied/last_membership from persisted snapshot meta
-        // before returning. For the first-cut port we start clean; snapshot persistence
-        // is wired together with build_snapshot / install_snapshot below.
+        match sm.read_stored_snapshot() {
+            Ok(Some(stored)) => {
+                log::info!(
+                    "Raft state machine restored from persisted snapshot: last_applied={:?}",
+                    stored.meta.last_log_id
+                );
+                sm.data.last_applied_log_id = stored.meta.last_log_id;
+                sm.data.last_membership = stored.meta.last_membership.clone();
+            }
+            Ok(None) => {}
+            Err(e) => {
+                // A corrupt snapshot must not brick the node: fall back to full
+                // log replay, which rebuilds identical state.
+                log::warn!("Raft persisted snapshot unreadable, will replay log: {}", e);
+            }
+        }
         sm
+    }
+
+    fn read_stored_snapshot(&self) -> Result<Option<StoredSnapshot>, String> {
+        let bytes = self
+            .db
+            .get(SNAPSHOT_KEY)
+            .map_err(|e| format!("read {}: {e:?}", String::from_utf8_lossy(SNAPSHOT_KEY)))?;
+        match bytes {
+            None => Ok(None),
+            Some(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
+        }
+    }
+
+    fn write_stored_snapshot(&self, stored: &StoredSnapshot) -> Result<(), StorageError<NodeId>> {
+        // JSON, not flexbuffers: SnapshotMeta carries StoredMembership with a
+        // BTreeMap<NodeId, Node>, and flexbuffers map keys must be strings
+        // (e2e-verified KeyMustBeString, which fatally shuts down RaftCore).
+        let bytes = serde_json::to_vec(stored).map_err(|e| StorageError::IO {
+            source: StorageIOError::write_state_machine(&e),
+        })?;
+        self.db.put(SNAPSHOT_KEY, bytes).map_err(|e| StorageError::IO {
+            source: StorageIOError::write_state_machine(&e),
+        })
+    }
+
+    fn snapshot_from_stored(stored: StoredSnapshot) -> Snapshot<CubeStoreRaftTypeConfig> {
+        let SnapshotMeta { last_log_id, last_membership, snapshot_id } = stored.meta.clone();
+        Snapshot {
+            meta: SnapshotMeta { last_log_id, last_membership, snapshot_id },
+            snapshot: Box::new(Cursor::new(stored.data)),
+        }
     }
 }
 
@@ -96,7 +148,8 @@ impl RaftSnapshotBuilder<CubeStoreRaftTypeConfig> for StateMachineStore {
         let last_applied_log = self.data.last_applied_log_id;
         let last_membership = self.data.last_membership.clone();
 
-        // Dump the entire metastore default CF as (key, value) pairs.
+        // Dump the entire metastore default CF as (key, value) pairs, skipping
+        // the reserved snapshot key so snapshots do not nest.
         // PoC: acceptable for small metastore; production should use RocksDB
         // Checkpoint (cube already has upload_check_point machinery).
         let mut kvs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
@@ -105,6 +158,9 @@ impl RaftSnapshotBuilder<CubeStoreRaftTypeConfig> for StateMachineStore {
             let (k, v) = item.map_err(|e| StorageError::IO {
                 source: StorageIOError::read_state_machine(&e),
             })?;
+            if k.as_ref() == SNAPSHOT_KEY {
+                continue;
+            }
             kvs.push((k.to_vec(), v.to_vec()));
         }
         let data_bytes =
@@ -117,8 +173,18 @@ impl RaftSnapshotBuilder<CubeStoreRaftTypeConfig> for StateMachineStore {
         };
 
         let meta = SnapshotMeta { last_log_id: last_applied_log, last_membership, snapshot_id };
+        let stored = StoredSnapshot { meta: meta.clone(), data: data_bytes };
+        // Persist BEFORE handing the snapshot to Raft: if we crash after Raft
+        // records the snapshot log position, the on-disk copy must already
+        // exist for restart recovery.
+        self.write_stored_snapshot(&stored)?;
+        log::info!(
+            "Raft snapshot built and persisted: id={}, {} kv pairs",
+            meta.snapshot_id,
+            kvs.len()
+        );
 
-        Ok(Snapshot { meta, snapshot: Box::new(Cursor::new(data_bytes)) })
+        Ok(Self::snapshot_from_stored(stored))
     }
 }
 
@@ -152,19 +218,21 @@ impl RaftStateMachine<CubeStoreRaftTypeConfig> for StateMachineStore {
                     })?;
 
                     // Follower event fan-out (v4): fire the originating write's
-                    // MetaStoreEvents on THIS node so local cluster components
-                    // (job runner, partition scheduling, schema invalidation)
-                    // observe replicated changes. Notification failures (e.g. a
-                    // listener with no receivers) must not fail the apply.
-                    if !wb.events.is_empty() {
-                        let count = wb.events.len();
+                    // MetaStoreEvents (JSON-encoded in the batch) on THIS node
+                    // so local cluster components (job runner, partition
+                    // scheduling, schema invalidation) observe replicated
+                    // changes. Notification failures (e.g. a listener with no
+                    // receivers) must not fail the apply.
+                    let events = wb.decode_events();
+                    if !events.is_empty() {
+                        let count = events.len();
                         let listeners = self.listeners.read().await;
                         for listener in listeners.iter() {
-                            for event in wb.events.iter() {
+                            for event in events.iter() {
                                 let _ = listener.send(event.clone());
                             }
                         }
-                        tracing::info!("Raft apply: fired {} MetaStoreEvents on this node", count);
+                        log::info!("Raft apply: fired {} MetaStoreEvents on this node", count);
                     }
                 }
                 EntryPayload::Membership(mem) => {
@@ -199,6 +267,7 @@ impl RaftStateMachine<CubeStoreRaftTypeConfig> for StateMachineStore {
 
         // Atomically swap metastore default CF to the snapshot contents:
         // collect existing keys, then ONE WriteBatch: delete all old + put all new.
+        // The delete pass also clears SNAPSHOT_KEY, which is rewritten below.
         let mut batch = rocksdb::WriteBatch::default();
         let iter = self.db.iterator(rocksdb::IteratorMode::Start);
         for item in iter {
@@ -213,11 +282,20 @@ impl RaftStateMachine<CubeStoreRaftTypeConfig> for StateMachineStore {
         self.db.write(batch).map_err(|e| StorageError::IO {
             source: StorageIOError::write_state_machine(&e),
         })?;
+
+        // Persist the installed snapshot so a subsequent restart restores from
+        // the installed position instead of replaying the log.
+        self.write_stored_snapshot(&StoredSnapshot { meta: meta.clone(), data: bytes })?;
         Ok(())
     }
 
     async fn get_current_snapshot(&mut self) -> Result<Option<Snapshot<CubeStoreRaftTypeConfig>>, StorageError<NodeId>> {
-        // PoC: build on demand; we do not yet persist snapshot meta in the DB.
-        Ok(None)
+        match self.read_stored_snapshot() {
+            Ok(Some(stored)) => Ok(Some(Self::snapshot_from_stored(stored))),
+            Ok(None) => Ok(None),
+            // Unreadable persisted snapshot: report none; Raft falls back to
+            // log replication for lagging nodes.
+            Err(_) => Ok(None),
+        }
     }
 }
