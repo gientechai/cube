@@ -1,0 +1,85 @@
+# Cube Store HA deployment unit (v4 P3 minimal slice).
+#
+# Topology (verified locally and in e2e):
+#   3 × cubestored  — rocksdb-raft metastore cluster + S3-backed data plane,
+#                     each node a self-contained router+worker (CUBESTORE_WORKERS
+#                     lists only itself; files live in S3 so any node can serve).
+#   1 × haproxy     — VIP for cube.js clients; /readyz health checks on :3031.
+#
+# Required before `docker compose up`:
+#   - Build & push the cubestore image from this branch, set CUBESTORE_IMAGE.
+#   - Provide an S3 bucket (Garage/MinIO/SeaweedFS or AWS) and fill the S3_*
+#     variables below.
+#
+# cube.js side (zero code change):
+#   CUBEJS_CUBESTORE_HOST=cubestore-lb
+#   CUBEJS_CUBESTORE_PORT=3030
+
+x-cubestore-common: &cubestore-common
+  image: ${CUBESTORE_IMAGE:-ghcr.io/gientechai/cube-cubestore:ha-poc}
+  restart: unless-stopped
+  environment: &cubestore-env
+    # ── Cube Store identity: unique name, self-worker ──
+    CUBESTORE_SERVER_NAME: n1            # overridden per service
+    CUBESTORE_WORKERS: n1                # overridden per service
+    # ── HA: rocksdb-raft metastore, static 3-member cluster ──
+    CUBESTORE_METASTORE_BACKEND: rocksdb-raft
+    CUBESTORE_RAFT_NODES: "cubestore-n1:22001,cubestore-n2:22001,cubestore-n3:22001"
+    # ── Data plane: shared S3 bucket ──
+    CUBESTORE_MINIO_BUCKET: ${S3_BUCKET:-cubestore}
+    CUBESTORE_MINIO_ACCESS_KEY_ID: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY}
+    CUBESTORE_MINIO_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY}
+    CUBESTORE_MINIO_SERVER_ENDPOINT: ${S3_ENDPOINT:?set S3_ENDPOINT}
+    CUBESTORE_MINIO_REGION: ${S3_REGION:-garage}
+    # Optional: cross-session read-your-writes on the leader (quorum RTT per read)
+    CUBESTORE_RAFT_LINEARIZABLE_READS: "false"
+
+services:
+  cubestore-n1:
+    <<: *cubestore-common
+    environment:
+      <<: *cubestore-env
+      CUBESTORE_SERVER_NAME: n1
+      CUBESTORE_WORKERS: n1
+      CUBESTORE_RAFT_NODE_ID: "1"
+      CUBESTORE_RAFT_RPC_ADDR: "cubestore-n1:22001"
+    volumes:
+      - n1-data:/cube/data
+    ports:
+      - "127.0.0.1:3031:3031"   # status probes (ops only; optional)
+
+  cubestore-n2:
+    <<: *cubestore-common
+    environment:
+      <<: *cubestore-env
+      CUBESTORE_SERVER_NAME: n2
+      CUBESTORE_WORKERS: n2
+      CUBESTORE_RAFT_NODE_ID: "2"
+      CUBESTORE_RAFT_RPC_ADDR: "cubestore-n2:22001"
+    volumes:
+      - n2-data:/cube/data
+
+  cubestore-n3:
+    <<: *cubestore-common
+    environment:
+      <<: *cubestore-env
+      CUBESTORE_SERVER_NAME: n3
+      CUBESTORE_WORKERS: n3
+      CUBESTORE_RAFT_NODE_ID: "3"
+      CUBESTORE_RAFT_RPC_ADDR: "cubestore-n3:22001"
+    volumes:
+      - n3-data:/cube/data
+
+  cubestore-lb:
+    image: haproxy:2.9
+    restart: unless-stopped
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      - "3030:3030"   # cube.js clients connect here (ws upgrade + http)
+      - "9600:9600"   # haproxy stats
+
+volumes:
+  n1-data:
+  n2-data:
+  n3-data:
