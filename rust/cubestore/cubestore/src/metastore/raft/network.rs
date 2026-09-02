@@ -56,6 +56,15 @@ impl NetworkConnection {
             .as_ref()
             .ok_or_else(|| RPCError::Network(NetworkError::from(AnyError::default())))
     }
+
+    /// Drop the cached connection so the next RPC re-dials. Called on every
+    /// RPC error: a restarted peer leaves us holding a dead WebSocket that
+    /// never comes back on its own (e2e-verified: a rejoined node with a
+    /// higher term stays Candidate forever because the leader keeps failing
+    /// over the stale socket and never learns the new term).
+    fn reset(&mut self) {
+        self.client = None;
+    }
 }
 
 #[derive(Debug)]
@@ -99,7 +108,11 @@ impl RaftNetwork<CubeStoreRaftTypeConfig> for NetworkConnection {
     ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, Node, RaftError<NodeId>>> {
         let c = self.c().await?;
         let raft = c.raft_service();
-        raft.append(req).await.map_err(|e| to_error(e, self.target))
+        let res = raft.append(req).await;
+        if res.is_err() {
+            self.reset();
+        }
+        res.map_err(|e| to_error(e, self.target))
     }
 
     async fn install_snapshot(
@@ -108,7 +121,11 @@ impl RaftNetwork<CubeStoreRaftTypeConfig> for NetworkConnection {
         _option: RPCOption,
     ) -> Result<InstallSnapshotResponse<NodeId>, RPCError<NodeId, Node, RaftError<NodeId, InstallSnapshotError>>>
     {
-        self.c().await?.raft_service().snapshot(req).await.map_err(|e| to_error(e, self.target))
+        let res = self.c().await?.raft_service().snapshot(req).await;
+        if res.is_err() {
+            self.reset();
+        }
+        res.map_err(|e| to_error(e, self.target))
     }
 
     async fn vote(
@@ -116,6 +133,10 @@ impl RaftNetwork<CubeStoreRaftTypeConfig> for NetworkConnection {
         req: VoteRequest<NodeId>,
         _option: RPCOption,
     ) -> Result<VoteResponse<NodeId>, RPCError<NodeId, Node, RaftError<NodeId>>> {
-        self.c().await?.raft_service().vote(req).await.map_err(|e| to_error(e, self.target))
+        let res = self.c().await?.raft_service().vote(req).await;
+        if res.is_err() {
+            self.reset();
+        }
+        res.map_err(|e| to_error(e, self.target))
     }
 }
