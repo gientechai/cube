@@ -12,7 +12,7 @@ use openraft::raft::VoteResponse;
 use toy_rpc::macros::export_impl;
 
 use crate::metastore::raft::app::App;
-use crate::metastore::raft::CubeStoreRaftTypeConfig;
+use crate::metastore::raft::{CubeStoreRaftTypeConfig, Request};
 
 /// Raft protocol service served over toy_rpc (WebSocket).
 pub struct RaftService {
@@ -46,5 +46,16 @@ impl RaftService {
         req: InstallSnapshotRequest<CubeStoreRaftTypeConfig>,
     ) -> Result<InstallSnapshotResponse<u64>, toy_rpc::Error> {
         self.app.raft.install_snapshot(req).await.map_err(|e| toy_rpc::Error::Internal(Box::new(e)))
+    }
+
+    /// Write endpoint used for ForwardToLeader handling (v4 §3.1): a follower
+    /// that accepted a metastore write replays the batch here, on the leader,
+    /// so every router can serve writes.
+    #[export_method]
+    pub async fn client_write(
+        &self,
+        req: Request,
+    ) -> Result<openraft::raft::ClientWriteResponse<CubeStoreRaftTypeConfig>, toy_rpc::Error> {
+        self.app.client_write(req).await.map_err(|e| toy_rpc::Error::Internal(Box::new(e)))
     }
 }

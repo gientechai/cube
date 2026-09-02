@@ -2473,9 +2473,11 @@ impl Config {
         let raft_backend = env::var("CUBESTORE_METASTORE_BACKEND").ok().as_deref() == Some("rocksdb-raft");
         if raft_backend {
             tracing::warn!(
-                "CUBESTORE_METASTORE_BACKEND=rocksdb-raft requested; full wiring is not yet \
-                 implemented (step-5 BatchPipe hook is in place). Falling back to local RocksDB \
-                 metastore for this run."
+                "CUBESTORE_METASTORE_BACKEND=rocksdb-raft: experimental OpenRaft metastore \
+                 replication enabled. Bootstraps a single-node cluster unless \
+                 CUBESTORE_RAFT_NODES declares static membership. Not yet production-hardened: \
+                 no snapshot persistence, no Raft metrics, follower MetaStoreEvent fan-out and \
+                 ForwardToLeader handling are not implemented."
             );
         }
 
@@ -2573,7 +2575,20 @@ impl Config {
                             raft,
                             config: raft_config,
                         });
-                        rocks_store.set_raft_app(app);
+                        rocks_store.set_raft_app(app.clone());
+
+                        // v4 Phase P1: give the node an inbound Raft endpoint
+                        // (toy_rpc WebSocket on rpc_addr) and bootstrap the
+                        // cluster — single-node by default, static members via
+                        // CUBESTORE_RAFT_NODES. Both are fatal on failure: a
+                        // Raft node that cannot serve or join is unusable.
+                        app.serve_raft_rpc()
+                            .await
+                            .expect("Raft RPC server failed to start");
+                        crate::metastore::raft::bootstrap_cluster(&app)
+                            .await
+                            .expect("Raft cluster bootstrap failed");
+
                         tracing::info!(node_id, rpc_addr, api_addr, "Raft metastore backend enabled");
                     }
 
