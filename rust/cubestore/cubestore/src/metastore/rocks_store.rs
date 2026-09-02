@@ -548,12 +548,20 @@ impl WriteBatchEntry {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct WriteBatchContainer {
     entries: Vec<WriteBatchEntry>,
+    /// MetaStoreEvent notifications produced by the originating write. Carried
+    /// through Raft so that state_machine::apply can fire them on EVERY node
+    /// (v4: follower event fan-out), not just the one that accepted the write.
+    /// Empty for plain (non-Raft) WAL usage; serde-default keeps old WAL files
+    /// deserializable.
+    #[serde(default)]
+    pub events: Vec<MetaStoreEvent>,
 }
 
 impl WriteBatchContainer {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            events: Vec::new(),
         }
     }
 
@@ -678,6 +686,10 @@ impl<'a, S> BatchPipe<'a, S> {
             // db.write(container.write_batch()) — so we do NOT db.write here.
             let mut container = WriteBatchContainer::new();
             self.write_batch.iterate(&mut container);
+            // Events travel inside the container: apply() fires them on EVERY node
+            // (follower event fan-out). Return an empty Vec here so write_operation's
+            // local fire loop is a no-op on the originating node — no double delivery.
+            container.events = std::mem::take(&mut self.events);
 
             // Bridge sync write_operation → async write_via_raft. write_operation runs on
             // the RocksStoreRWLoop's dedicated OS thread; running the future inline via
@@ -697,6 +709,8 @@ impl<'a, S> BatchPipe<'a, S> {
             });
             rx.recv()
                 .map_err(|e| CubeError::internal(format!("Raft client_write channel closed: {e:?}")))??;
+
+            return Ok((Vec::new(), self.post_commit_callback));
         } else {
             let db = self.db;
             db.write(self.write_batch)?;
@@ -1605,6 +1619,47 @@ mod tests {
     use crate::remotefs::LocalDirRemoteFs;
     use chrono::Timelike;
     use std::{env, fs};
+
+    /// WriteBatchContainer now carries MetaStoreEvents for Raft follower event
+    /// fan-out. This guards the flexbuffers round-trip of that field: the enum
+    /// has tuple variants over complex payloads, and flexbuffers support is a
+    /// runtime property the compiler cannot check.
+    #[test]
+    fn test_write_batch_container_events_flexbuffers_roundtrip() -> Result<(), CubeError> {
+        use crate::metastore::MetaStoreEvent;
+        let mut c = WriteBatchContainer::new();
+        c.entries.push(WriteBatchEntry::Put {
+            key: vec![0x01, 0x02].into(),
+            value: vec![0x03, 0x04, 0x05].into(),
+        });
+        c.entries.push(WriteBatchEntry::Delete { key: vec![0xff].into() });
+        c.events = vec![
+            MetaStoreEvent::Insert(TableId::Tables, 7),
+            MetaStoreEvent::Update(TableId::Chunks, 8),
+            MetaStoreEvent::Delete(TableId::Jobs, 9),
+        ];
+
+        let bytes = flexbuffers::to_vec(&c)?;
+        let reader = flexbuffers::Reader::get_root(&bytes)?;
+        let back = WriteBatchContainer::deserialize(reader)?;
+
+        assert_eq!(back.entries.len(), 2);
+        // MetaStoreEvent has no PartialEq (some payload types lack it); compare via Debug.
+        assert_eq!(format!("{:?}", back.events), format!("{:?}", c.events));
+
+        // Old containers without the events field must still deserialize.
+        #[derive(serde::Serialize)]
+        struct LegacyContainer {
+            entries: Vec<WriteBatchEntry>,
+        }
+        let legacy = flexbuffers::to_vec(&LegacyContainer {
+            entries: vec![WriteBatchEntry::Put { key: vec![1].into(), value: vec![2].into() }],
+        })?;
+        let back_legacy = WriteBatchContainer::deserialize(flexbuffers::Reader::get_root(&legacy)?)?;
+        assert!(back_legacy.events.is_empty());
+        assert_eq!(back_legacy.entries.len(), 1);
+        Ok(())
+    }
 
     #[test]
     fn test_rocks_secondary_index_encoding_with_ttl() -> Result<(), CubeError> {

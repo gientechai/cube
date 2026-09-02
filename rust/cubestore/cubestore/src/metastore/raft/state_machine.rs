@@ -50,7 +50,17 @@ pub struct StateMachineStore {
     snapshot_idx: u64,
     /// The metastore RocksDB. apply() commits WriteBatchContainers here.
     db: Arc<DB>,
+    /// Local MetaStoreEvent listeners (RocksStore.listeners). apply() fires the
+    /// batch's events here so EVERY replica notifies its local cluster
+    /// components — follower event fan-out. Shared via Arc, so listeners added
+    /// to the RocksStore after Raft startup are still seen by this clone.
+    listeners: Listeners,
 }
+
+/// Same type as RocksStore.listeners.
+pub type Listeners = std::sync::Arc<
+    tokio::sync::RwLock<Vec<tokio::sync::broadcast::Sender<crate::metastore::MetaStoreEvent>>>,
+>;
 
 /// On-disk snapshot representation (stored under the `raft_sm` key in `store` CF).
 /// The data blob is a serialized `Vec<(key, value)>` dump of the metastore default CF.
@@ -61,9 +71,10 @@ struct StoredSnapshot {
 }
 
 impl StateMachineStore {
-    /// Construct with the metastore RocksDB handle. If a prior Raft snapshot is
-    /// persisted in the DB, the state machine is restored from it.
-    pub async fn new(db: Arc<DB>) -> Self {
+    /// Construct with the metastore RocksDB handle and the RocksStore's event
+    /// listeners. If a prior Raft snapshot is persisted in the DB, the state
+    /// machine is restored from it.
+    pub async fn new(db: Arc<DB>, listeners: Listeners) -> Self {
         let sm = Self {
             data: StateMachineData {
                 last_applied_log_id: None,
@@ -71,6 +82,7 @@ impl StateMachineStore {
             },
             snapshot_idx: 0,
             db,
+            listeners,
         };
         // TODO(PoC): restore last_applied/last_membership from persisted snapshot meta
         // before returning. For the first-cut port we start clean; snapshot persistence
@@ -138,6 +150,22 @@ impl RaftStateMachine<CubeStoreRaftTypeConfig> for StateMachineStore {
                     self.db.write(wb.write_batch()).map_err(|e| StorageError::IO {
                         source: StorageIOError::write_state_machine(&e),
                     })?;
+
+                    // Follower event fan-out (v4): fire the originating write's
+                    // MetaStoreEvents on THIS node so local cluster components
+                    // (job runner, partition scheduling, schema invalidation)
+                    // observe replicated changes. Notification failures (e.g. a
+                    // listener with no receivers) must not fail the apply.
+                    if !wb.events.is_empty() {
+                        let count = wb.events.len();
+                        let listeners = self.listeners.read().await;
+                        for listener in listeners.iter() {
+                            for event in wb.events.iter() {
+                                let _ = listener.send(event.clone());
+                            }
+                        }
+                        tracing::info!("Raft apply: fired {} MetaStoreEvents on this node", count);
+                    }
                 }
                 EntryPayload::Membership(mem) => {
                     self.data.last_membership = StoredMembership::new(Some(ent.log_id), mem);
