@@ -29,3 +29,4 @@ gen
 /cubejs
 .npmrc
 .zcode
+rustc-ice-*.txt
