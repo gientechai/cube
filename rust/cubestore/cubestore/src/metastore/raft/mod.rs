@@ -60,6 +60,11 @@ openraft::declare_raft_types!(
 /// Convenience alias for the Raft instance type.
 pub type CubeStoreRaft = Raft<CubeStoreRaftTypeConfig>;
 
+/// Live Raft metrics watch channel (clone of `raft.metrics()`). `borrow()` on
+/// any receiver returns the current `RaftMetrics` snapshot without awaiting.
+pub type RaftMetricsChannel =
+    tokio::sync::watch::Receiver<openraft::metrics::RaftMetrics<NodeId, Node>>;
+
 /// Alias matching openraft example's `typ::Entry` (avoids a separate typ module).
 pub type Entry = openraft::Entry<CubeStoreRaftTypeConfig>;
 

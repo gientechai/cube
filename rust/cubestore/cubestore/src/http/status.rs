@@ -1,12 +1,13 @@
 use crate::config::injection::Injector;
 use crate::config::{is_router, uses_remote_metastore, Config};
-use crate::metastore::MetaStore;
+use crate::metastore::{MetaStore, RocksMetaStore};
 use crate::sql::SqlService;
 use crate::CubeError;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use warp::http::StatusCode;
+use warp::reply::Reply;
 use warp::Filter;
 
 pub fn serve_status_probes(c: &Config) {
@@ -25,13 +26,21 @@ pub fn serve_status_probes(c: &Config) {
         let pc = pc.clone();
         async move { status_probe_reply("liveness", pc.is_live().await) }
     });
+    let p_ready = p.clone();
     let r = warp::path!("readyz").and_then(move || {
-        let p = p.clone();
+        let p = p_ready.clone();
         async move { status_probe_reply("readiness", p.is_ready().await) }
     });
+    let rf = {
+        let p = p.clone();
+        warp::path!("raftz").and_then(move || {
+            let p = p.clone();
+            async move { Ok::<_, Infallible>(p.raft_status_reply().await) }
+        })
+    };
 
     let addr: SocketAddr = addr.parse().expect("cannot parse status probe address");
-    match warp::serve(l.or(r)).try_bind_ephemeral(addr) {
+    match warp::serve(l.or(r).or(rf)).try_bind_ephemeral(addr) {
         Ok((addr, f)) => {
             log::info!("Serving status probes at {}", addr);
             tokio::spawn(f);
@@ -92,5 +101,36 @@ impl RouterProbes {
         // Workers connect to the router for warmup, so router must be ready before workers are up.
         // TODO: warmup explicitly with router request instead?
         Ok(())
+    }
+
+    /// Raft observability endpoint (v4 §8): current node/leader/term/apply
+    /// position as JSON. 503 + {"enabled": false} when this node does not run
+    /// the rocksdb-raft metastore backend. Intentionally does NOT gate
+    /// readiness: a temporary leaderless window (election in progress) must not
+    /// pull every router out of the LB.
+    pub async fn raft_status_reply(&self) -> warp::reply::Response {
+        let m = self.services.try_get_service_typed::<RocksMetaStore>().await;
+        let metrics = m.as_ref().and_then(|m| m.store().raft_metrics_snapshot());
+        let (code, body) = match metrics {
+            None => (
+                warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                serde_json::json!({"enabled": false}).to_string(),
+            ),
+            Some(m) => (
+                warp::http::StatusCode::OK,
+                serde_json::json!({
+                    "enabled": true,
+                    "node": m.id,
+                    "state": format!("{:?}", m.state),
+                    "leader": m.current_leader,
+                    "term": m.current_term,
+                    "last_log_index": m.last_log_index,
+                    "last_applied": m.last_applied.map(|l| l.index),
+                    "running_state_ok": m.running_state.is_ok(),
+                })
+                .to_string(),
+            ),
+        };
+        warp::reply::with_status(body, code).into_response()
     }
 }
