@@ -201,24 +201,31 @@ pub async fn write_via_raft(
 }
 
 async fn wait_local_applied(app: &Arc<App>, index: u64) -> Result<(), crate::CubeError> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    // Watch-driven (no polling): raft.metrics() hands out a watch::Receiver;
+    // changed() fires on every metrics update, and apply advances last_applied.
+    let mut rx = app.raft.metrics();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        let applied = app
-            .raft
-            .metrics()
-            .borrow()
-            .last_applied
-            .map(|l| l.index)
-            .unwrap_or(0);
+        let applied = rx.borrow().last_applied.map(|l| l.index).unwrap_or(0);
         if applied >= index {
             return Ok(());
         }
-        if std::time::Instant::now() >= deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
             return Err(crate::CubeError::internal(format!(
                 "Raft apply lag: index {index} not applied locally within 10s (applied={applied})"
             )));
         }
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        tokio::select! {
+            changed = rx.changed() => {
+                if changed.is_err() {
+                    return Err(crate::CubeError::internal(
+                        "Raft metrics watch channel closed while waiting for apply".to_string(),
+                    ));
+                }
+            }
+            _ = tokio::time::sleep(remaining) => {}
+        }
     }
 }
 
