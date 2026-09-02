@@ -1211,7 +1211,7 @@ crate::di_service!(RocksMetaStore, [MetaStore]);
 crate::di_service!(MetaStoreRpcClient, [MetaStore]);
 crate::di_service!(TracedMetaStore, [MetaStore]);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MetaStoreEvent {
     Insert(TableId, u64),
     Update(TableId, u64),

@@ -2547,7 +2547,11 @@ impl Config {
 
                         let raft_log_path = format!("{}.raft_log", path);
                         let log_store = crate::metastore::raft::LogStore::open(&raft_log_path);
-                        let sm_store = crate::metastore::raft::StateMachineStore::new(db).await;
+                        let sm_store = crate::metastore::raft::StateMachineStore::new(
+                            db,
+                            rocks_store.listeners.clone(),
+                        )
+                        .await;
                         let network = crate::metastore::raft::Network;
                         let raft_config = Arc::new(
                             openraft::Config {
