@@ -346,13 +346,14 @@ impl ExtendedRemoteFs for MINIORemoteFs {}
 //TODO
 impl MINIORemoteFs {
     fn s3_path(&self, remote_path: &str) -> String {
-        format!(
-            "{}/{}",
-            self.sub_path
-                .as_ref()
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "".to_string()),
-            remote_path
-        )
+        // Without a sub_path the old formatting produced a leading slash
+        // ("/temp-uploads/x"). MinIO normalizes the key on PUT but not the
+        // LIST prefix, so check_upload_file could never find the object
+        // ("can't be listed after upload", e2e-verified with both MinIO and
+        // Garage). Keep the key slash-free when there is no sub_path.
+        match &self.sub_path {
+            Some(p) => format!("{}/{}", p, remote_path),
+            None => remote_path.to_string(),
+        }
     }
 }
