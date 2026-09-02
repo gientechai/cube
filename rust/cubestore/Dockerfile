@@ -7,6 +7,7 @@ COPY cube/cubeshared /build/cube/cubeshared
 COPY cubestore/rust-toolchain.toml .
 COPY cubestore/Cargo.toml .
 COPY cubestore/Cargo.lock .
+COPY cubestore/vendor vendor
 COPY cubestore/cuberockstore cuberockstore
 COPY cubestore/cubehll cubehll
 COPY cubestore/cubezetasketch cubezetasketch
@@ -16,7 +17,8 @@ COPY cubestore/cubestore-sql-tests cubestore-sql-tests
 COPY cubestore/cubestore/benches cubestore/benches
 COPY cubestore/cubestore/Cargo.toml cubestore/Cargo.toml
 RUN mkdir -p cubestore/src/bin && \
-    echo "fn main() {print!(\"Dummy main\");} // dummy file" > cubestore/src/bin/cubestored.rs
+    echo "fn main() {print!(\"Dummy main\");} // dummy file" > cubestore/src/bin/cubestored.rs && \
+    echo "fn main() {print!(\"Dummy bench\");} // dummy file" > cubestore/src/bin/raft-bench.rs
 
 ARG WITH_AVX2=1
 RUN [ "$WITH_AVX2" -eq "1" ] && export RUSTFLAGS="-C target-feature=+avx2"; \

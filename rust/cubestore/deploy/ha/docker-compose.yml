@@ -22,6 +22,7 @@ x-cubestore-common: &cubestore-common
     # ── Cube Store identity: unique name, self-worker ──
     CUBESTORE_SERVER_NAME: n1            # overridden per service
     CUBESTORE_WORKERS: n1                # overridden per service
+    CUBESTORE_DATA_DIR: /cube/data       # matches the per-node volumes below
     # ── HA: rocksdb-raft metastore, static 3-member cluster ──
     CUBESTORE_METASTORE_BACKEND: rocksdb-raft
     CUBESTORE_RAFT_NODES: "cubestore-n1:22001,cubestore-n2:22001,cubestore-n3:22001"

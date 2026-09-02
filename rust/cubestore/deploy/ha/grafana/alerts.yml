@@ -1,0 +1,35 @@
+groups:
+- name: cubestore-ha
+  rules:
+  - alert: CubeStoreNoLeader
+    expr: sum(cubestore_raft_is_leader) < 1
+    for: 10s
+    labels:
+      severity: critical
+    annotations:
+      summary: No Raft leader for >10s
+      description: Elections stuck — check node connectivity (:22001) and quorum.
+  - alert: CubeStoreFrequentElections
+    expr: max(changes(cubestore_raft_term[5m])) > 1
+    for: 0m
+    labels:
+      severity: warning
+    annotations:
+      summary: '>1 term change in 5m'
+      description: Check network latency and disk IO on members.
+  - alert: CubeStoreApplyLag
+    expr: max(cubestore_raft_apply_lag) > 100
+    for: 1m
+    labels:
+      severity: warning
+    annotations:
+      summary: Apply lag >100 entries
+      description: Follower falling behind — see OPERATIONS.md §6.4.
+  - alert: CubeStoreRaftCoreDown
+    expr: min(cubestore_raft_running_state_ok) < 1
+    for: 0m
+    labels:
+      severity: critical
+    annotations:
+      summary: A node's RaftCore shut down
+      description: Fatal storage/network error — restart node, RB-3 if recurring.

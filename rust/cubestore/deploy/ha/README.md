@@ -6,6 +6,17 @@
 > 日常运维、扩缩容（RB-1/2/3）、故障处理（含"选不出 leader"等 6 类症状速查）、
 > 滚动升级、性能容量参考、FAQ。
 
+## 目录内容
+
+| 文件 | 用途 |
+|---|---|
+| `docker-compose.yml` | 3 节点 + haproxy 编排（compose / Swarm / Portainer 通用） |
+| `haproxy.cfg` | LB 配置（`/readyz` 探活、stats 页 :9600） |
+| `kubernetes.yaml` | k8s StatefulSet + 双 Service 描述符 |
+| `grafana/dashboard.json` | Grafana 看板（6 面板：leader 拓扑/term/apply 收敛/滞后/Core 存活） |
+| `grafana/alerts.yml` | Prometheus 告警规则（无 leader Critical、选举频繁、apply 滞后、Core 宕） |
+| `PLATFORMS.md` | Swarm/Portainer（GienBI P6）部署指引 + cs-ha-agent 现状说明 |
+
 ## 架构
 
 ```

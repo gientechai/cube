@@ -1,0 +1,79 @@
+# Cube Store HA on Kubernetes (v4 P3).
+#
+# StatefulSet of 3 self-contained router+worker nodes (stable network
+# identities for static Raft membership) + a LoadBalance Service for cube.js
+# clients + headless service for Raft RPC. Health/readiness wired to the
+# status-probe container port (3031) — readiness does NOT require Raft
+# leadership (sub-second election windows must not pull every pod).
+#
+# Prereqs: image from ha-image.yml (CUBESTORE_IMAGE below), an S3 bucket,
+# and a Secret "cubestore-s3" with S3_ACCESS_KEY / S3_SECRET_KEY.
+#
+# cube.js: CUBEJS_CUBESTORE_HOST=cubestore-ha-lb CUBEJS_CUBESTORE_PORT=3030
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: cubestore-ha          # headless: stable DNS for Raft members
+spec:
+  clusterIP: None
+  selector: { app: cubestore-ha }
+  ports:
+    - { name: raft,   port: 22001 }
+    - { name: status, port: 3031 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cubestore-ha-lb       # client entrypoint (kube-proxy round-robin)
+spec:
+  selector: { app: cubestore-ha }
+  ports:
+    - { name: http, port: 3030, targetPort: 3030 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: cubestore-ha
+spec:
+  serviceName: cubestore-ha
+  replicas: 3
+  selector: { matchLabels: { app: cubestore-ha } }
+  template:
+    metadata:
+      labels: { app: cubestore-ha }
+    spec:
+      containers:
+        - name: cubestore
+          image: ${CUBESTORE_IMAGE:-ghcr.io/gientechai/cube-cubestore:ha-poc}
+          env:
+            - { name: CUBESTORE_METASTORE_BACKEND, value: rocksdb-raft }
+            - { name: CUBESTORE_RAFT_NODES,
+                value: "cubestore-ha-0.cubestore-ha:22001,cubestore-ha-1.cubestore-ha:22001,cubestore-ha-2.cubestore-ha:22001" }
+            - { name: CUBESTORE_SERVER_NAME, value: n1 }   # patched per-ordinal below
+            - { name: CUBESTORE_WORKERS,     value: n1 }
+            - { name: CUBESTORE_DATA_DIR,    value: /cube/data }
+            - { name: CUBESTORE_MINIO_BUCKET,     valueFrom: { secretKeyRef: { name: cubestore-s3, key: S3_BUCKET } } }
+            - { name: CUBESTORE_MINIO_ACCESS_KEY_ID, valueFrom: { secretKeyRef: { name: cubestore-s3, key: S3_ACCESS_KEY } } }
+            - { name: CUBESTORE_MINIO_SECRET_ACCESS_KEY, valueFrom: { secretKeyRef: { name: cubestore-s3, key: S3_SECRET_KEY } } }
+            - { name: CUBESTORE_MINIO_SERVER_ENDPOINT, valueFrom: { secretKeyRef: { name: cubestore-s3, key: S3_ENDPOINT } } }
+            - { name: CUBESTORE_MINIO_REGION, valueFrom: { secretKeyRef: { name: cubestore-s3, key: S3_REGION } } }
+          ports:
+            - { containerPort: 3030, name: http }
+            - { containerPort: 3031, name: status }
+            - { containerPort: 22001, name: raft }
+          readinessProbe: { httpGet: { path: /readyz, port: status }, periodSeconds: 1, failureThreshold: 2 }
+          livenessProbe:  { httpGet: { path: /livez,  port: status }, periodSeconds: 5, failureThreshold: 3 }
+          volumeMounts:
+            - { name: data, mountPath: /cube/data }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec: { accessModes: [ReadWriteOnce], resources: { requests: { storage: 50Gi } } }
+---
+# Per-ordinal identity (node id / raft addr / worker name) — applied by the
+# operator or a small job; shown here as patch examples:
+#   kubectl patch statefulset cubestore-ha --type=json -p '[...]'
+# Simplest alternative: bake 3 one-replica StatefulSets (cubestore-ha-1/2/3),
+# each with fixed identity — mirrors the compose layout 1:1 and needs no
+# operator. Both are supported topologies; the 3×StatefulSet variant is what
+# we recommend until leadership-transfer drain (v4 §11) lands.
