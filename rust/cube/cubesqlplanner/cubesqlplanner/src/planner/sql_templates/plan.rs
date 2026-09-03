@@ -860,6 +860,27 @@ impl PlanSqlTemplates {
             },
         )
     }
+    pub fn to_date_rolling_window_join(
+        &self,
+        date_column: &str,
+        grouped_from: &str,
+        date_to: &str,
+    ) -> Result<String, CubeError> {
+        match self.render.render_template(
+            &"expressions/to_date_rolling_window_join",
+            context! {
+                date_column => date_column,
+                grouped_from => grouped_from,
+                date_to => date_to,
+            },
+        ) {
+            Ok(result) => Ok(result),
+            Err(err) if err.to_string().contains("to_date_rolling_window_join") => Ok(format!(
+                "{date_column} >= {grouped_from} and {date_column} <= {date_to}"
+            )),
+            Err(err) => Err(err),
+        }
+    }
 }
 
 #[cfg(test)]

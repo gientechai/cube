@@ -360,6 +360,11 @@ impl MockSqlTemplatesRender {
             "{{ value }}".to_string(),
         );
         templates.insert(
+            "expressions/to_date_rolling_window_join".to_string(),
+            "{{ date_column }} >= {{ grouped_from }} and {{ date_column }} <= {{ date_to }}"
+                .to_string(),
+        );
+        templates.insert(
             "expressions/timestamp_literal".to_string(),
             "{{ value }}".to_string(),
         );
