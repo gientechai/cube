@@ -101,7 +101,7 @@ docker compose up -d
 # 在本仓库根目录（镜像内为 linux release 构建，首次约 20-40 分钟）
 docker build -t <registry>/cube-cubestore:ha-poc -f rust/cubestore/Dockerfile rust/cubestore
 docker push <registry>/cube-cubestore:ha-poc
-# 部署侧：CUBESTORE_IMAGE=<registry>/cube-cubestore:ha-poc docker compose up -d
+# 部署侧：CUBESTORE_IMAGE=gientechai/cubestore:<release-tag>-ha docker compose up -d
 ```
 
 ### 2.5 部署验收（必做）

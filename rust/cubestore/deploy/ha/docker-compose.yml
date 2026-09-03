@@ -16,7 +16,7 @@
 #   CUBEJS_CUBESTORE_PORT=3030
 
 x-cubestore-common: &cubestore-common
-  image: ${CUBESTORE_IMAGE:-ghcr.io/gientechai/cube-cubestore:ha-poc}
+  image: ${CUBESTORE_IMAGE:-gientechai/cubestore:ha}
   restart: unless-stopped
   environment: &cubestore-env
     # ── Cube Store identity: unique name, self-worker ──

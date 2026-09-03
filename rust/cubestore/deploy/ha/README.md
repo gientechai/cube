@@ -41,7 +41,7 @@ cube.js ── CUBEJS_CUBESTORE_HOST=cubestore-lb:3030
 
 ## 前置条件
 
-1. **cubestore 镜像**：从本分支构建并推送，设置 `CUBESTORE_IMAGE`（默认 `ghcr.io/gientechai/cube-cubestore:ha-poc`）
+1. **cubestore 镜像**：打 tag 发布时由 `publish.yml` 产出 `gientechai/cubestore:<tag>-ha`（或设 `CUBESTORE_IMAGE` 指向具体版本）
 2. **S3 bucket**：任何强一致 S3 兼容存储（Garage 首选，MinIO/SeaweedFS/AWS 亦可；本分支已修复 Garage/MinIO 接入 bug），填充 `.env`：
    ```
    S3_ENDPOINT=http://garage:3900     # 或 https://s3.<region>.amazonaws.com
