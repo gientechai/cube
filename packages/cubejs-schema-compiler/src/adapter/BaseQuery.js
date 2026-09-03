@@ -6125,6 +6125,7 @@ export class BaseQuery {
         wrap_segment_select: '{{ expr }}',
         wrap_segment_filter: '{{ expr }}',
         rolling_window_expr_timestamp_cast: '{{ value }}',
+        to_date_rolling_window_join: '{{ date_column }} >= {{ grouped_from }} and {{ date_column }} <= {{ date_to }}',
         timestamp_literal: '{{ value }}',
         between: '{{ expr }} {% if negated %}NOT {% endif %}BETWEEN {{ low }} AND {{ high }}',
       },

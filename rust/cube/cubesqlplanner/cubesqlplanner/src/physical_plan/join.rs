@@ -156,8 +156,7 @@ impl ToDateRollingWindowJoinCondition {
         let date_from = templates.rolling_window_expr_timestamp_cast(&date_from)?;
         let date_to = templates.rolling_window_expr_timestamp_cast(&date_to)?;
         let grouped_from = self.granularity.apply_to_input_sql(templates, date_from)?;
-        let result = format!("{date_column} >= {grouped_from} and {date_column} <= {date_to}");
-        Ok(result)
+        templates.to_date_rolling_window_join(&date_column, &grouped_from, &date_to)
     }
 }
 
