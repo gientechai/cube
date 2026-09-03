@@ -45,7 +45,7 @@ spec:
     spec:
       containers:
         - name: cubestore
-          image: ${CUBESTORE_IMAGE:-ghcr.io/gientechai/cube-cubestore:ha-poc}
+          image: ${CUBESTORE_IMAGE:-gientechai/cubestore:ha}
           env:
             - { name: CUBESTORE_METASTORE_BACKEND, value: rocksdb-raft }
             - { name: CUBESTORE_RAFT_NODES,

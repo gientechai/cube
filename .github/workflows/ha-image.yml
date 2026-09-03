@@ -1,16 +1,9 @@
 name: cubestore-ha-image
 
-# Build the HA cubestore image (rust/cubestore/Dockerfile, context ./rust/)
-# and push it to ghcr.io. This is the image deploy/ha/docker-compose.yml
-# consumes (CUBESTORE_IMAGE). Mirrors the cubestore job in publish.yml
-# (same context/file/build-args) but for the HA PoC branch.
+# Ad-hoc HA cubestore image build (manual only).
+# Release builds are handled by publish.yml → docker-cubestore-ha on tag push.
 
 on:
-  push:
-    branches: [feature/openraft-metastore-poc]
-    paths:
-      - "rust/cubestore/**"
-      - ".github/workflows/ha-image.yml"
   workflow_dispatch:
 
 env:

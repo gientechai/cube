@@ -18,8 +18,7 @@ docker stack deploy -c <(docker compose -f deploy/ha/docker-compose.yml convert)
 
 GienBI 客户环境用 Portainer Stacks 部署本单元：
 
-1. **镜像**：`ghcr.io/gientechai/cube-cubestore:ha-poc`（由 `ha-image.yml` 流水线产出；
-   离线环境从流水线导出 tar，Portainer 导入本地 registry 或直接 `docker load`）
+1. **镜像**：`gientechai/cubestore:<release-tag>-ha`（由 `publish.yml` 在 tag 发布时构建；开发调试可用 Actions 手动触发 `cubestore-ha-image`）
 2. **Stack 配置**：Portainer → Stacks → New stack → Repository，指向本仓库
    `rust/cubestore/deploy/ha/`，compose 文件选 `docker-compose.yml`
 3. **环境变量**（Portainer Stack 的 Env 页签）：
