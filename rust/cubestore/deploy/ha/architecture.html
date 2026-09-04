@@ -118,9 +118,10 @@
 
   <!-- 接入层 -->
   <div class="layer c-lb">
-    <div class="layer-tag">接入层（客户侧 HA：keepalived / 云 LB）</div>
+    <div class="layer-tag">接入层（LB 主备对 · keepalived VIP / 云 LB）</div>
     <div class="row">
-      <div class="node"><b>应用负载均衡</b><span>轮询 → GienBI 后端集群<br>自身 HA 由客户保障</span></div>
+      <div class="node"><b>应用 LB-1</b><span>VIP 承载（主）/ 双活<br>轮询 → GienBI 后端集群</span><div class="slo">LB 自身 HA</div></div>
+      <div class="node"><b>应用 LB-2</b><span>VIP 备援（备）/ 双活<br>轮询 → GienBI 后端集群</span></div>
     </div>
   </div>
 
