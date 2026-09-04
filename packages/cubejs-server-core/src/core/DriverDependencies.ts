@@ -3,6 +3,7 @@ import { DatabaseType } from './types';
 const DriverDependencies: Record<DatabaseType, string> = {
   postgres: '@cubejs-backend/postgres-driver',
   mysql: '@cubejs-backend/mysql-driver',
+  starrocks: '@cubejs-backend/mysql-driver',
   mysqlauroraserverless: '@cubejs-backend/mysql-aurora-serverless-driver',
   mssql: '@cubejs-backend/mssql-driver',
   dm: '@cubejs-backend/dm-driver',
