@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GienBI 指标平台高可用部署架构</title>
+<style>
+  :root {
+    --bg: #f4f6fa; --card: #ffffff; --ink: #1e2a3a; --sub: #5a6b80;
+    --client: #64748b; --lb: #d97706; --app: #2563eb; --ha: #059669;
+    --s3: #7c3aed; --src: #475569; --obs: #0891b2; --line: #94a3b8;
+    --slo: #10b981; --warn: #dc2626;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", -apple-system, sans-serif;
+    background: var(--bg); color: var(--ink); padding: 28px 20px 60px;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  header { text-align: center; margin-bottom: 6px; }
+  header h1 { font-size: 26px; letter-spacing: 1px; }
+  header p { color: var(--sub); margin-top: 6px; font-size: 13px; }
+  .meta { text-align:center; font-size:12px; color:var(--sub); margin-bottom:22px; }
+
+  .layer {
+    background: var(--card); border-radius: 12px; padding: 14px 18px 16px;
+    margin: 0 auto; box-shadow: 0 1px 3px rgba(30,42,58,.08);
+    border: 1px solid #e5eaf1; position: relative;
+  }
+  .layer-tag {
+    position: absolute; top: -10px; left: 16px; font-size: 12px; font-weight: 600;
+    color: #fff; padding: 2px 10px; border-radius: 20px;
+  }
+  .layer .row { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; margin-top: 8px; }
+
+  .node {
+    border-radius: 10px; padding: 10px 14px; min-width: 168px; text-align: center;
+    border: 1.5px solid; background: #fff;
+  }
+  .node b { display: block; font-size: 14px; margin-bottom: 3px; }
+  .node span { font-size: 11.5px; color: var(--sub); line-height: 1.5; display:block; }
+  .node .rep { font-size: 11px; font-weight: 600; }
+
+  .c-client .layer-tag { background: var(--client);} .c-client .node { border-color: var(--client); }
+  .c-lb    .layer-tag { background: var(--lb); }    .c-lb .node    { border-color: var(--lb); }
+  .c-app   .layer-tag { background: var(--app); }   .c-app .node   { border-color: var(--app); }
+  .c-ha    .layer-tag { background: var(--ha); }    .c-ha .node    { border-color: var(--ha); }
+  .c-s3    .layer-tag { background: var(--s3); }    .c-s3 .node    { border-color: var(--s3); }
+  .c-src   .layer-tag { background: var(--src); }   .c-src .node   { border-color: var(--src); }
+  .c-obs   .layer-tag { background: var(--obs); }   .c-obs .node   { border-color: var(--obs); }
+
+  /* Cube Store 核心层强调 */
+  .c-ha { border: 2px solid var(--ha); box-shadow: 0 4px 14px rgba(5,150,105,.15); }
+  .raftbox {
+    margin-top: 12px; border: 2px dashed var(--ha); border-radius: 10px;
+    padding: 12px 14px 8px; position: relative; background: #f0fdf7;
+  }
+  .raftbox .raft-label {
+    position: absolute; top: -11px; left: 50%; transform: translateX(-50%);
+    background: var(--ha); color: #fff; font-size: 11.5px; padding: 2px 12px;
+    border-radius: 20px; white-space: nowrap;
+  }
+  .raftbox .row { margin-top: 10px; }
+
+  .leader { background: #ecfdf5; }
+  .leader b::after { content: " ★LEADER"; color: var(--ha); font-size: 10.5px; }
+
+  .slo {
+    display: inline-block; background: var(--slo); color: #fff; border-radius: 6px;
+    font-size: 11px; padding: 1px 8px; margin: 2px 2px 0; font-weight: 600;
+  }
+  .badge {
+    display:inline-block; background:#eef2ff; color:#4338ca; border-radius:5px;
+    font-size:10.5px; padding:1px 7px; margin:2px 2px 0; font-weight:600;
+  }
+
+  /* 层间箭头 */
+  .arrow { display: flex; flex-direction: column; align-items: center; height: 44px; justify-content: center; }
+  .arrow .lbl { font-size: 11px; color: var(--sub); margin-bottom: 2px; }
+  .arrow svg { display: block; }
+  .arrow-path { stroke: var(--line); stroke-width: 2; fill: none; marker-end: url(#ah); }
+
+  /* 双向（Raft）与观测虚线说明 */
+  .legend { display:flex; gap:18px; justify-content:center; flex-wrap:wrap; margin-top:26px; font-size:12px; color:var(--sub); }
+  .legend .k { display:flex; align-items:center; gap:6px; }
+  .swatch { width:26px; height:0; border-top:2.5px solid var(--line); display:inline-block; }
+  .swatch.dash { border-top-style: dashed; border-top-color: var(--obs); }
+  .swatch.raft { border-top-style: dashed; border-top-color: var(--ha); }
+
+  .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:16px; margin-top:0; }
+  footer { text-align:center; margin-top:30px; font-size:12px; color:var(--sub); line-height:1.8; }
+  .obsrow { display:flex; gap:14px; justify-content:center; }
+  .updown { display:flex; gap:8px; align-items:center; justify-content:center; margin-top:6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>GienBI 指标平台 · 高可用部署架构</h1>
+    <p>Cube Store HA（rocksdb-raft · 3 副本）× S3 数据面 × LB 接入 —— v4 方案落地版</p>
+  </header>
+  <div class="meta">分支 feature/openraft-metastore-poc · 交付包 rust/cubestore/deploy/ha/ · 2026-09</div>
+
+  <!-- 客户端层 -->
+  <div class="layer c-client">
+    <div class="layer-tag">客户端层</div>
+    <div class="row">
+      <div class="node"><b>BI 看板 / 报表</b><span>指标 · 维度 · 同比环比<br>只读语义层</span></div>
+      <div class="node"><b>对话式分析（chat2agent）</b><span>NL2MQL / NL2SQL<br>语义模型 GSM 驱动</span></div>
+      <div class="node"><b>第三方系统 API</b><span>JWT / CUBEJS_API_SECRET<br>指标即服务</span></div>
+    </div>
+  </div>
+
+  <div class="arrow"><div class="lbl">HTTPS · JWT 鉴权 · 脱敏（列权限后处理）</div>
+    <svg width="16" height="22"><defs><marker id="ah" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#94a3b8"/></marker></defs><path class="arrow-path" d="M8,0 L8,16"/></svg>
+  </div>
+
+  <!-- 接入层 -->
+  <div class="layer c-lb">
+    <div class="layer-tag">接入层（客户侧 HA：keepalived / 云 LB）</div>
+    <div class="row">
+      <div class="node"><b>应用负载均衡</b><span>轮询 → GienBI 后端集群<br>自身 HA 由客户保障</span></div>
+    </div>
+  </div>
+
+  <div class="arrow"><div class="lbl">HTTP / WS</div>
+    <svg width="16" height="22"><path class="arrow-path" d="M8,0 L8,16"/></svg>
+  </div>
+
+  <!-- 应用层 -->
+  <div class="layer c-app">
+    <div class="layer-tag">指标平台应用层（×2 及以上，无状态可横扩）</div>
+    <div class="row">
+      <div class="node"><b>GienBI Java 后端</b><span>指标/脱敏规则配置<br>租户与 RBAC</span><div class="rep">×2+</div></div>
+      <div class="node"><b>cube.js 语义层</b><span>语义模型 → SQL<br>预聚合路由 · 重试 60 次</span><div class="badge">CUBEJS_CUBESTORE_HOST=cubestore-lb</div></div>
+      <div class="node"><b>chat2agent 服务</b><span>Agent 编排 · 语义检索<br>GSM-Tree 本体消费</span></div>
+    </div>
+  </div>
+
+  <div class="arrow"><div class="lbl">MySQL 协议 / REST · 数据源直连与 Cube Store 读写</div>
+    <svg width="16" height="22"><path class="arrow-path" d="M8,0 L8,16"/></svg>
+  </div>
+
+  <!-- Cube Store HA 核心层 -->
+  <div class="layer c-ha">
+    <div class="layer-tag">Cube Store HA 层（本次交付 · RTO ≤3s 实测 0.44–0.88s · RPO≈0）</div>
+
+    <div class="row">
+      <div class="node"><b>haproxy VIP · cubestore-lb</b><span>:3030 HTTP/WS 透传 · roundrobin<br>:/readyz 探活（status :3031，1s×2 摘除）</span><div class="slo">LB 摘除 ≤2s</div></div>
+    </div>
+
+    <div class="raftbox">
+      <div class="raft-label">Raft 静态三成员 · toy_rpc :22001 互连 · quorum 2/3 · 事件扇出 follower 全感知</div>
+      <div class="row">
+        <div class="node leader"><b>cubestore-n1</b><span>router + worker（同进程）<br>metastore RocksDB + Raft<br>:3030 HTTP · :3031 status</span></div>
+        <div class="node"><b>cubestore-n2</b><span>router + worker（同进程）<br>metastore RocksDB + Raft<br>本地读 · 零开销</span></div>
+        <div class="node"><b>cubestore-n3</b><span>router + worker（同进程）<br>metastore RocksDB + Raft<br>快照持久化 · 重启恢复</span></div>
+      </div>
+      <div class="updown">
+        <span class="slo">failover 0.44–0.88s</span>
+        <span class="slo">读 ~4k QPS 零开销</span>
+        <span class="slo">写 3106 QPS · p50 304µs（需求 207× 余量）</span>
+        <span class="badge">RB-1/RB-2 动态成员</span>
+        <span class="badge">快照 LogsSinceLast(1000)</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow"><div class="lbl">S3 API · Parquet chunk 上传 / warmup 下载 · metastore 快照</div>
+    <svg width="16" height="22"><path class="arrow-path" d="M8,0 L8,16"/></svg>
+  </div>
+
+  <!-- 存储层 + 数据源 -->
+  <div class="grid2">
+    <div class="layer c-s3">
+      <div class="layer-tag">对象存储（强一致 S3）</div>
+      <div class="row">
+        <div class="node"><b>Garage（首选）/ MinIO / SeaweedFS / AWS S3</b><span>bucket: cubestore<br>预聚合 Parquet · Raft 快照<br>上传后立即可读（强一致校验）</span><div class="badge">本分支已修复两项兼容 bug</div></div>
+      </div>
+    </div>
+    <div class="layer c-src">
+      <div class="layer-tag">业务数据源（只读拉取）</div>
+      <div class="row">
+        <div class="node"><b>数仓 / 业务库</b><span>MySQL · PostgreSQL ·<br>Doris · StarRocks …<br>原始数据 · 预聚合源</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 观测与 CI -->
+  <div class="layer c-obs" style="margin-top:16px">
+    <div class="layer-tag">观测与质量门禁</div>
+    <div class="obsrow">
+      <div class="node"><b>Prometheus</b><span>:3031/metrics 抓取<br>cubestore_raft_* 指标集</span></div>
+      <div class="node"><b>Grafana 看板</b><span>6 面板：leader 拓扑 · term ·<br>applied 收敛 · 滞后 · Core 存活</span></div>
+      <div class="node"><b>告警规则</b><span>无 leader&gt;10s Critical ·<br>选举频繁 · apply 滞后&gt;100</span></div>
+      <div class="node"><b>GitHub Actions CI</b><span>ha-e2e：混沌回归 + QPS≥50 门禁<br>ha-image：amd64/arm64 镜像</span></div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <div class="k"><span class="swatch"></span>请求 / 数据流向</div>
+    <div class="k"><span class="swatch raft"></span>Raft 复制（metastore WriteBatch · 三副本）</div>
+    <div class="k"><span class="swatch dash"></span>指标抓取（Prometheus ← /metrics）</div>
+    <div class="k">★ LEADER 为动态角色（选举产生，任一节点可承担）</div>
+  </div>
+
+  <footer>
+    文档：<b>deploy/ha/</b> README（快速启动）· OPERATIONS.md（9 章使用/运维手册）· PLATFORMS.md（Portainer/Swarm/k8s）<br>
+    验证记录：三节点 e2e · cubejs 真实业务流量（MySQL→S3）· LB failover · raft-bench 性能 · scripts/ha-e2e.sh 混沌回归全绿
+  </footer>
+</div>
+</body>
+</html>
