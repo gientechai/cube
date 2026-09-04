@@ -114,6 +114,7 @@ export type DatabaseType =
   | 'dm'
   | 'mssql'
   | 'mysql'
+  | 'starrocks'
   | 'mysqlauroraserverless'
   | 'elasticsearch'
   | 'awselasticsearch'

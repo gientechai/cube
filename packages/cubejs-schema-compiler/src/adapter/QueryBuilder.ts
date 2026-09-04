@@ -1,5 +1,6 @@
 import { PostgresQuery } from './PostgresQuery';
 import { MysqlQuery } from './MysqlQuery';
+import { StarRocksQuery } from './StarRocksQuery';
 import { MongoBiQuery } from './MongoBiQuery';
 import { MssqlQuery } from './MssqlQuery';
 import { BigqueryQuery } from './BigqueryQuery';
@@ -23,6 +24,7 @@ const ADAPTERS = {
   postgres: PostgresQuery,
   redshift: RedshiftQuery,
   mysql: MysqlQuery,
+  starrocks: StarRocksQuery,
   mysqlauroraserverless: MysqlQuery,
   mongobi: MongoBiQuery,
   mssql: MssqlQuery,
