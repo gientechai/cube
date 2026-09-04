@@ -1,0 +1,21 @@
+global
+    log stdout format raw local0
+    maxconn 4096
+
+defaults
+    mode http
+    log global
+    option httplog
+    timeout connect 5s
+    timeout client 60m
+    timeout server 60m
+    timeout tunnel 60m
+
+listen cubestore-http
+    bind *:3030
+    balance roundrobin
+    option httpchk GET /readyz
+    default-server inter 1s fall 2 rise 2
+    server n1 cubestore-n1-${PROFILE}:3030 check port 3031
+    server n2 cubestore-n2-${PROFILE}:3030 check port 3031
+    server n3 cubestore-n3-${PROFILE}:3030 check port 3031

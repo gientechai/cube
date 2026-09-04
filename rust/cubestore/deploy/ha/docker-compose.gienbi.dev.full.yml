@@ -1,0 +1,325 @@
+# 注意：Compose 服务名必须是静态标识符（不能 cubestore-n1-${PROFILE}）；
+# PROFILE 只用在 container_name / 环境变量 / 卷路径。Stack 内 DNS 走 container_name。
+#
+# 部署前：
+#   mkdir -p /home/ubuntu/data/${PROFILE}/cubestore/{n1,n2,n3,minio}
+#
+# .env 示例：
+#   PROFILE=gienpoc
+#   GIENBI_IMAGE=...
+#   CUBEJS_IMAGE=...
+#   CHAT_IMAGE=...
+#   CUBESTORE_IMAGE=gientechai/cubestore:v1.6.61-3.3.0-ha-ha-non-avx
+
+services:
+  gienbi-app:
+    image: docker.dev.gientechai.com/gientest/bi:${GIENBI_IMAGE}
+    container_name: gienbi-${PROFILE}
+    restart: always
+    extra_hosts:
+      - trino.example.com:192.168.3.193
+    environment:
+      TZ: Asia/Shanghai
+      PROFILE: ${PROFILE}
+      nacos_server_addr: nacos:8848
+      nacos_namespace: gientech-bdap
+      nacos_username: nacos
+      nacos_password: nacos
+      nacos_group: dev
+    ports:
+      - "8190:8080"
+    volumes:
+      - /home/ubuntu/data/${PROFILE}/gienbi/files:/gienbi/files
+      - /home/ubuntu/data/${PROFILE}/gienbi/logs:/gienbi/logs
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.gienbi-${PROFILE}.rule=Host(`${PROFILE}.bi.dev.gientechai.com`)
+      - traefik.http.routers.gienbi-${PROFILE}.entrypoints=websecure
+      - traefik.http.routers.gienbi-${PROFILE}.service=gienbi-${PROFILE}
+      - traefik.http.routers.gienbi-${PROFILE}.tls.certresolver=resolver
+      - traefik.http.services.gienbi-${PROFILE}.loadbalancer.server.port=8080
+    networks:
+      - inner
+
+  cubestore-minio:
+    image: minio/minio:latest
+    container_name: cubestore-minio-${PROFILE}
+    restart: always
+    command: server /data --console-address ":9001"
+    environment:
+      TZ: Asia/Shanghai
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-cubestore}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-cubestore123}
+    volumes:
+      - /home/ubuntu/data/${PROFILE}/cubestore/minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - inner
+
+  cubestore-minio-init:
+    image: minio/mc:latest
+    container_name: cubestore-minio-init-${PROFILE}
+    depends_on:
+      cubestore-minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://cubestore-minio-${PROFILE}:9000 ${S3_ACCESS_KEY:-cubestore} ${S3_SECRET_KEY:-cubestore123} &&
+      mc mb --ignore-existing local/${S3_BUCKET:-cubestore}
+      "
+    networks:
+      - inner
+
+  cubestore-n1:
+    image: ${CUBESTORE_IMAGE:-gientechai/cubestore:v1.6.61-3.3.0-ha-ha-non-avx}
+    container_name: cubestore-n1-${PROFILE}
+    restart: always
+    environment:
+      TZ: Asia/Shanghai
+      CUBESTORE_METASTORE_BACKEND: rocksdb-raft
+      CUBESTORE_RAFT_NODES: "1@cubestore-n1-${PROFILE}:22001,2@cubestore-n2-${PROFILE}:22001,3@cubestore-n3-${PROFILE}:22001"
+      CUBESTORE_DATA_DIR: /cube/data
+      CUBESTORE_MINIO_BUCKET: ${S3_BUCKET:-cubestore}
+      CUBESTORE_MINIO_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-cubestore}
+      CUBESTORE_MINIO_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-cubestore123}
+      CUBESTORE_MINIO_SERVER_ENDPOINT: ${S3_ENDPOINT:-http://cubestore-minio-${PROFILE}:9000}
+      CUBESTORE_MINIO_REGION: ${S3_REGION:-us-east-1}
+      CUBESTORE_RAFT_LINEARIZABLE_READS: "false"
+      CUBESTORE_SERVER_NAME: n1
+      CUBESTORE_WORKERS: n1
+      CUBESTORE_RAFT_NODE_ID: "1"
+      CUBESTORE_RAFT_RPC_ADDR: "cubestore-n1-${PROFILE}:22001"
+    volumes:
+      - /home/ubuntu/data/${PROFILE}/cubestore/n1:/cube/data
+    depends_on:
+      cubestore-minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/3031' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - inner
+
+  cubestore-n2:
+    image: ${CUBESTORE_IMAGE:-gientechai/cubestore:v1.6.61-3.3.0-ha-ha-non-avx}
+    container_name: cubestore-n2-${PROFILE}
+    restart: always
+    environment:
+      TZ: Asia/Shanghai
+      CUBESTORE_METASTORE_BACKEND: rocksdb-raft
+      CUBESTORE_RAFT_NODES: "1@cubestore-n1-${PROFILE}:22001,2@cubestore-n2-${PROFILE}:22001,3@cubestore-n3-${PROFILE}:22001"
+      CUBESTORE_DATA_DIR: /cube/data
+      CUBESTORE_MINIO_BUCKET: ${S3_BUCKET:-cubestore}
+      CUBESTORE_MINIO_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-cubestore}
+      CUBESTORE_MINIO_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-cubestore123}
+      CUBESTORE_MINIO_SERVER_ENDPOINT: ${S3_ENDPOINT:-http://cubestore-minio-${PROFILE}:9000}
+      CUBESTORE_MINIO_REGION: ${S3_REGION:-us-east-1}
+      CUBESTORE_RAFT_LINEARIZABLE_READS: "false"
+      CUBESTORE_SERVER_NAME: n2
+      CUBESTORE_WORKERS: n2
+      CUBESTORE_RAFT_NODE_ID: "2"
+      CUBESTORE_RAFT_RPC_ADDR: "cubestore-n2-${PROFILE}:22001"
+    volumes:
+      - /home/ubuntu/data/${PROFILE}/cubestore/n2:/cube/data
+    depends_on:
+      cubestore-minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/3031' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - inner
+
+  cubestore-n3:
+    image: ${CUBESTORE_IMAGE:-gientechai/cubestore:v1.6.61-3.3.0-ha-ha-non-avx}
+    container_name: cubestore-n3-${PROFILE}
+    restart: always
+    environment:
+      TZ: Asia/Shanghai
+      CUBESTORE_METASTORE_BACKEND: rocksdb-raft
+      CUBESTORE_RAFT_NODES: "1@cubestore-n1-${PROFILE}:22001,2@cubestore-n2-${PROFILE}:22001,3@cubestore-n3-${PROFILE}:22001"
+      CUBESTORE_DATA_DIR: /cube/data
+      CUBESTORE_MINIO_BUCKET: ${S3_BUCKET:-cubestore}
+      CUBESTORE_MINIO_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-cubestore}
+      CUBESTORE_MINIO_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-cubestore123}
+      CUBESTORE_MINIO_SERVER_ENDPOINT: ${S3_ENDPOINT:-http://cubestore-minio-${PROFILE}:9000}
+      CUBESTORE_MINIO_REGION: ${S3_REGION:-us-east-1}
+      CUBESTORE_RAFT_LINEARIZABLE_READS: "false"
+      CUBESTORE_SERVER_NAME: n3
+      CUBESTORE_WORKERS: n3
+      CUBESTORE_RAFT_NODE_ID: "3"
+      CUBESTORE_RAFT_RPC_ADDR: "cubestore-n3-${PROFILE}:22001"
+    volumes:
+      - /home/ubuntu/data/${PROFILE}/cubestore/n3:/cube/data
+    depends_on:
+      cubestore-minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/3031' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - inner
+
+  cubestore:
+    image: haproxy:2.9
+    container_name: cubestore-${PROFILE}
+    restart: always
+    command:
+      - /bin/sh
+      - -c
+      - |
+        cat > /tmp/haproxy.cfg <<EOF
+        global
+            log stdout format raw local0
+            maxconn 4096
+        defaults
+            mode http
+            log global
+            option httplog
+            timeout connect 5s
+            timeout client 60m
+            timeout server 60m
+            timeout tunnel 60m
+        listen cubestore-http
+            bind *:3030
+            balance roundrobin
+            option httpchk GET /readyz
+            default-server inter 1s fall 2 rise 2
+            server n1 cubestore-n1-${PROFILE}:3030 check port 3031
+            server n2 cubestore-n2-${PROFILE}:3030 check port 3031
+            server n3 cubestore-n3-${PROFILE}:3030 check port 3031
+        EOF
+        exec haproxy -f /tmp/haproxy.cfg
+    depends_on:
+      - cubestore-n1
+      - cubestore-n2
+      - cubestore-n3
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/3030' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    networks:
+      - inner
+
+  cubejs:
+    image: docker.dev.gientechai.com/gientest/cubejs:${CUBEJS_IMAGE}
+    container_name: cubejs-${PROFILE}
+    restart: always
+    environment:
+      - CUBEJS_API_SECRET=HfkjksFKLJISJFKLFKWJFQFIQWIOFJQOFFQGGSDGFFJIQOEUFIEJFIOQWEFHFQOK5FKOIQWUFFEFE423FIQEOFJHUEWHFKASKDLQWJIFSJDJKFHJIJWO
+      - BI_DATABASE_HOST=192.168.3.140
+      - BI_DATABASE_PORT=3306
+      - BI_DATABASE_NAME=njbank
+      - BI_DATABASE_USER=root
+      - BI_DATABASE_PASSWORD=Mysql@123$%^
+      - CUBEJS_DEV_MODE=true
+      - CUBEJS_CUBESTORE_HOST=cubestore-${PROFILE}
+      - CUBEJS_CUBESTORE_PORT=3030
+      - CUBEJS_TESSERACT_SQL_PLANNER=true
+      - DEBUG=cubejs:*
+      - CUBEJS_REFRESH_WORKER=false
+      - CUBEJS_SCHEDULED_REFRESH_DEFAULT=false
+      - CUBEJS_DB_QUERY_TIMEOUT=50
+      - CUBEJS_CONCURRENCY=10
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.cubejs-${PROFILE}.rule=Host(`${PROFILE}.cube.dev.gientechai.com`)
+      - traefik.http.routers.cubejs-${PROFILE}.entrypoints=websecure
+      - traefik.http.routers.cubejs-${PROFILE}.service=cubejs-${PROFILE}
+      - traefik.http.routers.cubejs-${PROFILE}.tls.certresolver=resolver
+      - traefik.http.services.cubejs-${PROFILE}.loadbalancer.server.port=4000
+    volumes:
+      - /home/ubuntu/data/${PROFILE}/cube/conf/model:/cube/conf/model
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/4000'"]
+      interval: 15s
+      timeout: 60s
+      retries: 5
+      start_period: 30s
+    networks:
+      - inner
+    ports:
+      - "4000:4000"
+
+  chat-agent:
+    image: docker.dev.gientechai.com/gientest/chat2agent:${CHAT_IMAGE}
+    container_name: chat-agent-${PROFILE}
+    restart: always
+    environment:
+      - LANGFUSE_SECRET_KEY=sk-lf-c57913cc-e029-4280-abe3-76682ee22bdc
+      - LANGFUSE_PUBLIC_KEY=pk-lf-3442fd48-e62c-4a73-a1b5-b965d174a853
+      - LANGFUSE_HOST=https://langfuse.dev.gientechai.com/
+      - NEO4J_URI=neo4j+s://neo4j.test.gientechai.com:7687
+      - NEO4J_USERNAME=neo4j
+      - NEO4J_PASSWORD=Neo4j@123$%^
+      - CUBEX_LOG_LEVEL=info
+      - CONV_REWRITE_HISTORY_LIMIT=1
+      - JAVA_URL=http://gienbi-${PROFILE}:8080/api/v1
+      - ENABLE_QA_CACHE=false
+      - ENABLE_CODE_AGENT=true
+      - WORKFLOW_ENABLE_CODE_AGENT=false
+      - WORKFLOW_TIME_HITL_ENABLED=true
+      - CUBEJS_BASE_URL=http://cubejs-${PROFILE}:4000/cubejs-api/v1
+      - CUBEJS_API_SECRET=HfkjksFKLJISJFKLFKWJFQFIQWIOFJQOFFQGGSDGFFJIQOEUFIEJFIOQWEFHFQOK5FKOIQWUFFEFE423FIQEOFJHUEWHFKASKDLQWJIFSJDJKFHJIJWO
+      - DOMAIN_ID=1ed126f819c04cf19b391613254e37f6
+      - MILVUS_HOST=dev.gientechai.com
+      - MILVUS_PORT=19530
+      - MILVUS_DB_NAME=gienpoc
+      - MILVUS_TOKEN=root:Milvus
+      - EMBEDDING_BASE_URL=https://ai.dev.gientechai.com/v1
+      - EMBEDDING_MODEL=GS-bge-m3
+      - METRIC_AUTO_THRESHOLD=0.85
+      - DIMENSION_AUTO_THRESHOLD=0.90
+      - DIMENSION_VALUE_AUTO_THRESHOLD=0.90
+      - METRIC_MATCH_HITL_GAP_THRESHOLD=0.15
+      - METRIC_MATCH_NO_MATCH_THRESHOLD=0.45
+      - HITL_STORAGE_URL=redis://:Redis%40123%24%25%5E@dev.gientechai.com:6379/8
+      - REDIS_URL=redis://:Redis%40123%24%25%5E@dev.gientechai.com:6379/8
+      - MYSQL_HOST=192.168.3.140
+      - MYSQL_PORT=3306
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=Mysql@123$%^
+      - MYSQL_DATABASE=njbank
+      - AC_ENTITY_RECOGNITION_ENABLED=true
+      - ATTRIBUTION_ENABLED=true
+      - CACHE_ENABLED=false
+      - CACHE_SKIP_WRITE_FOR_FOLLOWUP=true
+      - CACHE_SYNC_GET_TIMEOUT=0.2
+      - CACHE_ASYNC_CALL_TIMEOUT=0.5
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.chat-agent-${PROFILE}.rule=Host(`${PROFILE}.chat-agent.dev.gientechai.com`)
+      - traefik.http.routers.chat-agent-${PROFILE}.entrypoints=websecure
+      - traefik.http.routers.chat-agent-${PROFILE}.service=chat-agent-${PROFILE}
+      - traefik.http.routers.chat-agent-${PROFILE}.tls.certresolver=resolver
+      - traefik.http.services.chat-agent-${PROFILE}.loadbalancer.server.port=8000
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/8000'"]
+      interval: 15s
+      timeout: 60s
+      retries: 5
+      start_period: 30s
+    networks:
+      - inner
+    ports:
+      - "8000:8000"
+
+networks:
+  inner:
+    external: true

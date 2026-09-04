@@ -1,0 +1,27 @@
+# Single-node CubeStore (non-HA mode) — HA branch image, no rocksdb-raft env.
+#
+# Use a separate compose project so HA stack is not removed as "orphans":
+#   docker compose -p cubestore-single -f docker-compose.single-non-ha.yml up -d
+#   docker compose -p cubestore-single -f docker-compose.single-non-ha.yml down
+#
+# Port 3030 — stop the HA stack first if it is running (only one env at a time).
+
+services:
+  cubestore:
+    image: ${CUBESTORE_IMAGE:-gientechai/cubestore:v1.6.61-3.3.0-ha-arm64v8}
+    restart: unless-stopped
+    ports:
+      - "3030:3030"
+      - "127.0.0.1:3031:3031"   # optional: curl /raftz → {"enabled":false}
+    environment:
+      CUBESTORE_SERVER_NAME: cubestore_router
+      CUBESTORE_META_PORT: "9999"
+      CUBESTORE_WORKERS: cubestore_worker
+      CUBESTORE_DATA_DIR: /cube/data
+      # Do NOT set CUBESTORE_METASTORE_BACKEND=rocksdb-raft
+      # Do NOT set CUBESTORE_RAFT_* or CUBESTORE_MINIO_*
+    volumes:
+      - cubestore-data:/cube/data
+
+volumes:
+  cubestore-data:

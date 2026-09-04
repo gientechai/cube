@@ -49,7 +49,7 @@ spec:
           env:
             - { name: CUBESTORE_METASTORE_BACKEND, value: rocksdb-raft }
             - { name: CUBESTORE_RAFT_NODES,
-                value: "cubestore-ha-0.cubestore-ha:22001,cubestore-ha-1.cubestore-ha:22001,cubestore-ha-2.cubestore-ha:22001" }
+                value: "1@cubestore-ha-0.cubestore-ha:22001,2@cubestore-ha-1.cubestore-ha:22001,3@cubestore-ha-2.cubestore-ha:22001" }
             - { name: CUBESTORE_SERVER_NAME, value: n1 }   # patched per-ordinal below
             - { name: CUBESTORE_WORKERS,     value: n1 }
             - { name: CUBESTORE_DATA_DIR,    value: /cube/data }

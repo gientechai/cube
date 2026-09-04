@@ -11,7 +11,11 @@
 #   - Provide an S3 bucket (Garage/MinIO/SeaweedFS or AWS) and fill the S3_*
 #     variables below.
 #
-# cube.js side (zero code change):
+# Always use project name `cubestore-ha` (do not use --remove-orphans with other stacks):
+#   docker compose -p cubestore-ha -f docker-compose.yml -f docker-compose.local.yml up -d
+#   docker compose -p cubestore-ha -f docker-compose.yml -f docker-compose.local.yml down
+#
+# Port 3030 — stop cubestore-single first if it is running.
 #   CUBEJS_CUBESTORE_HOST=cubestore-lb
 #   CUBEJS_CUBESTORE_PORT=3030
 
@@ -25,7 +29,7 @@ x-cubestore-common: &cubestore-common
     CUBESTORE_DATA_DIR: /cube/data       # matches the per-node volumes below
     # ── HA: rocksdb-raft metastore, static 3-member cluster ──
     CUBESTORE_METASTORE_BACKEND: rocksdb-raft
-    CUBESTORE_RAFT_NODES: "cubestore-n1:22001,cubestore-n2:22001,cubestore-n3:22001"
+    CUBESTORE_RAFT_NODES: "1@cubestore-n1:22001,2@cubestore-n2:22001,3@cubestore-n3:22001"
     # ── Data plane: shared S3 bucket ──
     CUBESTORE_MINIO_BUCKET: ${S3_BUCKET:-cubestore}
     CUBESTORE_MINIO_ACCESS_KEY_ID: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY}
