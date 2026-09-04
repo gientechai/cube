@@ -1,0 +1,190 @@
+# GienBI 环境 — CubeStore HA（内置 MinIO，无外部 S3）
+#
+# 用法：替换原 compose 里单个 `cubestore:` 服务为本文件中的 services。
+# 依赖：network `inner`、环境变量 PROFILE。
+#
+# cubejs 仍连 cubestore-${PROFILE}:3030（haproxy LB，容器名不变）。
+
+services:
+  # 内置 MinIO（预聚合 Parquet + 快照；数据落盘见 volumes）
+  cubestore-minio:
+    image: minio/minio:latest
+    container_name: cubestore-minio-${PROFILE}
+    restart: always
+    command: server /data --console-address ":9001"
+    environment:
+      TZ: Asia/Shanghai
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-cubestore}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-cubestore123}
+    volumes:
+      - /home/ubuntu/data/${PROFILE}/cubestore/minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - inner
+
+  cubestore-minio-init:
+    image: minio/mc:latest
+    container_name: cubestore-minio-init-${PROFILE}
+    depends_on:
+      cubestore-minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://cubestore-minio-${PROFILE}:9000 ${S3_ACCESS_KEY:-cubestore} ${S3_SECRET_KEY:-cubestore123} &&
+      mc mb --ignore-existing local/${S3_BUCKET:-cubestore}
+      "
+    networks:
+      - inner
+
+  cubestore-n1:
+    image: ${CUBESTORE_IMAGE:-gientechai/cubestore:v1.6.61-3.3.0-ha-ha}
+    container_name: cubestore-n1-${PROFILE}
+    restart: always
+    environment:
+      TZ: Asia/Shanghai
+      CUBESTORE_METASTORE_BACKEND: rocksdb-raft
+      CUBESTORE_RAFT_NODES: "1@cubestore-n1-${PROFILE}:22001,2@cubestore-n2-${PROFILE}:22001,3@cubestore-n3-${PROFILE}:22001"
+      CUBESTORE_DATA_DIR: /cube/data
+      CUBESTORE_MINIO_BUCKET: ${S3_BUCKET:-cubestore}
+      CUBESTORE_MINIO_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-cubestore}
+      CUBESTORE_MINIO_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-cubestore123}
+      CUBESTORE_MINIO_SERVER_ENDPOINT: ${S3_ENDPOINT:-http://cubestore-minio-${PROFILE}:9000}
+      CUBESTORE_MINIO_REGION: ${S3_REGION:-us-east-1}
+      CUBESTORE_RAFT_LINEARIZABLE_READS: "false"
+      CUBESTORE_SERVER_NAME: n1
+      CUBESTORE_WORKERS: n1
+      CUBESTORE_RAFT_NODE_ID: "1"
+      CUBESTORE_RAFT_RPC_ADDR: "cubestore-n1-${PROFILE}:22001"
+    volumes:
+      - /home/ubuntu/data/${PROFILE}/cubestore/n1:/cube/data
+    depends_on:
+      cubestore-minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/3031' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - inner
+
+  cubestore-n2:
+    image: ${CUBESTORE_IMAGE:-gientechai/cubestore:v1.6.61-3.3.0-ha-ha}
+    container_name: cubestore-n2-${PROFILE}
+    restart: always
+    environment:
+      TZ: Asia/Shanghai
+      CUBESTORE_METASTORE_BACKEND: rocksdb-raft
+      CUBESTORE_RAFT_NODES: "1@cubestore-n1-${PROFILE}:22001,2@cubestore-n2-${PROFILE}:22001,3@cubestore-n3-${PROFILE}:22001"
+      CUBESTORE_DATA_DIR: /cube/data
+      CUBESTORE_MINIO_BUCKET: ${S3_BUCKET:-cubestore}
+      CUBESTORE_MINIO_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-cubestore}
+      CUBESTORE_MINIO_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-cubestore123}
+      CUBESTORE_MINIO_SERVER_ENDPOINT: ${S3_ENDPOINT:-http://cubestore-minio-${PROFILE}:9000}
+      CUBESTORE_MINIO_REGION: ${S3_REGION:-us-east-1}
+      CUBESTORE_RAFT_LINEARIZABLE_READS: "false"
+      CUBESTORE_SERVER_NAME: n2
+      CUBESTORE_WORKERS: n2
+      CUBESTORE_RAFT_NODE_ID: "2"
+      CUBESTORE_RAFT_RPC_ADDR: "cubestore-n2-${PROFILE}:22001"
+    volumes:
+      - /home/ubuntu/data/${PROFILE}/cubestore/n2:/cube/data
+    depends_on:
+      cubestore-minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/3031' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - inner
+
+  cubestore-n3:
+    image: ${CUBESTORE_IMAGE:-gientechai/cubestore:v1.6.61-3.3.0-ha-ha}
+    container_name: cubestore-n3-${PROFILE}
+    restart: always
+    environment:
+      TZ: Asia/Shanghai
+      CUBESTORE_METASTORE_BACKEND: rocksdb-raft
+      CUBESTORE_RAFT_NODES: "1@cubestore-n1-${PROFILE}:22001,2@cubestore-n2-${PROFILE}:22001,3@cubestore-n3-${PROFILE}:22001"
+      CUBESTORE_DATA_DIR: /cube/data
+      CUBESTORE_MINIO_BUCKET: ${S3_BUCKET:-cubestore}
+      CUBESTORE_MINIO_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-cubestore}
+      CUBESTORE_MINIO_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-cubestore123}
+      CUBESTORE_MINIO_SERVER_ENDPOINT: ${S3_ENDPOINT:-http://cubestore-minio-${PROFILE}:9000}
+      CUBESTORE_MINIO_REGION: ${S3_REGION:-us-east-1}
+      CUBESTORE_RAFT_LINEARIZABLE_READS: "false"
+      CUBESTORE_SERVER_NAME: n3
+      CUBESTORE_WORKERS: n3
+      CUBESTORE_RAFT_NODE_ID: "3"
+      CUBESTORE_RAFT_RPC_ADDR: "cubestore-n3-${PROFILE}:22001"
+    volumes:
+      - /home/ubuntu/data/${PROFILE}/cubestore/n3:/cube/data
+    depends_on:
+      cubestore-minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/3031' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - inner
+
+  # 对外入口：保持原 cubestore-${PROFILE} 容器名，cubejs 配置不用改
+  # haproxy 配置内联在 command 中，Stack 单文件部署无需外部 template
+  cubestore:
+    image: haproxy:2.9
+    container_name: cubestore-${PROFILE}
+    restart: always
+    command:
+      - /bin/sh
+      - -c
+      - |
+        cat > /tmp/haproxy.cfg <<EOF
+        global
+            log stdout format raw local0
+            maxconn 4096
+        defaults
+            mode http
+            log global
+            option httplog
+            timeout connect 5s
+            timeout client 60m
+            timeout server 60m
+            timeout tunnel 60m
+        listen cubestore-http
+            bind *:3030
+            balance roundrobin
+            option httpchk GET /readyz
+            default-server inter 1s fall 2 rise 2
+            server n1 cubestore-n1-${PROFILE}:3030 check port 3031
+            server n2 cubestore-n2-${PROFILE}:3030 check port 3031
+            server n3 cubestore-n3-${PROFILE}:3030 check port 3031
+        EOF
+        exec haproxy -f /tmp/haproxy.cfg
+    depends_on:
+      - cubestore-n1
+      - cubestore-n2
+      - cubestore-n3
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/3030' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    networks:
+      - inner
+
+networks:
+  inner:
+    external: true
