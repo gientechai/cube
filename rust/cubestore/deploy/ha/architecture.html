@@ -147,7 +147,14 @@
     <div class="layer-tag">Cube Store HA 层（本次交付 · RTO ≤3s 实测 0.44–0.88s · RPO≈0）</div>
 
     <div class="row">
-      <div class="node"><b>haproxy VIP · cubestore-lb</b><span>:3030 HTTP/WS 透传 · roundrobin<br>:/readyz 探活（status :3031，1s×2 摘除）</span><div class="slo">LB 摘除 ≤2s</div></div>
+      <div class="node"><b>VIP :3030</b><span>keepalived VRRP / 云 LB<br>cubestore-lb 漂浮地址<br>防 LB 单点</span><div class="slo">LB 自身 HA</div></div>
+    </div>
+    <div class="arrow" style="height:26px"><div class="lbl">主备 / 双活</div>
+      <svg width="16" height="14"><path class="arrow-path" d="M8,0 L8,8"/></svg>
+    </div>
+    <div class="row">
+      <div class="node"><b>haproxy-1</b><span>HTTP/WS 透传 · roundrobin<br>/readyz 探活（:3031，1s×2 摘除）<br>stats :9600</span></div>
+      <div class="node"><b>haproxy-2</b><span>HTTP/WS 透传 · roundrobin<br>/readyz 探活（:3031，1s×2 摘除）<br>stats :9600</span><div class="slo">LB 摘除 ≤2s</div></div>
     </div>
 
     <div class="raftbox">
