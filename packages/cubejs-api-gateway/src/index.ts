@@ -3,6 +3,7 @@ export * from './sql-server';
 export * from './interfaces';
 export * from './cubejs-handler-error';
 export * from './user-error';
+export { assertReadOnlySql, stripSqlLiteralsAndComments } from './raw-sql';
 export type { DeniedMemberInfo } from './user-error';
 export { ResultMaskRuleType, registerResultMaskStrategy } from './member-result-mask-strategies';
 

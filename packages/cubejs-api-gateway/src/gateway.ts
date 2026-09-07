@@ -85,6 +85,7 @@ import { getRequestIdFromRequest, requestParser } from './request-parser';
 import { UserError } from './user-error';
 import { applyResultMaskedMembersToRows } from './member-response-masking';
 import { CubejsHandlerError } from './cubejs-handler-error';
+import { assertReadOnlySql } from './raw-sql';
 import { SubscriptionServer, WebSocketSendMessageFn } from './ws/subscription-server';
 import { LocalSubscriptionStore } from './ws/local-subscription-store';
 import {
@@ -610,6 +611,12 @@ class ApiGateway {
         });
       }));
     }
+
+    // 原生只读 SQL 直查：复用已配置数据源连接执行调用方 SQL，绕过语义层（无行列权限/脱敏），仅放行 SELECT/WITH/SHOW/DESCRIBE/EXPLAIN
+    // 详见 cubejs/doc/raw-sql-endpoint.md
+    app.post(`${this.basePath}/v1/raw-sql`, jsonParser, userMiddlewares, userAsyncHandler(async (req, res) => {
+      await this.rawSql({ query: req.body, context: req.context, res: this.resToResultFn(res) });
+    }));
 
     // 写入schema js类型文件，post接口，接受一个文件名，一个路径数组，以及文件内容字符串
     app.post(`${this.basePath}/v1/schema/create`, jsonParser, userMiddlewares, userAsyncHandler(async (req, res) => {
@@ -3055,6 +3062,60 @@ class ApiGateway {
     for (const releaseListener of this.releaseListeners) {
       releaseListener();
     }
+  }
+
+  /**
+   * 原生只读 SQL 直查（POST /cubejs-api/v1/raw-sql）。
+   *
+   * 请求体：{ sql: string（必填）, dataSource?: string（默认 default）, values?: unknown[]（参数化占位符，风格随方言） }
+   * 响应：{ data: rows, dataSource }，行数超过上限时附加 truncated: true。
+   *
+   * 直接经 OrchestratorApi.executeRawSql 在目标数据源执行，不走预聚合与语义层，
+   * 因此行列权限（access_policy / result_mask）与 queryRewrite 均不生效；
+   * 语句本身经 assertReadOnlySql 只读校验（详见 src/raw-sql.ts）。
+   */
+  public async rawSql({ query, context, res }: { query: any, context: RequestContext, res: ResponseResultFn }) {
+    const requestStarted = new Date();
+    try {
+      await this.assertApiScope('sql', context.securityContext);
+
+      const { sql, dataSource = 'default', values } = query || {};
+      if (typeof sql !== 'string' || !sql.trim()) {
+        throw new CubejsHandlerError(400, 'Bad Request', 'Field "sql" is required and must be a non-empty string');
+      }
+      if (values != null && !Array.isArray(values)) {
+        throw new CubejsHandlerError(400, 'Bad Request', 'Field "values" must be an array');
+      }
+
+      assertReadOnlySql(sql);
+
+      const orchestratorApi = await this.getAdapterApi(context);
+      const { rows, truncated } = await orchestratorApi.executeRawSql(
+        dataSource,
+        sql,
+        values || [],
+        this.getRawSqlMaxRows()
+      );
+
+      await res(truncated ? { data: rows, dataSource, truncated: true } : { data: rows, dataSource });
+    } catch (e: any) {
+      this.handleError({
+        e, context, query, res, requestStarted
+      });
+    }
+  }
+
+  /**
+   * 返回行数上限：环境变量 CUBEJS_RAW_SQL_MAX_ROWS（默认 10000，设为 0 关闭截断）。
+   * 截断在应用层进行（不改写 SQL，避免各方言 LIMIT 语法差异破坏原语句语义）。
+   */
+  protected getRawSqlMaxRows(): number {
+    const raw = process.env.CUBEJS_RAW_SQL_MAX_ROWS;
+    const parsed = raw == null || raw === '' ? 10000 : parseInt(raw, 10);
+    if (Number.isNaN(parsed) || parsed < 0) {
+      return 10000;
+    }
+    return parsed;
   }
 
   private writeDataSchemaFile({ query, context, res }: { query: any, context: RequestContext, res: ResponseResultFn }) {

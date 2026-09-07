@@ -176,6 +176,34 @@ export class OrchestratorApi {
   }
 
   /**
+   * Executes a read-only raw SQL statement directly against the data source
+   * driver, bypassing pre-aggregations and the semantic layer. The statement
+   * itself is validated by the API gateway (read-only guard), this method only
+   * takes care of execution.
+   *
+   * Reuses the per-dataSource cached driver (connection pool) resolved by the
+   * wrapped driverFactory, so no extra connection is opened per request.
+   *
+   * When maxRows is a positive number the result is truncated in the
+   * application layer to that size (`truncated: true` is returned along).
+   */
+  public async executeRawSql(
+    dataSource: string = 'default',
+    sql: string,
+    values: unknown[] = [],
+    maxRows?: number,
+  ): Promise<{ rows: unknown[]; truncated: boolean }> {
+    this.addDataSeenSource(dataSource);
+    const driver = await this.driverFactory(dataSource);
+    const queryResult = await driver.query(sql, values);
+    const rows = Array.isArray(queryResult) ? queryResult : [];
+    if (maxRows != null && maxRows > 0 && rows.length > maxRows) {
+      return { rows: rows.slice(0, maxRows), truncated: true };
+    }
+    return { rows, truncated: false };
+  }
+
+  /**
    * Tests worker's connections to the Cubestore and, if not in the rollup only
    * mode, to the datasources.
    */
