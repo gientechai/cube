@@ -16,6 +16,7 @@
     "@cubejs-backend/databricks-jdbc-driver": "1.6.61",
     "@cubejs-backend/dbt-schema-extension": "1.6.61",
     "@cubejs-backend/dm-driver": "1.6.61",
+    "@cubejs-backend/gbase-driver": "1.6.61",
     "@cubejs-backend/dremio-driver": "1.6.61",
     "@cubejs-backend/druid-driver": "1.6.61",
     "@cubejs-backend/duckdb-driver": "1.6.61",
