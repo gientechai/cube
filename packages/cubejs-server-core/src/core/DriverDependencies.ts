@@ -7,6 +7,7 @@ const DriverDependencies: Record<DatabaseType, string> = {
   mysqlauroraserverless: '@cubejs-backend/mysql-aurora-serverless-driver',
   mssql: '@cubejs-backend/mssql-driver',
   dm: '@cubejs-backend/dm-driver',
+  gbase: '@cubejs-backend/gbase-driver',
   athena: '@cubejs-backend/athena-driver',
   jdbc: '@cubejs-backend/jdbc-driver',
   mongobi: '@cubejs-backend/mongobi-driver',

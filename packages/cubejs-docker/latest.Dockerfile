@@ -30,10 +30,10 @@ RUN if [ -d "npm-packages" ] && [ "$(ls -A npm-packages/*.tgz 2>/dev/null)" ]; t
 
 # yarn install only pulls third-party transitive dependencies. All Cube packages are
 # replaced with CI-built tarballs in the next step (custom forks must not use npm code).
-# dm-driver is not on public npm — drop it here so yarn install succeeds in Docker;
-# it is restored from built tarballs below. (In the monorepo, yarn workspaces still
-# link packages/cubejs-dm-driver via package.json.)
-RUN node -e "const p=require('./package.json'); delete p.dependencies['@cubejs-backend/dm-driver']; require('fs').writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')" \
+# dm-driver and gbase-driver are not on public npm — drop them here so yarn install
+# succeeds in Docker; they are restored from built tarballs below. (In the monorepo,
+# yarn workspaces still link packages/cubejs-*-driver via package.json.)
+RUN node -e "const p=require('./package.json'); ['@cubejs-backend/dm-driver','@cubejs-backend/gbase-driver'].forEach(k=>delete p.dependencies[k]); require('fs').writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')" \
     && yarn install --prod \
     && rm -rf /cube/node_modules/duckdb/src \
     && yarn cache clean
@@ -63,6 +63,7 @@ RUN set -eu && \
     test -f node_modules/cubejs-cli/dist/src/index.js && \
     test -f node_modules/@cubejs-backend/server/index.js && \
     test -f node_modules/@cubejs-backend/dm-driver/dist/src/index.js && \
+    test -f node_modules/@cubejs-backend/gbase-driver/dist/src/index.js && \
     chmod +x node_modules/cubejs-cli/dist/src/index.js && \
     echo "Installed ${installed} built packages successfully" && \
     rm -rf /tmp/built-packages /cube/npm-packages

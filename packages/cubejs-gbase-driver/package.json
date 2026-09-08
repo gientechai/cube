@@ -1,0 +1,44 @@
+{
+  "name": "@cubejs-backend/gbase-driver",
+  "description": "Cube.js GBase 8a database driver",
+  "author": "Cube Dev, Inc.",
+  "version": "1.6.61",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cube-js/cube.git",
+    "directory": "packages/cubejs-gbase-driver"
+  },
+  "engines": {
+    "node": "^14.0.0 || ^16.0.0 || >=17.0.0"
+  },
+  "files": [
+    "dist/src",
+    "index.js"
+  ],
+  "main": "index.js",
+  "typings": "dist/src/index.d.ts",
+  "scripts": {
+    "build": "rm -rf dist && npm run tsc",
+    "tsc": "tsc",
+    "watch": "tsc -w",
+    "lint": "eslint src/* --ext .ts,.js",
+    "lint:fix": "eslint --fix src/* --ext .ts,.js"
+  },
+  "dependencies": {
+    "@cubejs-backend/base-driver": "1.6.61",
+    "@cubejs-backend/mysql-driver": "1.6.61",
+    "@cubejs-backend/shared": "1.6.61"
+  },
+  "devDependencies": {
+    "@cubejs-backend/linter": "1.6.61",
+    "@types/node": "^20",
+    "typescript": "~5.2.2"
+  },
+  "eslintConfig": {
+    "extends": "../cubejs-linter"
+  },
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  }
+}

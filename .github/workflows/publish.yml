@@ -83,6 +83,7 @@ jobs:
           tar tzf "npm-packages/cubejs-backend-server-${VERSION}.tgz" | grep -q 'package/dist/src'
           tar tzf "npm-packages/cubejs-backend-server-${VERSION}.tgz" | grep -q 'package/index.js'
           tar tzf "npm-packages/cubejs-backend-dm-driver-${VERSION}.tgz" | grep -q 'package/dist/src'
+          tar tzf "npm-packages/cubejs-backend-gbase-driver-${VERSION}.tgz" | grep -q 'package/dist/src'
           test -f "npm-packages/cubejs-backend-native-${VERSION}.tgz"
           tar tzf "npm-packages/cubejs-backend-native-${VERSION}.tgz" | grep -q 'package/dist/js/ResultWrapper'
       - name: Create npm packages archive

@@ -112,6 +112,7 @@ export type DatabaseType =
   | 'hive'
   | 'mongobi'
   | 'dm'
+  | 'gbase'
   | 'mssql'
   | 'mysql'
   | 'starrocks'
