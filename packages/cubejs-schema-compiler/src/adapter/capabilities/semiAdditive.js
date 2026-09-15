@@ -2,14 +2,19 @@
  * Semi-additive (point-in-time / nonAdditiveDimension) query capability.
  *
  * Installed onto BaseQuery.prototype via installQueryCapabilities — method names
- * stay on `this` so dialects (e.g. GBaseQuery.allocateSemiAdditiveCteNames)
- * and BaseMeasure keep working.
+ * stay on `this` so dialects and BaseMeasure keep working.
  *
  * New query features should land under adapter/capabilities/, not BaseQuery.js.
  */
 import R from 'ramda';
 
 import { UserError } from '../../compiler/UserError';
+
+/**
+ * Process-wide counter so multi-stage newSubQuery() instances still get
+ * distinct CTE names when BaseQuery hoists them into one flat WITH list.
+ */
+let semiAdditiveCteSeqGlobal = 0;
 
 export const SemiAdditiveCapability = {
   /**
@@ -755,15 +760,24 @@ export const SemiAdditiveCapability = {
 
   /**
    * CTE names for semi-additive join/window paths.
-   * Dialects that flatten nested WITH scopes (e.g. GBase) override this to allocate unique names.
+   * Always unique so flat WITH hoisting (multi-stage) never collides across branches.
    */
   allocateSemiAdditiveCteNames() {
+    const s = ++semiAdditiveCteSeqGlobal;
     return {
-      base: 'base_data',
-      matched: 'matched_data',
-      windowed: 'windowed_data',
-      partitionBounds: (groupIndex) => `partition_bounds_${groupIndex}`,
+      base: `base_data_${s}`,
+      matched: `matched_data_${s}`,
+      windowed: `windowed_data_${s}`,
+      partitionBounds: (groupIndex) => `partition_bounds_${s}_${groupIndex}`,
     };
+  },
+
+  /**
+   * When true, join/window semi-additive SQL uses nested subqueries instead of WITH.
+   * Dialects that cannot use WITH at all may override; default relies on BaseQuery WITH hoist.
+   */
+  semiAdditivePreferSubqueriesOverWith() {
+    return false;
   },
 
   /**
@@ -840,8 +854,7 @@ export const SemiAdditiveCapability = {
       );
     }
 
-    const boundsCteParts = [];
-    const joinClauses = [];
+    const boundsLayers = [];
     const boundarySelectAliases = [];
 
     partitionGroups.forEach((group, groupIndex) => {
@@ -857,21 +870,25 @@ export const SemiAdditiveCapability = {
         ? ` GROUP BY ${group.partitionExprs.join(', ')}`
         : '';
 
-      boundsCteParts.push(
-        `${boundsAlias} AS (\n  SELECT ${selectParts.join(', ')}\n  FROM ${cteNames.base}${groupByClauseBounds}\n)`
-      );
-
+      let onSql = null;
+      let joinKeyword = 'CROSS JOIN';
       if (group.partitionExprs.length) {
         // NULL-safe：分区键为 NULL 时仍匹配（与窗口 PARTITION BY NULL 行为一致）
         const nullSafeOnParts = group.partitionExprs.map((expr, i) => {
           const pbCol = `${boundsAlias}.${this.escapeColumnName(`__sa_p${groupIndex}_${i}`)}`;
           return this.semiAdditiveNullSafeEqual(expr, pbCol);
         });
-        joinClauses.push(`INNER JOIN ${boundsAlias} ON ${nullSafeOnParts.join(' AND ')}`);
-      } else {
-        // 无 PARTITION BY → 全局边界，CROSS JOIN 单行
-        joinClauses.push(`CROSS JOIN ${boundsAlias}`);
+        joinKeyword = 'INNER JOIN';
+        onSql = nullSafeOnParts.join(' AND ');
       }
+
+      boundsLayers.push({
+        boundsAlias,
+        selectSql: `SELECT ${selectParts.join(', ')}`,
+        groupByClauseBounds,
+        joinKeyword,
+        onSql,
+      });
 
       group.boundaries.forEach((b) => {
         boundarySelectAliases.push(
@@ -885,7 +902,53 @@ export const SemiAdditiveCapability = {
       ...boundarySelectAliases,
     ].join(', ');
 
-    const cteQuery = `WITH ${cteNames.base} AS (
+    return this.assembleSemiAdditiveJoinSql({
+      originalQuery,
+      cteNames,
+      boundsLayers,
+      matchedSelect,
+      selectColumns,
+      groupByClause,
+    });
+  },
+
+  /**
+   * Assemble join-path semi-additive SQL as WITH CTEs or nested subqueries.
+   */
+  assembleSemiAdditiveJoinSql({
+    originalQuery,
+    cteNames,
+    boundsLayers,
+    matchedSelect,
+    selectColumns,
+    groupByClause,
+  }) {
+    if (this.semiAdditivePreferSubqueriesOverWith()) {
+      const asJoin = this.asSyntaxJoin || 'AS';
+      const joinSql = boundsLayers.map((layer) => {
+        const derived = `(${layer.selectSql} FROM (${originalQuery}) ${asJoin} ${cteNames.base}${layer.groupByClauseBounds}) ${asJoin} ${layer.boundsAlias}`;
+        return layer.onSql
+          ? `${layer.joinKeyword} ${derived} ON ${layer.onSql}`
+          : `${layer.joinKeyword} ${derived}`;
+      }).join('\n  ');
+
+      return `SELECT ${selectColumns} FROM (
+  SELECT ${matchedSelect}
+  FROM (${originalQuery}) ${asJoin} ${cteNames.base}
+  ${joinSql}
+) ${asJoin} ${cteNames.matched}${groupByClause}`;
+    }
+
+    const boundsCteParts = boundsLayers.map((layer) => (
+      `${layer.boundsAlias} AS (\n  ${layer.selectSql}\n  FROM ${cteNames.base}${layer.groupByClauseBounds}\n)`
+    ));
+    const joinClauses = boundsLayers.map((layer) => (
+      layer.onSql
+        ? `${layer.joinKeyword} ${layer.boundsAlias} ON ${layer.onSql}`
+        : `${layer.joinKeyword} ${layer.boundsAlias}`
+    ));
+
+    return `WITH ${cteNames.base} AS (
   ${originalQuery}
 ), ${boundsCteParts.join(',\n')}, ${cteNames.matched} AS (
   SELECT ${matchedSelect}
@@ -893,8 +956,6 @@ export const SemiAdditiveCapability = {
   ${joinClauses.join('\n  ')}
 )
 SELECT ${selectColumns} FROM ${cteNames.matched}${groupByClause}`;
-
-    return cteQuery;
   },
 
   /**
@@ -944,6 +1005,35 @@ SELECT ${selectColumns} FROM ${cteNames.matched}${groupByClause}`;
       semiAdditiveMeasures,
       dimensionsForSemiAdditiveRemap,
     );
+
+    return this.assembleSemiAdditiveWindowSql({
+      originalQuery,
+      cteNames,
+      baseColumnAliases,
+      windowExpressions,
+      selectColumns,
+      groupByClause,
+    });
+  },
+
+  /**
+   * Assemble window-path semi-additive SQL as WITH CTEs or nested subqueries.
+   */
+  assembleSemiAdditiveWindowSql({
+    originalQuery,
+    cteNames,
+    baseColumnAliases,
+    windowExpressions,
+    selectColumns,
+    groupByClause,
+  }) {
+    if (this.semiAdditivePreferSubqueriesOverWith()) {
+      const asJoin = this.asSyntaxJoin || 'AS';
+      return `SELECT ${selectColumns} FROM (
+  SELECT ${baseColumnAliases.join(', ')}, ${windowExpressions.join(', ')}
+  FROM (${originalQuery}) ${asJoin} ${cteNames.base}
+) ${asJoin} ${cteNames.windowed}${groupByClause}`;
+    }
 
     return `WITH ${cteNames.base} AS (
   ${originalQuery}

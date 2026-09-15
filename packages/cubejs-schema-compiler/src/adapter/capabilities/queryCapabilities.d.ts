@@ -8,6 +8,8 @@ export {};
 declare module '../BaseQuery' {
   interface BaseQuery {
     allocateSemiAdditiveCteNames(...args: any[]): any;
+    assembleSemiAdditiveJoinSql(...args: any[]): any;
+    assembleSemiAdditiveWindowSql(...args: any[]): any;
     buildPeriodAverageDataQuery(...args: any[]): any;
     buildSemiAdditiveCTEQuery(...args: any[]): any;
     buildSemiAdditiveJoinQuery(...args: any[]): any;
@@ -91,6 +93,7 @@ declare module '../BaseQuery' {
     semiAdditiveNullSafeEqual(...args: any[]): any;
     semiAdditiveOrderingColumnSql(...args: any[]): any;
     semiAdditiveOuterSqlReferencesMainCubeAlias(...args: any[]): any;
+    semiAdditivePreferSubqueriesOverWith(...args: any[]): any;
     semiAdditiveWindowFunction(...args: any[]): any;
     shouldUsePeriodAverageDataPreAggregatePath(...args: any[]): any;
     shouldUseRenderedReferenceForMeasurePath(...args: any[]): any;

@@ -38,6 +38,7 @@ import { Granularity } from './Granularity';
 import { ParamAllocator } from './ParamAllocator';
 import { PreAggregations } from './PreAggregations';
 import { installQueryCapabilities } from './capabilities/install';
+import { formatWithClause, splitLeadingWithClause } from './helpers/sqlWithClause';
 // Ensures capability method types merge into BaseQuery for dialect overrides.
 /// <reference path="./capabilities/queryCapabilities.d.ts" />
 
@@ -1560,10 +1561,26 @@ export class BaseQuery {
       )(innerMembers),
     };
 
-    const firstMultiStageBranchIndex =
-      multiStageBranchCount > 0 ? toJoin.length - multiStageBranchCount : Number.POSITIVE_INFINITY;
+    // Hoist leading WITH from join branches so we never emit FROM (WITH ...) AS q_i
+    // (rejected by Oracle / GBase and other dialects).
+    const hoistedCteParts = [];
+    let recursive = false;
+    const flatToJoin = toJoin.map((q) => {
+      const split = splitLeadingWithClause(q);
+      if (!split) {
+        return q;
+      }
+      if (split.recursive) {
+        recursive = true;
+      }
+      hoistedCteParts.push(split.cteDefsSql);
+      return split.mainSql;
+    });
 
-    const join = R.drop(1, toJoin)
+    const firstMultiStageBranchIndex =
+      multiStageBranchCount > 0 ? flatToJoin.length - multiStageBranchCount : Number.POSITIVE_INFINITY;
+
+    const join = R.drop(1, flatToJoin)
       .map(
         (q, i) => {
           const qRightIndex = i + 1;
@@ -1596,21 +1613,39 @@ export class BaseQuery {
 
     const prevOrderByJoinAmbiguity = this.orderByJoinAmbiguity;
     this.orderByJoinAmbiguity =
-      toJoin.length > 1 && this.dimensionAliasNames().length > 0;
+      flatToJoin.length > 1 && this.dimensionAliasNames().length > 0;
 
     try {
       // TODO all having filters should be pushed down
       // subQuery dimensions can introduce projection remapping
+      let result;
       if (
-        toJoin.length === 1 &&
+        flatToJoin.length === 1 &&
         this.measureFilters.length === 0 &&
         outerMembers.filter(m => m.expression).length === 0 &&
         queryHasNoRemapping
       ) {
-        return `${toJoin[0].replace(/^SELECT/, `SELECT ${this.topLimit()}`)} ${this.orderBy()}${this.groupByDimensionLimit()}`;
+        result = `${flatToJoin[0].replace(/^SELECT/, `SELECT ${this.topLimit()}`)} ${this.orderBy()}${this.groupByDimensionLimit()}`;
+      } else {
+        result = `SELECT ${this.topLimit()}${columnsToSelect} FROM ${this.wrapInParenthesis(flatToJoin[0])} ${this.asSyntaxJoin} q_0 ${join}${havingFilters}${this.orderBy()}${this.groupByDimensionLimit()}`;
       }
 
-      return `SELECT ${this.topLimit()}${columnsToSelect} FROM ${this.wrapInParenthesis(toJoin[0])} ${this.asSyntaxJoin} q_0 ${join}${havingFilters}${this.orderBy()}${this.groupByDimensionLimit()}`;
+      if (!hoistedCteParts.length) {
+        return result;
+      }
+
+      // If result itself starts with WITH (e.g. already wrapped), merge into one list.
+      const resultSplit = splitLeadingWithClause(result);
+      if (resultSplit) {
+        recursive = recursive || resultSplit.recursive;
+        const withSql = formatWithClause(
+          [...hoistedCteParts, resultSplit.cteDefsSql],
+          { recursive },
+        );
+        return `${withSql}\n${resultSplit.mainSql}`;
+      }
+
+      return `${formatWithClause(hoistedCteParts, { recursive })}\n${result}`;
     } finally {
       this.orderByJoinAmbiguity = prevOrderByJoinAmbiguity;
     }
@@ -1620,12 +1655,43 @@ export class BaseQuery {
     return select.trim().match(/^[a-zA-Z0-9_\-`".*]+$/i) ? select : `(${select})`;
   }
 
+  /**
+   * Assemble multi-stage CTEs. Hoists any leading WITH inside each cte body so
+   * dialects that reject nested WITH (GBase, Oracle, …) get a flat WITH list.
+   */
   withQueries(select, withQueries) {
     if (!withQueries || !withQueries.length) {
       return select;
     }
-    // TODO escape alias
-    return `WITH\n${withQueries.map(q => `${q.alias} AS (${q.query})`).join(',\n')}\n${select}`;
+
+    const flatCteParts = [];
+    let recursive = false;
+
+    withQueries.forEach((q) => {
+      const split = splitLeadingWithClause(q.query);
+      if (split) {
+        if (split.recursive) {
+          recursive = true;
+        }
+        // Keep hoisted defs immediately before their owning cte_N (dependency order).
+        flatCteParts.push(split.cteDefsSql);
+        flatCteParts.push(`${q.alias} AS (${split.mainSql})`);
+      } else {
+        // TODO escape alias
+        flatCteParts.push(`${q.alias} AS (${q.query})`);
+      }
+    });
+
+    let mainSelect = select;
+    const selectSplit = splitLeadingWithClause(select);
+    if (selectSplit) {
+      recursive = recursive || selectSplit.recursive;
+      // Outer SELECT's own CTEs come last among CTE defs, before the final SELECT.
+      flatCteParts.push(selectSplit.cteDefsSql);
+      mainSelect = selectSplit.mainSql;
+    }
+
+    return `${formatWithClause(flatCteParts, { recursive })}\n${mainSelect}`;
   }
 
   fullKeyQueryAggregateMeasures(context) {

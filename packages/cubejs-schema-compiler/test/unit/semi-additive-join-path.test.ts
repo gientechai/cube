@@ -135,14 +135,14 @@ describe('semi-additive join path (partition_bounds)', () => {
 
     const [sql] = query.buildSqlAndParams();
 
-    expect(sql).toMatch(/WITH base_data AS/i);
-    expect(sql).toMatch(/partition_bounds_0 AS/i);
-    expect(sql).toMatch(/matched_data AS/i);
+    expect(sql).toMatch(/WITH\s+base_data_\d+\s+AS/i);
+    expect(sql).toMatch(/partition_bounds_\d+_0 AS/i);
+    expect(sql).toMatch(/matched_data_\d+ AS/i);
     expect(sql).toMatch(/MAX\(`_loan_debt__etl_date_date_for_ordering`\)/i);
-    expect(sql).toMatch(/INNER JOIN partition_bounds_0/i);
+    expect(sql).toMatch(/INNER JOIN partition_bounds_\d+_0/i);
     expect(sql).not.toMatch(/__sa_base_inner/i);
     expect(sql).not.toMatch(/OVER\s*\(/i);
-    expect(sql).not.toMatch(/windowed_data AS/i);
+    expect(sql).not.toMatch(/windowed_data_\d+ AS/i);
     // Layer B: ordering 列为裸字段（展示用 day 列仍可 CONVERT_TZ）
     expect(sql).toMatch(/`main__loan_debt`\.etl_date_date as `_loan_debt__etl_date_date_for_ordering`/i);
   });
@@ -172,9 +172,9 @@ describe('semi-additive join path (partition_bounds)', () => {
 
     const [sql] = query.buildSqlAndParams();
 
-    expect(sql).toMatch(/WITH base_data AS/i);
-    expect(sql).toMatch(/partition_bounds_0 AS/i);
-    expect(sql).toMatch(/matched_data AS/i);
+    expect(sql).toMatch(/WITH\s+base_data_\d+\s+AS/i);
+    expect(sql).toMatch(/partition_bounds_\d+_0 AS/i);
+    expect(sql).toMatch(/matched_data_\d+ AS/i);
     // No group dimension -> no GROUP BY clause, and SELECT must not start with a dangling comma.
     expect(sql).not.toMatch(/SELECT\s*,/i);
     expect(sql).not.toMatch(/GROUP BY\s*\)/i);
@@ -183,7 +183,7 @@ describe('semi-additive join path (partition_bounds)', () => {
     expect(sql).not.toMatch(/GROUP BY/i);
     // Final projection is the semi-additive COALESCE(...) measure with its alias.
     expect(sql).toMatch(/COALESCE\(SUM\(CASE WHEN/i);
-    expect(sql).toMatch(/as `loan_debt__dkye` FROM matched_data/i);
+    expect(sql).toMatch(/as `loan_debt__dkye` FROM matched_data_\d+/i);
   });
 
   it('produces valid SQL when aggregateSubQuery keys path has dateRange-only timeDim + multiplied dimension', () => {
@@ -206,9 +206,9 @@ describe('semi-additive join path (partition_bounds)', () => {
 
     const [sql] = query.buildSqlAndParams();
 
-    expect(sql).toMatch(/WITH base_data AS/i);
-    expect(sql).toMatch(/partition_bounds_0 AS/i);
-    expect(sql).toMatch(/matched_data AS/i);
+    expect(sql).toMatch(/WITH\s+base_data_\d+\s+AS/i);
+    expect(sql).toMatch(/partition_bounds_\d+_0 AS/i);
+    expect(sql).toMatch(/matched_data_\d+ AS/i);
     // keys 子查询路径（行倍增）；方言可能省略 AS，用 keys.列 引用判定
     expect(sql).toMatch(/[`"]keys[`"]\s*\./);
     // 修复前：`keys`.null as null
@@ -247,13 +247,13 @@ describe('semi-additive join path (partition_bounds)', () => {
 
     const [sql] = query.buildSqlAndParams();
 
-    expect(sql).toMatch(/WITH base_data AS/i);
-    expect(sql).toMatch(/partition_bounds_0 AS/i);
-    expect(sql).toMatch(/matched_data AS/i);
+    expect(sql).toMatch(/WITH\s+base_data_\d+\s+AS/i);
+    expect(sql).toMatch(/partition_bounds_\d+_0 AS/i);
+    expect(sql).toMatch(/matched_data_\d+ AS/i);
     expect(sql).not.toMatch(/SELECT\s*,/i);
     expect(sql).not.toMatch(/GROUP BY/i);
     expect(sql).toMatch(/COALESCE\(SUM\(CASE WHEN/i);
-    expect(sql).toMatch(/as `loan_debt__dkye` FROM matched_data/i);
+    expect(sql).toMatch(/as `loan_debt__dkye` FROM matched_data_\d+/i);
   });
 
   it('falls back to windowed_data OVER for avg windowChoice', () => {
@@ -271,10 +271,10 @@ describe('semi-additive join path (partition_bounds)', () => {
 
     const [sql] = query.buildSqlAndParams();
 
-    expect(sql).toMatch(/windowed_data AS/i);
+    expect(sql).toMatch(/windowed_data_\d+ AS/i);
     expect(sql).toMatch(/OVER\s*\(/i);
     expect(sql).not.toMatch(/partition_bounds_/i);
-    expect(sql).not.toMatch(/matched_data AS/i);
+    expect(sql).not.toMatch(/matched_data_\d+ AS/i);
   });
 
   it('uses join path on Postgres as well', () => {
@@ -307,7 +307,7 @@ describe('semi-additive join path (partition_bounds)', () => {
       );
       const [sql] = query.buildSqlAndParams();
       expect(sql).toMatch(/partition_bounds_/i);
-      expect(sql).toMatch(/matched_data AS/i);
+      expect(sql).toMatch(/matched_data_\d+ AS/i);
       expect(sql).not.toMatch(/__sa_base_inner/i);
       expect(sql).not.toMatch(/OVER\s*\(/i);
     });

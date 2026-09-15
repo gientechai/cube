@@ -190,4 +190,67 @@ cubes:
     expect(sql).not.toMatch(/\bHAVING\b/i);
     expect(sql).toMatch(/WHERE[^]*`metrics_facts__trx_amount_flow`\s*>\s*\?/i);
   });
+
+  it('multi-stage MoM over semi-additive flattens nested WITH via hoist', async () => {
+    const momCompiler = prepareYamlCompiler(`
+cubes:
+  - name: gbase_loan
+    sql_table: test_loan_detail
+    dimensions:
+      - name: data_date
+        sql: data_date
+        type: time
+    measures:
+      - name: balance_begin
+        type: sum
+        sql: loan_balance
+        non_additive_dimension:
+          name: data_date
+          window_choice: min
+      - name: balance_begin_last_month
+        type: number
+        sql: "{balance_begin}"
+        multi_stage: true
+        time_shift:
+          - interval: 1 month
+            type: prior
+      - name: balance_begin_mom
+        type: number
+        sql: "({balance_begin} - {balance_begin_last_month}) / NULLIF({balance_begin_last_month}, 0)"
+        multi_stage: true
+`);
+    await momCompiler.compiler.compile();
+    const query = new GBaseQuery(
+      {
+        joinGraph: momCompiler.joinGraph,
+        cubeEvaluator: momCompiler.cubeEvaluator,
+        compiler: momCompiler.compiler,
+      },
+      {
+        measures: ['gbase_loan.balance_begin_mom'],
+        timeDimensions: [{
+          dimension: 'gbase_loan.data_date',
+          granularity: 'day',
+          dateRange: ['2026-08-15', '2026-09-15'],
+        }],
+        timezone: 'UTC',
+        useNativeSqlPlanner: false,
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+    // Single top-level WITH; semi-additive CTEs hoisted beside cte_N.
+    expect(sql).toMatch(/^WITH\b/i);
+    expect((sql.match(/\bWITH\b/gi) || []).length).toBe(1);
+    expect(sql).not.toMatch(/FROM\s*\(\s*WITH\b/i);
+    expect(sql).not.toMatch(/\bAS\s*\(\s*WITH\b/i);
+    expect(sql).toMatch(/\bbase_data_\d+\s+AS\b/i);
+    expect(sql).toMatch(/\bmatched_data_\d+\s+AS\b/i);
+    expect(sql).toMatch(/\bcte_\d+\s+AS\b/i);
+    // Hoisted base_data appears before the cte that consumes it.
+    const baseIdx = sql.search(/\bbase_data_\d+\s+AS\b/i);
+    const cteIdx = sql.search(/\bcte_\d+\s+AS\b/i);
+    expect(baseIdx).toBeGreaterThanOrEqual(0);
+    expect(cteIdx).toBeGreaterThan(baseIdx);
+  });
 });

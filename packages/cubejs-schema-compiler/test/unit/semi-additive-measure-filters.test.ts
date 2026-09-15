@@ -7,7 +7,7 @@ import { prepareJsCompiler } from './PrepareCompiler';
 
 /** JOIN 路径用 matched_data，窗口路径用 windowed_data */
 const expectSemiAdditiveCtePath = (sql: string) => {
-  expect(sql).toMatch(/WITH base_data AS/i);
+  expect(sql).toMatch(/WITH\s+base_data_\d+\s+AS/i);
   expect(sql).toMatch(/windowed_data|matched_data/i);
 };
 
@@ -23,7 +23,7 @@ const expectPaSemiAdditiveSumDivisorSql = (sql: string, paMeasureSuffix: string)
 
 const expectNoMainTableInSemiAdditiveOuterAggregation = (sql: string) => {
   expect(sql).not.toMatch(/FROM windowed_data[\s\S]*main__/i);
-  expect(sql).not.toMatch(/FROM matched_data[\s\S]*main__/i);
+  expect(sql).not.toMatch(/FROM matched_data_\d+[\s\S]*main__/i);
 };
 
 describe('semi-additive measure schema filters', () => {
@@ -80,7 +80,7 @@ describe('semi-additive measure schema filters', () => {
     // JOIN 路径：partition_bounds 上 MAX(...)，不再使用 OVER
     expect(sql).toMatch(/MAX\("_score1__exam_date_for_ordering"\)/i);
     expect(sql).toMatch(/partition_bounds_/i);
-    expect(sql).toMatch(/matched_data AS/i);
+    expect(sql).toMatch(/matched_data_\d+ AS/i);
     expect(sql).not.toMatch(/MAX\(CASE WHEN.*_raw IS NOT NULL/i);
     expect(sql).not.toMatch(/OVER\s*\(/i);
   });
@@ -140,8 +140,8 @@ describe('semi-additive calculated measure references', () => {
 
     const [sql] = query.buildSqlAndParams();
 
-    expect(sql).toMatch(/WITH base_data AS/i);
-    expect(sql).toMatch(/matched_data AS/i);
+    expect(sql).toMatch(/WITH\s+base_data_\d+\s+AS/i);
+    expect(sql).toMatch(/matched_data_\d+ AS/i);
     expect(sql).toMatch(/partition_bounds_/i);
     expect(sql).toMatch(/MAX\("_score1__exam_date_for_ordering"\)/i);
     expect(sql).toMatch(/MIN\("_score1__exam_date_for_ordering"\)/i);
@@ -164,7 +164,7 @@ describe('semi-additive calculated measure references', () => {
 
     const [sql] = query.buildSqlAndParams();
 
-    expect(sql).toMatch(/WITH base_data AS/i);
+    expect(sql).toMatch(/WITH\s+base_data_\d+\s+AS/i);
     expect(sql).toMatch(/AS q_0[\s\S]*ORDER BY `score1__fuhezhibiao` IS NULL ASC, `score1__fuhezhibiao` DESC/i);
     expect(sql).not.toMatch(/ORDER BY[\s\S]*sum\("score1"\.score\)/i);
   });
@@ -184,7 +184,7 @@ describe('semi-additive calculated measure references', () => {
 
     const [sql] = query.buildSqlAndParams();
 
-    expect(sql).toMatch(/WITH base_data AS/i);
+    expect(sql).toMatch(/WITH\s+base_data_\d+\s+AS/i);
     expect(sql).toMatch(/(?:AS )?q_0[\s\S]*ORDER BY "score1__fuhezhibiao" DESC NULLS LAST/i);
     expect(sql).not.toMatch(/ORDER BY[\s\S]*sum\("score1"\.score\)/i);
   });
@@ -204,7 +204,7 @@ describe('semi-additive calculated measure references', () => {
 
     const [sql] = query.buildSqlAndParams();
 
-    expect(sql).toMatch(/WITH base_data AS/i);
+    expect(sql).toMatch(/WITH\s+base_data_\d+\s+AS/i);
     expect(sql).toMatch(/(?:AS )?q_0[\s\S]*ORDER BY "score1__fuhezhibiao" DESC NULLS LAST/i);
     expect(sql).not.toMatch(/ORDER BY[\s\S]*sum\("score1"\.score\)/i);
   });
@@ -224,8 +224,8 @@ describe('semi-additive calculated measure references', () => {
 
     const [sql] = query.buildSqlAndParams();
 
-    expect(sql).toMatch(/^WITH base_data AS/i);
-    expect(sql).toMatch(/matched_data AS/i);
+    expect(sql).toMatch(/^WITH\s+base_data_\d+\s+AS/i);
+    expect(sql).toMatch(/matched_data_\d+ AS/i);
     expect(sql).toMatch(/partition_bounds_/i);
     expect(sql).not.toMatch(/FROM\s*\(\s*WITH/i);
     expect(sql).toMatch(/q_0[\s\S]*ORDER BY "score1__fuhezhibiao" DESC NULLS LAST/i);
@@ -300,7 +300,7 @@ describe('semi-additive multiple time granularities in base_data', () => {
 
     const [sql] = query.buildSqlAndParams();
 
-    expect(sql).toMatch(/WITH base_data AS/i);
+    expect(sql).toMatch(/WITH\s+base_data_\d+\s+AS/i);
     expect(sql).toMatch(/`loan_detail_1__distr_date_day`/i);
     expect(sql).toMatch(/`loan_detail_1__distr_date_month`/i);
     expect(sql).toMatch(/SELECT `loan_detail_1__distr_date_day`, `loan_detail_1__distr_date_month`/i);
@@ -332,10 +332,10 @@ describe('semi-additive multiple time granularities in base_data', () => {
     // JOIN 路径：bounds GROUP BY 用最细粒度（month），year 仅作为展示列出现在 SELECT
     expect(sql).toMatch(/partition_bounds_/i);
     expect(sql).toMatch(
-      /partition_bounds_0 AS \(\s*SELECT[\s\S]*%Y-%m-01[\s\S]*GROUP BY[\s\S]*%Y-%m-01/i
+      /partition_bounds_\d+_0 AS \(\s*SELECT[\s\S]*%Y-%m-01[\s\S]*GROUP BY[\s\S]*%Y-%m-01/i
     );
     expect(sql).not.toMatch(
-      /partition_bounds_0 AS \(\s*SELECT[\s\S]*%Y-01-01T00:00:00\.000/i
+      /partition_bounds_\d+_0 AS \(\s*SELECT[\s\S]*%Y-01-01T00:00:00\.000/i
     );
     expect(sql).not.toMatch(/OVER\s*\(/i);
   });
@@ -425,7 +425,7 @@ describe('grouped measure_filter pushed down into semi-additive base_data', () =
 
     const [sql] = query.buildSqlAndParams();
 
-    expect(sql).toMatch(/WITH base_data AS/i);
+    expect(sql).toMatch(/WITH\s+base_data_\d+\s+AS/i);
     // The OR predicate must live inside base_data WHERE, using the main__ alias.
     expect(sql).toMatch(
       /FROM loan_stand_book_detail_list_320 AS `main__loan_detail_1`\s+WHERE \(\(\(`main__loan_detail_1`\.cust_type = '民营企业'\)\) OR \(\(`main__loan_detail_1`\.cust_type = '外资企业' AND \(`main__loan_detail_1`\.distr_date >= '2026-01-01' AND `main__loan_detail_1`\.distr_date <= '2026-12-31'\)\)\)\)/i
@@ -455,7 +455,7 @@ describe('grouped measure_filter pushed down into semi-additive base_data', () =
 
     const [sql] = query.buildSqlAndParams();
 
-    expect(sql).toMatch(/WITH base_data AS/i);
+    expect(sql).toMatch(/WITH\s+base_data_\d+\s+AS/i);
     expect(sql).toMatch(/"main__loan_detail_1"\.cust_type = '民营企业'/i);
     expect(sql).toMatch(/"main__loan_detail_1"\.cust_type = '外资企业'/i);
     // Outer scope must not reference the un-aliased cube column.
@@ -510,11 +510,11 @@ describe('semi-additive windowGroupings dimensions in base_data', () => {
 
     const [sql] = query.buildSqlAndParams();
 
-    expect(sql).toMatch(/WITH base_data AS/i);
+    expect(sql).toMatch(/WITH\s+base_data_\d+\s+AS/i);
     expect(sql).toMatch(/"facts__city"/i);
     expect(sql).toMatch(/"facts__city_code"/i);
     expect(sql).toMatch(/partition_bounds_/i);
-    expect(sql).toMatch(/matched_data AS/i);
+    expect(sql).toMatch(/matched_data_\d+ AS/i);
     // windowGroupings 进入 bounds 的 GROUP BY（JOIN 路径不再使用 PARTITION BY）
     expect(sql).toMatch(/GROUP BY[\s\S]*"facts__city"/i);
     expect(sql).not.toMatch(/OVER\s*\(/i);
@@ -583,7 +583,7 @@ describe('period_average with semi-additive base measure', () => {
 
     const [sql] = query.buildSqlAndParams();
 
-    expect(sql).not.toMatch(/WITH base_data AS/i);
+    expect(sql).not.toMatch(/WITH\s+base_data_\d+\s+AS/i);
     expect(sql).not.toMatch(/windowed_data/i);
     expect(sql).toMatch(/SUM\s*\(/i);
     expect(sql).not.toMatch(/OVER\s*\(/i);

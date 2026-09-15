@@ -129,6 +129,9 @@
     },
     {
       "path": "packages/cubejs-dm-driver"
+    },
+    {
+      "path": "packages/cubejs-gbase-driver"
     }
   ]
 }

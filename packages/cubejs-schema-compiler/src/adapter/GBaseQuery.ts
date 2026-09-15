@@ -7,6 +7,7 @@
  *
  * Additional GBase MPP constraints handled here:
  * - No nested `WITH RECURSIVE` inside outer CTE bodies → digits CROSS JOIN time series
+ * - Nested multi-stage + semi-additive WITH → BaseQuery flat WITH hoist
  * - No ORDER BY aggregate alias on grouped outer queries → repeat measureSql for PA data path
  * - Temp-table materialization truncates long identifiers (64 bytes) → `pa_b_<measure>` prefix
  * - Tesseract top-level multi-CTE rolling/time_shift SQL is rejected by gcluster → JS planner
