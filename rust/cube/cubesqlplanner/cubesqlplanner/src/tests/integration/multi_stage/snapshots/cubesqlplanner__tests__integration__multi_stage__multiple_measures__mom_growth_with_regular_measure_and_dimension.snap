@@ -1,0 +1,15 @@
+---
+source: cubesqlplanner/cubesqlplanner/src/tests/integration/multi_stage/multiple_measures.rs
+expression: result
+---
+orders__category | orders__created_at_month | orders__mom_growth      | orders__total_amount
+-----------------+--------------------------+-------------------------+---------------------
+books            | 2024-01-01 00:00:00      | NULL                    | 230.00              
+books            | 2024-02-01 00:00:00      | -0.34782608695652173913 | 150.00              
+books            | 2024-03-01 00:00:00      | 2.3333333333333333      | 500.00              
+clothing         | 2024-01-01 00:00:00      | NULL                    | 120.00              
+clothing         | 2024-02-01 00:00:00      | 1.9166666666666667      | 350.00              
+clothing         | 2024-03-01 00:00:00      | -0.28571428571428571429 | 250.00              
+electronics      | 2024-01-01 00:00:00      | NULL                    | 150.00              
+electronics      | 2024-02-01 00:00:00      | 0.66666666666666666667  | 250.00              
+electronics      | 2024-03-01 00:00:00      | 0.00000000000000000000  | 250.00
