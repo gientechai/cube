@@ -71,6 +71,18 @@ export class GBaseQuery extends MysqlQuery {
   }
 
   /**
+   * 中间层 CTE 已去掉 LIMIT。MySQL/GBase 会忽略派生表里没有 LIMIT 的 ORDER BY，
+   * JOIN 又按维度等值匹配，这些排序不改变结果，只增加 filesort。
+   * 最外层查询没有 disableExternalPreAggregations，排序保留。
+   */
+  public override orderBy() {
+    if (this.options.disableExternalPreAggregations) {
+      return '';
+    }
+    return super.orderBy();
+  }
+
+  /**
    * GBase 物化 CTE 为临时表时，`__pa_base_*` 限定名解析失败，且标识符上限 64 字节。
    * 使用短前缀 + measure 短名（不含 cube 前缀），例如 `pa_b_period_daily_avg_calendar`。
    */
@@ -133,14 +145,14 @@ export class GBaseQuery extends MysqlQuery {
     }
 
     const groupBy = groupByParts.length ? ` GROUP BY ${groupByParts.join(', ')}` : '';
-    return `SELECT ${forSelect} FROM ${dateSeriesSql}`
-      + ` LEFT JOIN (${baseQuery}) ${this.asSyntaxJoin} ${baseQueryAlias} ON ${dateJoinConditionSql}`
-      + groupBy;
+    return `SELECT ${forSelect} FROM ${dateSeriesSql} LEFT JOIN (${baseQuery}) ${this.asSyntaxJoin} ${baseQueryAlias} ON ${dateJoinConditionSql}${groupBy}`;
   }
 
   /**
    * GBase 不允许在外层 GROUP BY 查询中按聚合别名 ORDER BY（ER_ILLEGAL_REFERENCE）。
    * period_avg_data_daily 路径下外层仅暴露 CTE 列，重复 measureSql() 安全。
+   * multi_stage CTE 外层 ORDER BY（含单支 (SELECT * FROM cte_N) 包装）由 MysqlQuery
+   * 改走别名（避免 ER_BAD_FIELD_ERROR）。
    */
   public override getFieldOrderExpr(id: string) {
     const equalIgnoreCase = (a: string, b: string) => (
@@ -218,15 +230,14 @@ export class GBaseQuery extends MysqlQuery {
   public override fullKeyQueryAggregateMeasures(context?: unknown) {
     const restores: Array<() => void> = [];
     for (const measure of this.measures) {
-      if (!this.isRollingToDateMultiStageMeasure(measure.measure)) {
-        continue;
-      }
-      const definition = measure.measureDefinition();
-      if (definition?.multiStage) {
-        definition.multiStage = false;
-        restores.push(() => {
-          definition.multiStage = true;
-        });
+      if (this.isRollingToDateMultiStageMeasure(measure.measure)) {
+        const definition = measure.measureDefinition();
+        if (definition?.multiStage) {
+          definition.multiStage = false;
+          restores.push(() => {
+            definition.multiStage = true;
+          });
+        }
       }
     }
     try {
