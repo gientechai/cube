@@ -31,7 +31,10 @@ export class MysqlQuery extends BaseQuery {
   public constructor(compilers: any, options: any) {
     super(compilers, options);
 
-    this.useNamedTimezones = getEnv('mysqlUseNamedTimezones', { dataSource: this.dataSource });
+    // getEnv 的 Parameters<> 把单参回调推成元组类型，调用侧需放宽
+    this.useNamedTimezones = getEnv('mysqlUseNamedTimezones', {
+      dataSource: this.dataSource,
+    } as any);
   }
 
   /**
@@ -73,6 +76,14 @@ export class MysqlQuery extends BaseQuery {
       // 外层 ORDER BY 只能看到内层投影别名；展开 measureSql()（含窗口函数）会引用子查询中
       // 不存在的列且重复窗口表达式，须委托 super 用 SELECT 别名。
       if (this.hasPeriodAverageMeasureFilters()) {
+        return super.getFieldOrderExpr(id);
+      }
+      // multi_stage / time_shift：outerMeasuresJoin 从 cte_N AS q_0 取数时，以及
+      // FROM 子查询/CTE 路径，作用域内只有投影别名。单支 CTE 包装
+      // （(SELECT * FROM cte_N) AS q_0，计算指标）同样如此，由 orderByProjectedAlias 标记。
+      // 展开 measureSql()（如 sum(`cube`.amount)）会触发
+      // ER_BAD_FIELD_ERROR: Unknown column … in 'order clause'。
+      if (this.from || this.multiStageQuery || this.orderByJoinAmbiguity || this.orderByProjectedAlias) {
         return super.getFieldOrderExpr(id);
       }
       // Non-semi-additive aggregates on simpleQuery must repeat measureSql() on MySQL.
@@ -235,9 +246,9 @@ export class MysqlQuery extends BaseQuery {
   }
 
   /**
-   * MySQL 系：在默认的双引号 + 无引号基础上，补充反引号限定写法 `​`​`cube``。
+   * MySQL 系：在默认的双引号 + 无引号基础上，补充反引号限定写法 `` `cube` ``。
    */
-  ownedCubeQualifiedColumnReplacements(
+  public override ownedCubeQualifiedColumnReplacements(
     cubeName: string,
     cubeAlias: string,
     escapedCubeName: string,
@@ -305,11 +316,11 @@ export class MysqlQuery extends BaseQuery {
   //   - ownedCubeQualifiedColumnReplacements  标识符引号规则（本库：反引号 + super）
   // ==========================================================================
 
-  periodAverageDateLiteral(dateStr: string): string {
+  public periodAverageDateLiteral(dateStr: string): string {
     return `DATE('${dateStr}')`;
   }
 
-  periodAverageNowExpr(): string {
+  public periodAverageNowExpr(): string {
     const frozenNow = process.env.CUBEJS_TEST_NOW;
     if (frozenNow) {
       return this.periodAverageDateLiteral(frozenNow);
@@ -320,11 +331,11 @@ export class MysqlQuery extends BaseQuery {
     return `DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '${moment().tz(this.timezone).format('Z')}'))`;
   }
 
-  periodAverageToDateExpr(sql: string): string {
+  public periodAverageToDateExpr(sql: string): string {
     return `DATE(${sql})`;
   }
 
-  periodAverageGroupedBucketExpr(bucketColumn: string, options: { aggregateOnce?: boolean } = {}) {
+  public periodAverageGroupedBucketExpr(bucketColumn: string, _options: { aggregateOnce?: boolean } = {}) {
     if (this.ungrouped) {
       return bucketColumn;
     }
@@ -335,7 +346,7 @@ export class MysqlQuery extends BaseQuery {
     return `MIN(${bucketColumn})`;
   }
 
-  periodAverageClosedFormIntervalBucketUnits(avgUnit: string, interval: string, groupedBucket: string) {
+  public periodAverageClosedFormIntervalBucketUnits(avgUnit: string, interval: string, groupedBucket: string) {
     const constant = super.periodAverageClosedFormIntervalBucketUnits(avgUnit, interval, groupedBucket);
     if (constant) {
       return constant;
@@ -356,7 +367,7 @@ export class MysqlQuery extends BaseQuery {
     return null;
   }
 
-  periodAverageCumulativeCalendarUnitCount(
+  public periodAverageCumulativeCalendarUnitCount(
     avgUnit: string,
     interval: string,
     intervalStart: string,
@@ -371,19 +382,19 @@ export class MysqlQuery extends BaseQuery {
     return null;
   }
 
-  periodAverageDaysInMonthBucket(bucketColumn: string) {
+  public periodAverageDaysInMonthBucket(bucketColumn: string) {
     return `GREATEST(DAY(LAST_DAY(${bucketColumn})), 0)`;
   }
 
-  periodAverageDaysInQuarterBucket(bucketColumn: string) {
+  public periodAverageDaysInQuarterBucket(bucketColumn: string) {
     return `GREATEST(DATEDIFF(LAST_DAY(DATE_ADD(${bucketColumn}, INTERVAL 2 MONTH)), DATE(DATE_FORMAT(${bucketColumn}, '%Y-%m-01'))) + 1, 0)`;
   }
 
-  periodAverageDaysInYearBucket(bucketColumn: string) {
+  public periodAverageDaysInYearBucket(bucketColumn: string) {
     return `GREATEST(DATEDIFF(DATE(CONCAT(YEAR(${bucketColumn}), '-12-31')), DATE(CONCAT(YEAR(${bucketColumn}), '-01-01'))) + 1, 0)`;
   }
 
-  periodAverageBucketEndExpr(granularity: string, bucketColumn: string, bucketAlreadyAtInterval = false): string {
+  public periodAverageBucketEndExpr(granularity: string, bucketColumn: string, _bucketAlreadyAtInterval = false): string {
     // MySQL 各桶末表达式（LAST_DAY / DATE_ADD / CONCAT）已对 bucket 列做归一化，
     // 与 bucketAlreadyAtInterval 无关，故忽略该参数。
     switch (granularity) {
@@ -400,7 +411,7 @@ export class MysqlQuery extends BaseQuery {
     }
   }
 
-  periodAverageIntervalStartExpr(interval: string, bucketColumn: string): string {
+  public periodAverageIntervalStartExpr(interval: string, bucketColumn: string): string {
     switch (interval) {
       case 'day':
         return this.periodAverageToDateExpr(bucketColumn);
@@ -415,7 +426,7 @@ export class MysqlQuery extends BaseQuery {
     }
   }
 
-  periodAverageIntervalBucketFromAvgUnit(avgUnitBucket: string, interval: string): string {
+  public periodAverageIntervalBucketFromAvgUnit(avgUnitBucket: string, interval: string): string {
     switch (interval) {
       case 'day':
         return avgUnitBucket;
@@ -432,19 +443,19 @@ export class MysqlQuery extends BaseQuery {
     }
   }
 
-  daysBetweenInclusive(start: string, end: string): string {
+  public daysBetweenInclusive(start: string, end: string): string {
     return `GREATEST((DATEDIFF(${end}, ${start}) + 1), 0)`;
   }
 
-  monthsBetweenInclusive(start: string, end: string): string {
+  public monthsBetweenInclusive(start: string, end: string): string {
     return `GREATEST((TIMESTAMPDIFF(MONTH, ${start}, ${end}) + 1), 0)`;
   }
 
-  quartersBetweenInclusive(start: string, end: string): string {
+  public quartersBetweenInclusive(start: string, end: string): string {
     return `GREATEST((TIMESTAMPDIFF(QUARTER, ${start}, ${end}) + 1), 0)`;
   }
 
-  yearsBetweenInclusive(start: string, end: string): string {
+  public yearsBetweenInclusive(start: string, end: string): string {
     return `GREATEST((TIMESTAMPDIFF(YEAR, ${start}, ${end}) + 1), 0)`;
   }
 

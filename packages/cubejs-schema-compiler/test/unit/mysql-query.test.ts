@@ -60,6 +60,95 @@ describe('ORDER BY on multi-stage JOIN (ambiguous dimension alias)', () => {
     expect(sql).not.toMatch(/ORDER BY 1 IS NULL/);
   });
 
+  it('MysqlQuery orders multi-stage measure JOIN by SELECT alias, not measureSql()', async () => {
+    // 回归：按基指标 DESC 排序时，outerMeasuresJoin 从 cte_N AS q_0 取数，
+    // 若仍展开 sum(`loan_debt`.loan_bal) 会 ER_BAD_FIELD_ERROR（GBase/MySQL）。
+    await compilers.compiler.compile();
+
+    const query = new MysqlQuery(compilers, {
+      measures: ['loan_debt.dkye4'],
+      timeDimensions: [
+        {
+          dimension: 'loan_debt.distr_date',
+          granularity: 'day',
+          dateRange: ['2026-05-03', '2026-06-03'],
+        },
+      ],
+      timezone: 'UTC',
+      order: [{ id: 'loan_debt.dkye', desc: true }],
+    });
+
+    const [sql] = query.buildSqlAndParams();
+
+    // CTE 包装层 ORDER BY 不得引用基表列
+    expect(sql).not.toMatch(
+      /FROM cte_\d+ AS q_0[\s\S]*?ORDER BY[\s\S]*?sum\(`loan_debt`\.loan_bal\)/i
+    );
+    expect(sql).not.toMatch(
+      /FROM cte_\d+ AS q_0[\s\S]*?ORDER BY[\s\S]*?`loan_debt`\.loan_bal/i
+    );
+  });
+
+  it('MysqlQuery + 维度分组 + YoY：CTE 外层 ORDER BY 用别名（GBase ER_BAD_FIELD 回归）', async () => {
+    // 对齐线上：currency 维度 + 同比计算指标 + order by 基指标；filters.inDateRange
+    // promote 后仍会进 multi_stage WITH。外层 FROM cte_N 时不得展开 sum(base.col)。
+    const { compiler, joinGraph, cubeEvaluator } = prepareYamlCompiler(`
+cubes:
+  - name: gbase_loan
+    sql: "SELECT 'CNY' AS currency, 100 AS loan_balance, TIMESTAMP '2026-08-18' AS data_date"
+    dimensions:
+      - name: currency
+        sql: currency
+        type: string
+      - name: data_date
+        sql: data_date
+        type: time
+    measures:
+      - name: gbase_loan_balance1
+        type: sum
+        sql: loan_balance
+      - name: gbase_loan_balance1_last_year
+        type: number
+        sql: "{gbase_loan_balance1}"
+        multi_stage: true
+        time_shift:
+          - time_dimension: data_date
+            interval: 1 year
+            type: prior
+      - name: m_loan_balance_yoy
+        type: number
+        sql: "({gbase_loan_balance1} - {gbase_loan_balance1_last_year}) / NULLIF({gbase_loan_balance1_last_year}, 0)"
+        multi_stage: true
+`);
+
+    await compiler.compile();
+
+    const query = new MysqlQuery(
+      { joinGraph, cubeEvaluator, compiler },
+      {
+        measures: ['gbase_loan.m_loan_balance_yoy'],
+        dimensions: ['gbase_loan.currency'],
+        timeDimensions: [{
+          dimension: 'gbase_loan.data_date',
+          dateRange: ['2026-08-18', '2026-09-18'],
+        }],
+        order: [{ id: 'gbase_loan.gbase_loan_balance1', desc: true }],
+        timezone: 'UTC',
+        useNativeSqlPlanner: false,
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).toMatch(/\bWITH\b/i);
+    expect(sql).not.toMatch(
+      /FROM cte_\d+ AS q_0[\s\S]*?ORDER BY[\s\S]*?sum\(`gbase_loan`\.loan_balance\)/i
+    );
+    expect(sql).not.toMatch(
+      /AS cte_\d+_join[\s\S]*?ORDER BY[\s\S]*?sum\(`gbase_loan`\.loan_balance\)/i
+    );
+  });
+
   it('PostgresQuery uses positional ORDER BY', async () => {
     await compilers.compiler.compile();
 

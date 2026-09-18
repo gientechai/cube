@@ -38,6 +38,7 @@ import { Granularity } from './Granularity';
 import { ParamAllocator } from './ParamAllocator';
 import { PreAggregations } from './PreAggregations';
 import { installQueryCapabilities } from './capabilities/install';
+import { promoteTimeDimensionDateRangeFromFilters } from './helpers/promoteTimeDimensionDateRangeFromFilters';
 import { formatWithClause, splitLeadingWithClause } from './helpers/sqlWithClause';
 // Ensures capability method types merge into BaseQuery for dialect overrides.
 /// <reference path="./capabilities/queryCapabilities.d.ts" />
@@ -147,12 +148,21 @@ export class BaseQuery {
     this.cubeEvaluator = compilers.cubeEvaluator;
     /** @type {import('../compiler/JoinGraph').JoinGraph} */
     this.joinGraph = compilers.joinGraph;
-    this.options = options || {};
+    // Frontends often put the range only in filters.inDateRange; JS time-series /
+    // rolling / multi_stage paths require timeDimensions.dateRange.
+    this.options = promoteTimeDimensionDateRangeFromFilters(options || {});
 
     this.orderHashToString = this.orderHashToString.bind(this);
     this.defaultOrder = this.defaultOrder.bind(this);
     /** @type {boolean} set while generating multi-subquery JOIN ORDER BY */
     this.orderByJoinAmbiguity = false;
+    /**
+     * Set while the outer SELECT of outerMeasuresJoin reads a subquery/CTE.
+     * That SELECT only sees projected aliases; repeating measureSql() references
+     * base-table columns that are out of scope (MySQL/GBase ER_BAD_FIELD_ERROR).
+     * @type {boolean}
+     */
+    this.orderByProjectedAlias = false;
     /** @type {ParamAllocator} */
     this.paramAllocator = this.options.paramAllocator || this.newParamAllocator(this.options.expressionParams);
     this.initFromOptions();
@@ -276,9 +286,7 @@ export class BaseQuery {
     }
     this.compilerCache = this.compilers.compiler.compilerCache;
     if (this.options.timeDimensions?.length) {
-      this.options.timeDimensions = this.options.timeDimensions.map((td) =>
-        this.normalizeTimeDimensionInput(td)
-      );
+      this.options.timeDimensions = this.options.timeDimensions.map((td) => this.normalizeTimeDimensionInput(td));
     }
     this.queryCache = this.compilerCache.getQueryCache({
       measures: this.options.measures,
@@ -1539,7 +1547,7 @@ export class BaseQuery {
     joinOptions = {},
   ) {
     return this.outerMeasuresJoinFullKeyQueryAggregate(
-      multipliedMeasures.concat(regularMeasures).concat(cumulativeMeasures.map(([multiplied, measure]) => measure)),
+      multipliedMeasures.concat(regularMeasures).concat(cumulativeMeasures.map(([_multiplied, measure]) => measure)),
       this.measures,
       toJoin,
       joinOptions,
@@ -1627,7 +1635,15 @@ export class BaseQuery {
       ) {
         result = `${flatToJoin[0].replace(/^SELECT/, `SELECT ${this.topLimit()}`)} ${this.orderBy()}${this.groupByDimensionLimit()}`;
       } else {
-        result = `SELECT ${this.topLimit()}${columnsToSelect} FROM ${this.wrapInParenthesis(flatToJoin[0])} ${this.asSyntaxJoin} q_0 ${join}${havingFilters}${this.orderBy()}${this.groupByDimensionLimit()}`;
+        // Single-branch wraps (calculated multi-stage measures) and multi-branch
+        // JOINs both select from a subquery. ORDER BY must use projected aliases.
+        const prevOrderByProjectedAlias = this.orderByProjectedAlias;
+        this.orderByProjectedAlias = true;
+        try {
+          result = `SELECT ${this.topLimit()}${columnsToSelect} FROM ${this.wrapInParenthesis(flatToJoin[0])} ${this.asSyntaxJoin} q_0 ${join}${havingFilters}${this.orderBy()}${this.groupByDimensionLimit()}`;
+        } finally {
+          this.orderByProjectedAlias = prevOrderByProjectedAlias;
+        }
       }
 
       if (!hoistedCteParts.length) {
@@ -1842,7 +1858,7 @@ export class BaseQuery {
       memberFrom,
     };
 
-    const foundWith = withQueries.find(({ alias, ...q }) => R.equals(subQuery, q));
+    const foundWith = withQueries.find(({ alias: _alias, ...q }) => R.equals(subQuery, q));
 
     if (foundWith) {
       return foundWith;
@@ -2009,11 +2025,16 @@ export class BaseQuery {
     const multiStageTimeDimensions = fromSubQuery && fromTimeDimensions.map(m => fromSubQuery.newTimeDimension(m)).filter(d => d.isMultiStage());
     // TODO not working yet
     const membersToSelect = measures?.concat(multiStageDimensions).concat(multiStageTimeDimensions);
+    // time_shift rewrites the time column with DATE_ADD so prior periods align on the
+    // current axis. memberFrom follows formula reference order, so a prior measure
+    // referenced first becomes q_0 and the shifted dates leak into the result
+    // (2026 data labeled 2027). Anchor dimensions on a branch without time_shift.
+    const dimensionAnchorMemberFrom = this.multiStageMemberFromForDimensionAnchor(withQuery.memberFrom);
     const select = fromSubQuery && fromSubQuery.outerMeasuresJoinFullKeyQueryAggregate(
       membersToSelect,
       membersToSelect,
-      withQuery.memberFrom.map(f => f.alias),
-      { multiStageBranchCount: withQuery.memberFrom?.length ?? 0 },
+      dimensionAnchorMemberFrom.map(f => f.alias),
+      { multiStageBranchCount: dimensionAnchorMemberFrom.length },
     );
     const fromSql = select && this.wrapInParenthesis(select);
 
@@ -2059,10 +2080,10 @@ export class BaseQuery {
     const effectiveRenderedReference = useFromSubQuery ? renderedReferenceContext.renderedReference : undefined;
 
     if (stageHasMeasureDefinitionFilters) {
-      const measures = withQuery.measures.map((m) => this.newMeasure(m));
+      const stageMeasures = withQuery.measures.map((m) => this.newMeasure(m));
       return {
         query: this.evaluateSymbolSqlWithContext(
-          () => this.regularMeasuresSubQuery(measures),
+          () => this.regularMeasuresSubQuery(stageMeasures),
           {
             ...renderedReferenceContext,
             renderedReference: undefined,
@@ -2125,6 +2146,32 @@ export class BaseQuery {
       ),
       alias: withQuery.alias
     };
+  }
+
+  /**
+   * Put branches without time_shift first so q_0 (dimension source, LEFT JOIN anchor)
+   * keeps the query time axis. Shifted branches stay on the right for alignment.
+   * @param {Array<object>|undefined} memberFrom
+   * @returns {Array<object>|undefined}
+   */
+  multiStageMemberFromForDimensionAnchor(memberFrom) {
+    if (!memberFrom || memberFrom.length < 2) {
+      return memberFrom;
+    }
+    const hasTimeShift = (branch) => (branch.measures || []).some((measurePath) => {
+      try {
+        const definition = this.newMeasure(measurePath).definition();
+        return Boolean(definition?.timeShift?.length || definition?.timeShiftReferences?.length);
+      } catch (e) {
+        return false;
+      }
+    });
+    const unshifted = memberFrom.filter((branch) => !hasTimeShift(branch));
+    const shifted = memberFrom.filter((branch) => hasTimeShift(branch));
+    if (!unshifted.length || !shifted.length) {
+      return memberFrom;
+    }
+    return unshifted.concat(shifted);
   }
 
   dimensionsJoinCondition(leftAlias, rightAlias) {
@@ -3673,7 +3720,7 @@ export class BaseQuery {
    *   ② `cube.col`   — 无引号写法（所有库的兜底）。
    *
    * 子类 override 时建议在 `super` 基础上做增量，仅补充本方言特有的引号字符，
-   * 例如 MySQL/BigQuery 追加反引号 `​`​`cube``、SQL Server 追加 `[cube]`，
+   * 例如 MySQL/BigQuery 追加反引号 `` `cube` ``、SQL Server 追加 `[cube]`，
    * 避免遗漏默认已覆盖的双引号写法。
    *
    * @protected
@@ -5773,7 +5820,7 @@ export class BaseQuery {
         : {};
       // Filtering aliases that somehow relate to this group members
       const aliasesForGroupMembers = Object.entries(aliases)
-        .filter(([key, value]) => groupMembers.includes(key))
+        .filter(([key]) => groupMembers.includes(key))
         .map(([_key, value]) => value);
       const filter = BaseQuery.findAndSubTreeForFilterGroup(
         newGroupFilter({ operator: 'and', values: allFilters }),

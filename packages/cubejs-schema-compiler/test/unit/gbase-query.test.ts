@@ -253,4 +253,154 @@ cubes:
     expect(baseIdx).toBeGreaterThanOrEqual(0);
     expect(cteIdx).toBeGreaterThan(baseIdx);
   });
+
+  it('promotes filters.inDateRange onto timeDimensions.dateRange for time series', async () => {
+    const query = new GBaseQuery(
+      { joinGraph: compilers.joinGraph, cubeEvaluator: compilers.cubeEvaluator, compiler: compilers.compiler },
+      {
+        measures: ['metrics_facts.trx_amount_flow'],
+        filters: [{
+          member: 'metrics_facts.stat_dt',
+          operator: 'inDateRange',
+          values: ['2026-08-17', '2026-09-17'],
+        }],
+        timeDimensions: [{
+          dimension: 'metrics_facts.stat_dt',
+          granularity: 'day',
+        }],
+        timezone: 'UTC',
+        useNativeSqlPlanner: false,
+      },
+    );
+
+    expect(query.timeDimensions[0].dateRange).toEqual(['2026-08-17', '2026-09-17']);
+    const [sql] = query.buildSqlAndParams();
+    expect(sql).toMatch(/TIMESTAMP\(/i);
+    expect(() => query.timeDimensions[0].timeSeries()).not.toThrow();
+  });
+
+  it('YoY 计算指标默认排序时，外层 ORDER BY 使用投影别名', async () => {
+    // 回归：维度 + 同比计算指标、无时间粒度时，outerMeasuresJoin 把单支 CTE
+    // 包成 (SELECT * FROM cte_N) AS q_0。此时 orderByJoinAmbiguity 为 false，
+    // MysqlQuery 会展开 measureSql()，ORDER BY 引用基表列
+    // `gbase_loan`.loan_balance，GBase 报 ER_BAD_FIELD_ERROR。
+    const yoyCompiler = prepareYamlCompiler(`
+cubes:
+  - name: gbase_loan
+    sql_table: test_loan_detail
+    dimensions:
+      - name: customer_name
+        sql: customer_name
+        type: string
+      - name: currency
+        sql: currency
+        type: string
+      - name: data_date
+        sql: data_date
+        type: time
+    measures:
+      - name: gbase_loan_balance1
+        type: sum
+        sql: loan_balance
+      - name: gbase_loan_balance1_last_year
+        type: number
+        sql: "{gbase_loan_balance1}"
+        multi_stage: true
+        time_shift:
+          - time_dimension: data_date
+            interval: 1 year
+            type: prior
+      - name: m_loan_balance_yoy
+        type: number
+        sql: "CASE WHEN {gbase_loan_balance1_last_year} IS NULL THEN NULL WHEN {gbase_loan_balance1_last_year} = 0 THEN NULL WHEN {gbase_loan_balance1_last_year} > 0 THEN ({gbase_loan_balance1} - {gbase_loan_balance1_last_year}) / {gbase_loan_balance1_last_year} ELSE ({gbase_loan_balance1} - {gbase_loan_balance1_last_year}) / ABS({gbase_loan_balance1_last_year}) END"
+        multi_stage: true
+`);
+    await yoyCompiler.compiler.compile();
+
+    const query = new GBaseQuery(
+      {
+        joinGraph: yoyCompiler.joinGraph,
+        cubeEvaluator: yoyCompiler.cubeEvaluator,
+        compiler: yoyCompiler.compiler,
+      },
+      {
+        measures: ['gbase_loan.m_loan_balance_yoy'],
+        dimensions: ['gbase_loan.customer_name', 'gbase_loan.currency'],
+        timezone: 'UTC',
+        useNativeSqlPlanner: false,
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).not.toMatch(
+      /FROM \(SELECT \* FROM cte_\d+\) AS q_0[\s\S]*ORDER BY[\s\S]*`gbase_loan`\.loan_balance/i
+    );
+    expect(sql).toMatch(
+      /FROM \(SELECT \* FROM cte_\d+\) AS q_0[\s\S]*ORDER BY `gbase_loan__m_loan_balance_yoy` IS NULL ASC, `gbase_loan__m_loan_balance_yoy` DESC/i
+    );
+  });
+
+  it('同比 JOIN 的时间轴来自未平移的本期分支', async () => {
+    // 回归：公式先引用 last_year 时，memberFrom[0] 是 time_shift 分支。
+    // 它的 data_date 已被 DATE_ADD 一年，作为 q_0 会把 2026 的数据标成 2027。
+    const yoyCompiler = prepareYamlCompiler(`
+cubes:
+  - name: gbase_loan
+    sql_table: test_loan_detail
+    dimensions:
+      - name: customer_name
+        sql: customer_name
+        type: string
+      - name: currency
+        sql: currency
+        type: string
+      - name: data_date
+        sql: data_date
+        type: time
+    measures:
+      - name: gbase_loan_balance1
+        type: sum
+        sql: loan_balance
+      - name: gbase_loan_balance1_last_year
+        type: number
+        sql: "{gbase_loan_balance1}"
+        multi_stage: true
+        time_shift:
+          - time_dimension: data_date
+            interval: 1 year
+            type: prior
+      - name: m_loan_balance_yoy
+        type: number
+        sql: "CASE WHEN {gbase_loan_balance1_last_year} IS NULL THEN NULL WHEN {gbase_loan_balance1_last_year} = 0 THEN NULL WHEN {gbase_loan_balance1_last_year} > 0 THEN ({gbase_loan_balance1} - {gbase_loan_balance1_last_year}) / {gbase_loan_balance1_last_year} ELSE ({gbase_loan_balance1} - {gbase_loan_balance1_last_year}) / ABS({gbase_loan_balance1_last_year}) END"
+        multi_stage: true
+`);
+    await yoyCompiler.compiler.compile();
+
+    const query = new GBaseQuery(
+      {
+        joinGraph: yoyCompiler.joinGraph,
+        cubeEvaluator: yoyCompiler.cubeEvaluator,
+        compiler: yoyCompiler.compiler,
+      },
+      {
+        measures: ['gbase_loan.m_loan_balance_yoy'],
+        dimensions: ['gbase_loan.customer_name', 'gbase_loan.currency', 'gbase_loan.data_date'],
+        timezone: 'UTC',
+        useNativeSqlPlanner: false,
+      },
+    );
+
+    const [sql] = query.buildSqlAndParams();
+
+    expect(sql).toMatch(/FROM cte_2 AS q_0 LEFT JOIN cte_1 AS q_1/);
+    expect(sql).not.toMatch(/FROM cte_1 AS q_0 LEFT JOIN cte_2/);
+    expect(sql).toMatch(
+      /cte_2 AS \(SELECT[\s\S]*?`gbase_loan`\.data_date `gbase_loan__data_date`[\s\S]*?GROUP BY `gbase_loan`\.customer_name, `gbase_loan`\.currency, `gbase_loan`\.data_date/
+    );
+    expect(sql).toMatch(/DATE_ADD\(`gbase_loan`\.data_date, INTERVAL 1 YEAR\)/);
+    const cteSection = sql.split(/\nSELECT /)[0];
+    expect(cteSection).not.toMatch(/ORDER BY/i);
+    expect(sql).toMatch(/ORDER BY `gbase_loan__m_loan_balance_yoy` IS NULL ASC/);
+  });
 });

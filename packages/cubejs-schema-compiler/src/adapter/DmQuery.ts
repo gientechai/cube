@@ -13,7 +13,7 @@
  * - escapeColumnName：对 DM_xxx 短别名不再加引号。
  * - overTimeSeriesSelect：用 WITH DM_BASE AS (...) 替代子查询别名，避免达梦解析错误。
  * - addInterval/subtractInterval：仅「整天」且无时分秒偏移时改用 DATE±N，避免 NUMTODSINTERVAL 升为 TIMESTAMP后与 TO_TIMESTAMP_TZ比较在 DM 上报类型不匹配。
- * - withTimeDimensionDateRangeFromFilters：将 filters.inDateRange 提升到 timeDimensions.dateRange，供 Tesseract rolling window 使用。
+ * - filters.inDateRange → timeDimensions.dateRange 由 BaseQuery 统一 promote。
  * - generated_time_series_*：DUAL 上 CONNECT BY 生成 gen.lv，再 CROSS JOIN bounds 展开时间轴；无 dateRange 时从 GetDateRange 的 MIN/MAX 推断范围。
  */
 import { parseSqlInterval } from '@cubejs-backend/shared';
@@ -26,7 +26,9 @@ const DM_MAX_ALIAS_LENGTH = 30;
 function simpleHash(s: string): number {
   let h = 0;
   for (let i = 0; i < s.length; i++) {
+    // eslint-disable-next-line no-bitwise -- 经典 32-bit string hash
     h = ((h << 5) - h) + s.charCodeAt(i);
+    // eslint-disable-next-line no-bitwise -- ToInt32
     h |= 0;
   }
   return h;
@@ -42,100 +44,7 @@ const GRANULARITY_VALUE = {
   year: 'YYYY'
 };
 
-type QueryFilter = {
-  member?: string;
-  dimension?: string;
-  operator?: string;
-  values?: string[];
-  and?: QueryFilter[];
-  or?: QueryFilter[];
-};
-
-type QueryTimeDimension = {
-  dimension: string;
-  granularity?: string;
-  dateRange?: string | [string, string];
-};
-
-type QueryOptions = {
-  filters?: QueryFilter[];
-  timeDimensions?: QueryTimeDimension[];
-  [key: string]: unknown;
-};
-
 export class DmQuery extends OracleQuery {
-  constructor(compilers, options: QueryOptions) {
-    super(compilers, DmQuery.withTimeDimensionDateRangeFromFilters(options));
-  }
-
-  /**
-   * Frontends often send the range only as filters.inDateRange — promote it for time series planning.
-   */
-  static withTimeDimensionDateRangeFromFilters(options: QueryOptions): QueryOptions {
-    if (!options?.timeDimensions?.length || !options?.filters?.length) {
-      return options;
-    }
-
-    const filterDateRanges = DmQuery.collectInDateRangeFilters(options.filters);
-    if (!filterDateRanges.length) {
-      return options;
-    }
-
-    let changed = false;
-    const timeDimensions = options.timeDimensions.map((timeDimension) => {
-      if (timeDimension.dateRange) {
-        return timeDimension;
-      }
-
-      const matchedRange = filterDateRanges.find(
-        ({ dimension }) => dimension === timeDimension.dimension
-      );
-      if (!matchedRange) {
-        return timeDimension;
-      }
-
-      changed = true;
-      return {
-        ...timeDimension,
-        dateRange: matchedRange.dateRange,
-      };
-    });
-
-    return changed ? { ...options, timeDimensions } : options;
-  }
-
-  private static collectInDateRangeFilters(
-    filters: QueryFilter[],
-    result: Array<{ dimension: string; dateRange: [string, string] }> = [],
-  ): Array<{ dimension: string; dateRange: [string, string] }> {
-    filters.forEach((filter) => {
-      if (filter.and) {
-        DmQuery.collectInDateRangeFilters(filter.and, result);
-        return;
-      }
-      if (filter.or) {
-        DmQuery.collectInDateRangeFilters(filter.or, result);
-        return;
-      }
-
-      const dimension = filter.member || filter.dimension;
-      if (
-        filter.operator === 'inDateRange'
-        && dimension
-        && Array.isArray(filter.values)
-        && filter.values.length === 2
-        && !result.some((entry) => entry.dimension === dimension)
-      ) {
-        result.push({
-          dimension,
-          dateRange: [filter.values[0], filter.values[1]],
-        });
-      }
-    });
-
-    return result;
-  }
-
   /**
    * DM 在时间列表达式（常为 TIMESTAMP/DATE）与 TO_TIMESTAMP_TZ 结果比较时易出现「数据类型不匹配」，
    * 将达梦侧的边界值降为无时区 TIMESTAMP，与列类型对齐（仍先用 TO_TIMESTAMP_TZ 解析带 Z 的 ISO 字面量）。
@@ -243,6 +152,7 @@ export class DmQuery extends OracleQuery {
 
   /** 达梦生成的短表别名格式（DM_+hash，可能大小写），用于 escapeColumnName 中判断是否不加重引号 */
   private static readonly DM_SHORT_ALIAS_REGEX = /^DM_[A-Z0-9]+$/i;
+
   /**
    * 达梦中部分关键字（如 USER）作为表名时必须加双引号，否则会被解析为关键字。
    * 这里仅对「纯标识符」或「schema.table」这种简单形式做安全加引号，
@@ -366,7 +276,7 @@ export class DmQuery extends OracleQuery {
     const boundsMin = 'bounds."{{ min_name }}"';
     const anchorDate = DmQuery.generatedTimeSeriesDateAnchor(boundsMin);
     const anchorTs = DmQuery.generatedTimeSeriesTimestampAnchor(boundsMin);
-    const levelLimit = `(\n`
+    const levelLimit = '(\n'
       + '    SELECT '
       + `${DmQuery.generatedTimeSeriesConnectByLevelLimit('{{ range_source }}.{{ min_name }}', '{{ range_source }}.{{ max_name }}')}\n`
       + '    FROM {{ range_source }}\n'
@@ -465,9 +375,7 @@ export class DmQuery extends OracleQuery {
     const conditionSql = baseQueryAlias === cteName
       ? dateJoinConditionSql
       : dateJoinConditionSql.replace(new RegExp(safeAlias, 'g'), cteName);
-    return `WITH ${cteName} AS (${baseQuery}) SELECT ${forSelect} FROM ${dateSeriesSql}` +
-      ` LEFT JOIN ${cteName} ON ${conditionSql}` +
-      this.groupByClause();
+    return `WITH ${cteName} AS (${baseQuery}) SELECT ${forSelect} FROM ${dateSeriesSql} LEFT JOIN ${cteName} ON ${conditionSql}${this.groupByClause()}`;
   }
 
   public timeGroupedColumn(granularity, dimension) {
@@ -480,6 +388,7 @@ export class DmQuery extends OracleQuery {
     }
     return `CAST(TRUNC(${dimension}, '${GRANULARITY_VALUE[granularity]}') AS TIMESTAMP)`;
   }
+
   public supportsFilterClause() {
     return true;
   }
@@ -514,12 +423,12 @@ export class DmQuery extends OracleQuery {
   //   - {days,months,quarters,years}BetweenInclusive  间隔计数（MONTHS_BETWEEN）
   // ==========================================================================
 
-  periodAverageDateLiteral(dateStr: string): string {
+  public periodAverageDateLiteral(dateStr: string): string {
     const dateOnly = String(dateStr).slice(0, 10);
     return `CAST('${dateOnly}' AS DATE)`;
   }
 
-  periodAverageNowExpr(): string {
+  public periodAverageNowExpr(): string {
     const frozenNow = process.env.CUBEJS_TEST_NOW;
     if (frozenNow) {
       return this.periodAverageDateLiteral(frozenNow);
@@ -527,11 +436,11 @@ export class DmQuery extends OracleQuery {
     return 'CAST(SYSDATE AS DATE)';
   }
 
-  periodAverageToDateExpr(sql: string): string {
+  public periodAverageToDateExpr(sql: string): string {
     return `CAST(${sql} AS DATE)`;
   }
 
-  periodAverageGroupedBucketExpr(bucketColumn: string, options: { aggregateOnce?: boolean } = {}) {
+  public periodAverageGroupedBucketExpr(bucketColumn: string, _options: { aggregateOnce?: boolean } = {}) {
     if (this.ungrouped) {
       return bucketColumn;
     }
@@ -542,7 +451,7 @@ export class DmQuery extends OracleQuery {
     return `MIN(${bucketColumn})`;
   }
 
-  periodAverageClosedFormIntervalBucketUnits(avgUnit: string, interval: string, groupedBucket: string) {
+  public periodAverageClosedFormIntervalBucketUnits(avgUnit: string, interval: string, groupedBucket: string) {
     const constant = super.periodAverageClosedFormIntervalBucketUnits(avgUnit, interval, groupedBucket);
     if (constant) {
       return constant;
@@ -563,7 +472,7 @@ export class DmQuery extends OracleQuery {
     return null;
   }
 
-  periodAverageCumulativeCalendarUnitCount(
+  public periodAverageCumulativeCalendarUnitCount(
     avgUnit: string,
     interval: string,
     intervalStart: string,
@@ -578,23 +487,23 @@ export class DmQuery extends OracleQuery {
     return null;
   }
 
-  periodAverageDaysInMonthBucket(bucketColumn: string) {
+  public periodAverageDaysInMonthBucket(bucketColumn: string) {
     return `GREATEST(EXTRACT(DAY FROM LAST_DAY(CAST(${bucketColumn} AS DATE))), 0)`;
   }
 
-  periodAverageDaysInQuarterBucket(bucketColumn: string) {
+  public periodAverageDaysInQuarterBucket(bucketColumn: string) {
     const quarterStart = `CAST(TRUNC(CAST(${bucketColumn} AS DATE), 'Q') AS DATE)`;
     const quarterEnd = `LAST_DAY(ADD_MONTHS(${quarterStart}, 2))`;
     return `GREATEST((${quarterEnd} - ${quarterStart} + 1), 0)`;
   }
 
-  periodAverageDaysInYearBucket(bucketColumn: string) {
+  public periodAverageDaysInYearBucket(bucketColumn: string) {
     const yearStart = `CAST(TRUNC(CAST(${bucketColumn} AS DATE), 'YYYY') AS DATE)`;
     const yearEnd = `LAST_DAY(ADD_MONTHS(${yearStart}, 11))`;
     return `GREATEST((${yearEnd} - ${yearStart} + 1), 0)`;
   }
 
-  periodAverageBucketEndExpr(granularity: string, bucketColumn: string, bucketAlreadyAtInterval = false) {
+  public periodAverageBucketEndExpr(granularity: string, bucketColumn: string, bucketAlreadyAtInterval = false) {
     const asDate = `CAST(${bucketColumn} AS DATE)`;
     if (bucketAlreadyAtInterval) {
       switch (granularity) {
@@ -625,7 +534,7 @@ export class DmQuery extends OracleQuery {
     }
   }
 
-  periodAverageIntervalStartExpr(interval: string, bucketColumn: string): string {
+  public periodAverageIntervalStartExpr(interval: string, bucketColumn: string): string {
     switch (interval) {
       case 'day':
         return this.periodAverageToDateExpr(bucketColumn);
@@ -640,7 +549,7 @@ export class DmQuery extends OracleQuery {
     }
   }
 
-  periodAverageIntervalBucketFromAvgUnit(avgUnitBucket: string, interval: string): string {
+  public periodAverageIntervalBucketFromAvgUnit(avgUnitBucket: string, interval: string): string {
     switch (interval) {
       case 'day':
         return avgUnitBucket;
@@ -655,19 +564,19 @@ export class DmQuery extends OracleQuery {
     }
   }
 
-  daysBetweenInclusive(start: string, end: string): string {
+  public daysBetweenInclusive(start: string, end: string): string {
     return `GREATEST((CAST(${end} AS DATE) - CAST(${start} AS DATE) + 1), 0)`;
   }
 
-  monthsBetweenInclusive(start: string, end: string): string {
+  public monthsBetweenInclusive(start: string, end: string): string {
     return `GREATEST(FLOOR(MONTHS_BETWEEN(CAST(${end} AS DATE), CAST(${start} AS DATE))) + 1, 0)`;
   }
 
-  quartersBetweenInclusive(start: string, end: string): string {
+  public quartersBetweenInclusive(start: string, end: string): string {
     return `GREATEST(FLOOR(MONTHS_BETWEEN(CAST(${end} AS DATE), CAST(${start} AS DATE)) / 3) + 1, 0)`;
   }
 
-  yearsBetweenInclusive(start: string, end: string): string {
+  public yearsBetweenInclusive(start: string, end: string): string {
     return `GREATEST(FLOOR(MONTHS_BETWEEN(CAST(${end} AS DATE), CAST(${start} AS DATE)) / 12) + 1, 0)`;
   }
 
