@@ -13,6 +13,8 @@ use std::{collections::HashMap, error::Error};
 use super::types::ColumnType;
 use crate::sql::postgres::ConnectionError;
 
+pub mod mssql;
+
 #[derive(Debug)]
 enum PlaceholderType {
     String,

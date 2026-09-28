@@ -312,8 +312,15 @@ export class CompilerApi {
   }
 
   public async getSqlGenerator(query: NormalizedQuery, dataSource?: string): Promise<{ sqlGenerator: any; compilers: Compiler }> {
-    const dbType = await this.getDbType(dataSource);
+    let dbType = await this.getDbType(dataSource);
     const compilers = await this.getCompilers({ requestId: query.requestId });
+    if (dataSource === undefined && dbType !== 'mssql') {
+      const mssqlSource = await this.singleMssqlExpressionSource(query, compilers);
+      if (mssqlSource !== undefined) {
+        dataSource = mssqlSource;
+        dbType = 'mssql';
+      }
+    }
     let sqlGenerator = await this.createQueryByDataSource(compilers, query, dataSource, dbType);
 
     if (!sqlGenerator) {
@@ -344,6 +351,55 @@ export class CompilerApi {
     }
 
     return { sqlGenerator, compilers };
+  }
+
+  private async singleMssqlExpressionSource(query: NormalizedQuery, compilers: Compiler): Promise<string | undefined> {
+    // Avoid constructing a default-dialect measure from a MSSQL expression.
+    // Only a fully identified single-cube query can take this route. Ambiguous
+    // shapes retain the existing data-source discovery and validation path.
+    const allowedKeys = new Set([
+      'measures', 'dimensions', 'segments', 'filters', 'timeDimensions', 'order',
+      'subqueryJoins', 'joinHints', 'limit', 'rowLimit', 'offset', 'timezone',
+      'ungrouped', 'requestId', 'memberToAlias', 'expressionParams',
+      'disableExternalPreAggregations', 'responseFormat', 'total', 'totalQuery', 'contextSymbols',
+      'cacheMode', 'cache', 'renewQuery',
+    ]);
+    if (Object.keys(query).some(key => !allowedKeys.has(key)) ||
+      [query.filters, query.timeDimensions, query.segments, query.order, query.subqueryJoins, query.joinHints]
+        .some(items => items && Object.keys(items).length > 0)) {
+      return undefined;
+    }
+    const expressions = (query.measures || []).filter(
+      (member): member is Exclude<NormalizedQuery['measures'][number], string> => !!member && typeof member !== 'string'
+    );
+    if (!expressions.length) {
+      return undefined;
+    }
+    const { cubeName } = expressions[0];
+    if (!compilers.cubeEvaluator.cubeNames().includes(cubeName)) {
+      return undefined;
+    }
+    const cube = compilers.cubeEvaluator.cubeFromPath(cubeName);
+    if (cube.isView || !cube.dataSource ||
+      [...(query.dimensions || []), ...(query.measures || []).filter(member => typeof member === 'string')]
+        .some(member => typeof member !== 'string' || member.split('.').length !== 2 || member.split('.')[0] !== cubeName)) {
+      return undefined;
+    }
+    try {
+      for (const member of expressions) {
+        const definition = JSON.parse(member.definition);
+        if (member.cubeName !== cubeName || typeof member.expression !== 'function' ||
+          definition.cubeName !== cubeName || definition.expr?.type !== 'SqlFunction' ||
+          !Array.isArray(definition.expr.cubeParams) || !definition.expr.cubeParams.length ||
+          definition.expr.cubeParams.some(name => name !== cubeName)) {
+          return undefined;
+        }
+      }
+      return await this.getDbType(cube.dataSource) === 'mssql' ? cube.dataSource : undefined;
+    } catch (_error) {
+      // Leave malformed expressions and unresolved sources to existing validation.
+      return undefined;
+    }
   }
 
   public async getSql(query: NormalizedQuery, options: GetSqlOptions = {}): Promise<SqlResult> {

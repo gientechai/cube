@@ -1,9 +1,10 @@
 use std::{
+    collections::HashSet,
     ops::{Index, IndexMut},
     sync::Arc,
 };
 
-use egg::Subst;
+use egg::{Id, Subst};
 
 use crate::{
     compile::{
@@ -18,21 +19,53 @@ use crate::{
             sort, sort_exp, sort_exp_empty_tail, sort_expr, sort_projection_pullup_replacer,
             sort_projection_pushdown_replacer, transforming_chain_rewrite, transforming_rewrite,
             ColumnExprColumn, LogicalPlanLanguage, OrderAsc, OrderMember,
-            OrderReplacerColumnNameToMember, ProjectionAlias, SortExprAsc,
+            OrderReplacerColumnNameToMember, ProjectionAlias, SortExprAsc, SortExprNullsFirst,
             SortProjectionPushdownReplacerColumnToExpr,
         },
     },
     config::ConfigObj,
+    transport::MetaContext,
     var, var_iter,
 };
 
 pub struct OrderRules {
+    meta_context: Arc<MetaContext>,
     config_obj: Arc<dyn ConfigObj>,
 }
 
 impl RewriteRules for OrderRules {
     fn rewrite_rules(&self) -> Vec<CubeRewrite> {
         vec![
+            transforming_chain_rewrite(
+                "mssql-null-order-project-grouped-scan",
+                sort("?sort_expr", "?input"),
+                vec![(
+                    "?input",
+                    cube_scan(
+                        "?alias_to_cube",
+                        "?members",
+                        "?filters",
+                        "?order",
+                        "?limit",
+                        "?offset",
+                        "?split",
+                        "?can_pushdown_join",
+                        "CubeScanWrapped:false",
+                        "CubeScanUngrouped:false",
+                        "?join_hints",
+                    ),
+                )],
+                sort(
+                    "?sort_expr",
+                    projection(
+                        "?projection_expr",
+                        "?input",
+                        "?projection_alias",
+                        "ProjectionSplit:false",
+                    ),
+                ),
+                self.project_grouped_scan_for_null_order(),
+            ),
             transforming_rewrite(
                 "push-down-sort",
                 sort(
@@ -79,7 +112,14 @@ impl RewriteRules for OrderRules {
                     order("?order_member", "?order_asc"),
                     order_replacer("?tail_group_expr", "?aliases"),
                 ),
-                self.transform_order("?expr", "?asc", "?aliases", "?order_member", "?order_asc"),
+                self.transform_order(
+                    "?expr",
+                    "?asc",
+                    "?nulls_first",
+                    "?aliases",
+                    "?order_member",
+                    "?order_asc",
+                ),
             ),
             rewrite(
                 "order-replacer-tail-proj",
@@ -183,8 +223,110 @@ impl RewriteRules for OrderRules {
 }
 
 impl OrderRules {
-    pub fn new(config_obj: Arc<dyn ConfigObj>) -> Self {
-        Self { config_obj }
+    pub fn new(meta_context: Arc<MetaContext>, config_obj: Arc<dyn ConfigObj>) -> Self {
+        Self {
+            meta_context,
+            config_obj,
+        }
+    }
+
+    pub(crate) fn non_default_null_sort_exprs(egraph: &CubeEGraph, root: Id) -> Vec<Expr> {
+        let mut pending = vec![root];
+        let mut visited = HashSet::new();
+        let mut expressions = Vec::new();
+        while let Some(id) = pending.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            for node in &egraph[id].nodes {
+                match node {
+                    LogicalPlanLanguage::SortExp(children) => pending.extend(children),
+                    LogicalPlanLanguage::SortExpr([expr, asc, nulls_first]) => {
+                        let opposite = var_iter!(egraph[*asc], SortExprAsc).any(|asc| {
+                            var_iter!(egraph[*nulls_first], SortExprNullsFirst)
+                                .any(|nulls_first| asc != nulls_first)
+                        });
+                        if opposite {
+                            if let Some(OriginalExpr::Expr(expr)) =
+                                &egraph[*expr].data.original_expr
+                            {
+                                expressions.push(expr.clone());
+                            }
+                        }
+                    }
+                    _ => (),
+                }
+            }
+        }
+        expressions
+    }
+
+    fn project_grouped_scan_for_null_order(&self) -> impl Fn(&mut CubeEGraph, &mut Subst) -> bool {
+        let meta = self.meta_context.clone();
+        let flat_list = self.config_obj.push_down_pull_up_split();
+        move |egraph, subst| {
+            let Some(mut members) = egraph[subst[var!("?members")]]
+                .data
+                .member_name_to_expr
+                .clone()
+            else {
+                return false;
+            };
+            let order = Self::non_default_null_sort_exprs(egraph, subst[var!("?sort_expr")]);
+            let aliases = column_name_to_member_vec(&mut members);
+            let needs_wrapper = order.iter().any(|expr| {
+                let name = expr_column_name(expr, &None);
+                aliases
+                    .iter()
+                    .find(|(column, _)| column == &name)
+                    .and_then(|(_, member)| member.as_ref())
+                    .and_then(|member| meta.member_to_data_source.get(member))
+                    .and_then(|source| meta.data_source_to_sql_generator.get(source))
+                    .map(|generator| {
+                        generator
+                            .get_sql_templates()
+                            .templates
+                            .get("capabilities/mssql_2016_compat")
+                            .map(|value| value == "true")
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false)
+            });
+            if !needs_wrapper
+                || members.list.is_empty()
+                || members
+                    .list
+                    .iter()
+                    .any(|(_, _, expr)| !matches!(expr, Expr::Column(_)))
+            {
+                return false;
+            }
+            // DISTINCT dimensions can collapse to a bare grouped scan. Retain an
+            // identity projection so the existing wrapper can carry SQL ordering.
+            let mut columns = Vec::new();
+            for (_, _, expr) in &members.list {
+                let Ok(column) = LogicalPlanToLanguageConverter::add_expr(egraph, expr, flat_list)
+                else {
+                    return false;
+                };
+                columns.push(column);
+            }
+            let projection = if flat_list {
+                egraph.add(LogicalPlanLanguage::ProjectionExpr(columns))
+            } else {
+                let mut tail = egraph.add(LogicalPlanLanguage::ProjectionExpr(vec![]));
+                for column in columns.into_iter().rev() {
+                    tail = egraph.add(LogicalPlanLanguage::ProjectionExpr(vec![column, tail]));
+                }
+                tail
+            };
+            subst.insert(var!("?projection_expr"), projection);
+            subst.insert(
+                var!("?projection_alias"),
+                egraph.add(LogicalPlanLanguage::ProjectionAlias(ProjectionAlias(None))),
+            );
+            true
+        }
     }
 
     fn push_down_sort(
@@ -236,20 +378,26 @@ impl OrderRules {
         &self,
         expr_var: &'static str,
         asc_var: &'static str,
+        nulls_first_var: &'static str,
         column_name_to_member_var: &'static str,
         order_member_var: &'static str,
         order_asc_var: &'static str,
     ) -> impl Fn(&mut CubeEGraph, &mut Subst) -> bool {
         let expr_var = expr_var.parse().unwrap();
         let asc_var = asc_var.parse().unwrap();
+        let nulls_first_var = nulls_first_var.parse().unwrap();
         let column_name_to_member_var = column_name_to_member_var.parse().unwrap();
         let order_member_var = order_member_var.parse().unwrap();
         let order_asc_var = order_asc_var.parse().unwrap();
+        let meta_context = self.meta_context.clone();
         move |egraph, subst| {
             if let Some(OriginalExpr::Expr(expr)) =
                 egraph[subst[expr_var]].data.original_expr.clone()
             {
                 let column_name = expr_column_name(&expr, &None);
+                let nulls_first = var_iter!(egraph[subst[nulls_first_var]], SortExprNullsFirst)
+                    .copied()
+                    .collect::<Vec<_>>();
                 for asc in var_iter!(egraph[subst[asc_var]], SortExprAsc) {
                     let asc = *asc;
                     for column_name_to_member in var_iter!(
@@ -260,6 +408,26 @@ impl OrderRules {
                             .iter()
                             .find(|(c, _)| c == &column_name)
                         {
+                            let nulls_are_smallest = meta_context
+                                .member_to_data_source
+                                .get(member_name)
+                                .and_then(|source| {
+                                    meta_context.data_source_to_sql_generator.get(source)
+                                })
+                                .map(|generator| {
+                                    generator
+                                        .get_sql_templates()
+                                        .templates
+                                        .get("capabilities/mssql_2016_compat")
+                                        .map(|value| value == "true")
+                                        .unwrap_or(false)
+                                })
+                                .unwrap_or(false);
+                            // Cube's member/direction order representation cannot preserve
+                            // a non-default NULL position. Keep the SQL wrapper in that case.
+                            if nulls_are_smallest && nulls_first.as_slice() != [asc].as_slice() {
+                                continue;
+                            }
                             let member_name = member_name.to_string();
                             subst.insert(
                                 order_member_var,

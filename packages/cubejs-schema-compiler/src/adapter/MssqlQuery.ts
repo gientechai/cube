@@ -5,6 +5,7 @@ import { QueryAlias, parseSqlInterval } from '@cubejs-backend/shared';
 import { BaseQuery } from './BaseQuery';
 import { BaseFilter } from './BaseFilter';
 import { BaseSegment } from './BaseSegment';
+import { BaseMeasure } from './BaseMeasure';
 import { ParamAllocator } from './ParamAllocator';
 
 const abbrs = {
@@ -44,7 +45,7 @@ const GRANULARITY_TO_INTERVAL = {
 class MssqlFilter extends BaseFilter {
   // noinspection JSMethodCanBeStatic
   public escapeWildcardChars(param) {
-    return typeof param === 'string' ? param.replace(/([_%])/gi, '[$1]') : param;
+    return typeof param === 'string' ? param.replace(/([_%[])/g, '[$1]') : param;
   }
 
   public likeIgnoreCase(column, not, param, type) {
@@ -72,7 +73,23 @@ class MssqlSegment extends BaseSegment {
   }
 }
 
+class MssqlExpressionMeasure extends BaseMeasure {
+  public measureDefinition() {
+    // BaseMeasure's non-additive setup must not resolve an expression as a path.
+    return this.expression ? this.definition() : super.measureDefinition();
+  }
+}
+
 export class MssqlQuery extends BaseQuery {
+  public constructor(compilers: any, options: any) {
+    // SQL API wrappers require exact aliases and may supply expression measures.
+    // The native inner planner does not yet preserve either contract; keep this
+    // fallback local to MSSQL while ordinary queries retain their planner setting.
+    const requiresSqlApiRenderer = Object.keys(options.memberToAlias || {}).length > 0 ||
+      (options.measures || []).some(measure => measure && typeof measure === 'object');
+    super(compilers, requiresSqlApiRenderer ? { ...options, useNativeSqlPlanner: false } : options);
+  }
+
   public newFilter(filter) {
     return new MssqlFilter(this, filter);
   }
@@ -81,18 +98,33 @@ export class MssqlQuery extends BaseQuery {
     return new MssqlSegment(this, segment);
   }
 
-  /**
-   * Same as MySQL: `ORDER BY 1 IS NULL` does not refer to column position.
-   */
+  public newMeasure(measure): BaseMeasure {
+    return measure?.expression ? new MssqlExpressionMeasure(this, measure) : super.newMeasure(measure);
+  }
+
+  public everyRefreshKeySql(refreshKey, external = false) {
+    if (this.externalQueryClass && this.measures.some(measure => measure.expression)) {
+      // A clock-based external refresh key only needs the timezone. Copying
+      // MSSQL expression measures into the external dialect is unnecessary.
+      const ExternalQuery = this.externalQueryClass;
+      const refreshQuery = new ExternalQuery(this.compilers, {
+        timezone: this.timezone,
+        externalQueryClass: null,
+        useNativeSqlPlanner: false,
+      });
+      return refreshQuery.everyRefreshKeySql(refreshKey, true);
+    }
+    return super.everyRefreshKeySql(refreshKey, external);
+  }
+
+  // Keep expression/alias ordering consistent with the native planner.
   protected usePositionalOrderBy() {
     return false;
   }
 
   /**
-   * SQL Server doesn't support `NULLS FIRST/LAST` in ORDER BY.
-   * Make NULL the minimum value:
-   * - ASC  -> NULLs first:  `expr IS NULL DESC, expr ASC`
-   * - DESC -> NULLs last:   `expr IS NULL ASC,  expr DESC`
+   * SQL Server already treats NULL as the minimum value. A boolean IS NULL
+   * sort item is invalid, and embedding a SELECT alias in CASE is also invalid.
    */
   public orderHashToString(hash: { id: string; desc: boolean }) {
     if (!hash || !hash.id) {
@@ -104,9 +136,19 @@ export class MssqlQuery extends BaseQuery {
       return null;
     }
 
-    const asc = !hash.desc;
-    const nullsFirst = asc;
-    return `${expr} IS NULL ${nullsFirst ? 'DESC' : 'ASC'}, ${expr} ${asc ? 'ASC' : 'DESC'}`;
+    return `${expr} ${hash.desc ? 'DESC' : 'ASC'}`;
+  }
+
+  public orderBy() {
+    const orderBy = super.orderBy();
+    if (orderBy || (this.rowLimit === null && !this.offset)) {
+      return orderBy;
+    }
+
+    // OFFSET requires ORDER BY in MSSQL. Give TOP pages the same fallback,
+    // sorting by every grouping key so adjacent aggregate pages are consistent.
+    const columns = this.dimensionColumns(this.orderByJoinAmbiguity ? 'q_0' : '');
+    return ` ORDER BY ${(columns.length ? columns : ['1']).map(column => `${column} ASC`).join(', ')}`;
   }
 
   public castToString(sql) {
@@ -177,7 +219,43 @@ export class MssqlQuery extends BaseQuery {
     if (this.offset) {
       return '';
     }
-    return this.rowLimit === null ? '' : ` TOP ${this.rowLimit && parseInt(this.rowLimit, 10) || 10000}`;
+    const limit = this.rowLimit === undefined ? 10000 : parseInt(this.rowLimit, 10);
+    return this.rowLimit === null ? '' : ` TOP (${limit}) `;
+  }
+
+  public buildSemiAdditiveCTEQuery(
+    originalQuery: string,
+    measures: BaseMeasure[],
+    baseColumns: string[],
+    timeDimensionsForOrdering: string[] = [],
+    dimensionsForSemiAdditiveRemap: unknown[] = [],
+    semiAdditiveMeasuresForCte?: BaseMeasure[],
+  ): string {
+    // MSSQL cannot put WITH inside a derived table (including total queries).
+    // Reuse the shared projection/measure renderer, converting only its fixed
+    // scaffold. Keep the source SQL out of this conversion to preserve literals,
+    // comments and parameters without attempting to parse arbitrary SQL.
+    const sourceMarker = '__mssql_semi_additive_source__';
+    const rendered = super.buildSemiAdditiveCTEQuery(
+      sourceMarker, measures, baseColumns, timeDimensionsForOrdering,
+      dimensionsForSemiAdditiveRemap, semiAdditiveMeasuresForCte,
+    );
+    if (rendered === sourceMarker) {
+      return originalQuery;
+    }
+    const prefix = `WITH base_data AS (\n  ${sourceMarker}\n), windowed_data AS (\n  SELECT `;
+    const separator = '\n  FROM base_data\n)\nSELECT ';
+    const middle = rendered.lastIndexOf(separator);
+    const from = rendered.lastIndexOf(' FROM windowed_data');
+    if (!rendered.startsWith(prefix) || middle < prefix.length || from < middle + separator.length) {
+      throw new Error('Unexpected semi-additive query structure for MSSQL');
+    }
+    const windowProjection = rendered.slice(prefix.length, middle);
+    const finalProjection = rendered.slice(middle + separator.length, from);
+    const groupBy = rendered.slice(from + ' FROM windowed_data'.length);
+    return `SELECT ${finalProjection} FROM (\n` +
+      `  SELECT ${windowProjection} FROM (\n${originalQuery}\n) AS base_data\n` +
+      `) AS windowed_data${groupBy}`;
   }
 
   /**
@@ -280,15 +358,36 @@ export class MssqlQuery extends BaseQuery {
 
   public sqlTemplates() {
     const templates = super.sqlTemplates();
-    templates.functions.LEAST = 'LEAST({{ args_concat }})';
-    templates.functions.GREATEST = 'GREATEST({{ args_concat }})';
+    // SQL API's compact order contract omits NULL placement. Only collapse a
+    // sort into that contract when it agrees with the data source's default.
+    templates.capabilities = { mssql_2016_compat: 'true' };
+    // Scalar subqueries over VALUES cannot occur inside SUM/AVG on SQL Server.
+    // Select the winning argument without a subquery, ignoring NULLs.
+    // CHOOSE coerces every operand to the same type, including mixed-type lists.
+    const extremeTemplate = (operator: string) => (
+      '{% set non_null = args | map("trim") | map("upper") | reject("equalto", "NULL") | list %}' +
+      '{% if args | length == 1 %}({{ args[0] }}){% elif args | length > 0 and non_null | length == 0 %}NULL{% else %}' +
+      '(CASE {% for arg in args %}{% set candidate = loop.index %}' +
+      'WHEN ({{ arg }}) IS NOT NULL {% for other in args %}{% if loop.index != candidate %}' +
+      `AND (({{ other }}) IS NULL OR CHOOSE({{ candidate }}, {{ args_concat }}) ${operator} CHOOSE({{ loop.index }}, {{ args_concat }})) ` +
+      '{% endif %}{% endfor %}THEN ({{ arg }}) {% endfor %}ELSE NULL END){% endif %}'
+    );
+    templates.functions.LEAST = extremeTemplate('<=');
+    templates.functions.GREATEST = extremeTemplate('>=');
     // NOTE: MSSQL does not support DISTINCT clause. No workaround is available
     delete templates.functions.STRING_AGG;
     // PERCENTILE_CONT works but requires PARTITION BY
     delete templates.functions.PERCENTILECONT;
     delete templates.expressions.ilike;
-    // NOTE: this template contains a comma; two order expressions are being generated
-    templates.expressions.sort = '{{ expr }} IS NULL {% if nulls_first %}DESC{% else %}ASC{% endif %}, {{ expr }} {% if asc %}ASC{% else %}DESC{% endif %}';
+    // Tesseract renders filters without using MssqlFilter. Keep its case folding
+    // and literal contains values in sync with the traditional MSSQL renderer.
+    templates.tesseract.ilike = 'LOWER({{ expr }}) {% if negated %}NOT {% endif %}LIKE {{ pattern }}';
+    templates.filters.like_pattern = "CONCAT('{% if start_wild %}%{% endif %}', LOWER(" +
+      "{% if start_wild and end_wild %}REPLACE(REPLACE(REPLACE({{ value }}, '[', '[[]'), '%', '[%]'), '_', '[_]'){% else %}{{ value }}{% endif %}" +
+      "), '{% if end_wild %}%{% endif %}')";
+    // SQL API supplies a source expression here, not a same-level SELECT alias.
+    // Only explicit ordering opposite to SQL Server's default needs a NULL key.
+    templates.expressions.sort = '{% if asc != nulls_first %}CASE WHEN {{ expr }} IS NULL THEN {% if nulls_first %}0{% else %}1{% endif %} ELSE {% if nulls_first %}1{% else %}0{% endif %} END ASC, {% endif %}{{ expr }} {% if asc %}ASC{% else %}DESC{% endif %}';
     templates.types.string = 'VARCHAR';
     templates.types.boolean = 'BIT';
     templates.types.integer = 'INT';
@@ -300,7 +399,7 @@ export class MssqlQuery extends BaseQuery {
     templates.params.param = '@_{{ param_index + 1 }}';
     // MSSQL does not support ordinal GROUP BY (GROUP BY 1, 2), must use expressions
     templates.statements.group_by_exprs = '{{ group_by | map(attribute=\'expr\') | join(\', \') }}';
-    // MSSQL does not support ordinal ORDER BY (ORDER BY 1, 2), must use expressions
+    // Tesseract supplies explicit ORDER BY expressions here.
     templates.expressions.order_by = '{{ expr }} {% if asc %}ASC{% else %}DESC{% endif %}';
     // MSSQL uses CAST(...AS DATETIME2) instead of ::timestamp
     templates.statements.time_series_select = 'SELECT CAST(date_from AS DATETIME2) AS "date_from",\n' +
@@ -317,6 +416,7 @@ export class MssqlQuery extends BaseQuery {
       '{{ ctes | join(\',\n\') }}\n' +
       '{% endif %}' +
       'SELECT {% if distinct %}DISTINCT {% endif %}' +
+      '{% if limit == 0 or (limit is not none and not order_by and offset is none) %}TOP ({{ limit }}) {% endif %}' +
       '{{ select_concat | map(attribute=\'aliased\') | join(\', \') }} {% if from %}\n' +
       'FROM (\n' +
       '{{ from | indent(2, true) }}\n' +
@@ -326,8 +426,9 @@ export class MssqlQuery extends BaseQuery {
       '{% if filter %}\nWHERE {{ filter }}{% endif %}' +
       '{% if group_by %}\nGROUP BY {{ group_by }}{% endif %}' +
       '{% if having %}\nHAVING {{ having }}{% endif %}' +
-      '{% if order_by %}\nORDER BY {{ order_by | map(attribute=\'expr\') | join(\', \') }}\nOFFSET {% if offset is not none %}{{ offset }}{% else %}0{% endif %} ROWS{% endif %}' +
-      '{% if limit is not none %}\nFETCH NEXT {{ limit }} ROWS ONLY{% endif %}';
+      '{% if order_by or offset is not none %}\nORDER BY {% if order_by %}{{ order_by | map(attribute=\'expr\') | join(\', \') }}{% else %}1{% endif %}' +
+      '{% if limit != 0 %}\nOFFSET {% if offset is not none %}{{ offset }}{% else %}0{% endif %} ROWS{% endif %}{% endif %}' +
+      '{% if limit is not none and limit != 0 and (order_by or offset is not none) %}\nFETCH NEXT {{ limit }} ROWS ONLY{% endif %}';
     return templates;
   }
 

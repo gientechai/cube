@@ -3419,7 +3419,15 @@ impl WrappedSelectNode {
             .map_err(|_| CubeError::internal("Failed to acquire timezone read lock".to_string()))?
             .clone();
 
-        let load_request = V1LoadRequestQuery {
+        let output_aliases = group_by
+            .iter()
+            .chain(aggregate.iter())
+            .chain(window.iter())
+            .chain(projection.iter())
+            .map(|(column, _)| column.alias.clone())
+            .chain(patch_measures.iter().map(|(_, _, alias)| alias.clone()))
+            .collect::<Vec<_>>();
+        let mut load_request = V1LoadRequestQuery {
             timezone,
             measures: Some(
                 aggregate
@@ -3540,6 +3548,48 @@ impl WrappedSelectNode {
             join_hints: load_request.join_hints.clone(),
         };
 
+        // Compact Cube order carries no NULL placement. For MSSQL's opposite
+        // ordering, keep the projected inner query and sort/page its result.
+        let templates = generator.get_sql_templates();
+        let preserve_null_order = templates
+            .templates
+            .get("capabilities/mssql_2016_compat")
+            .map(|value| value == "true")
+            .unwrap_or(false)
+            && self.order_expr.iter().any(|expr| {
+                matches!(expr,
+                Expr::Sort { asc, nulls_first, .. } if asc != nulls_first)
+            });
+        let result_request = load_request.clone();
+        let outer_order = if preserve_null_order {
+            let order = load_request.order.as_ref().ok_or_else(|| {
+                CubeError::internal("Missing compact order for MSSQL wrapper".to_string())
+            })?;
+            let mut columns = Vec::new();
+            for (expr, member_order) in self.order_expr.iter().zip(order) {
+                if let Expr::Sort {
+                    asc, nulls_first, ..
+                } = expr
+                {
+                    columns.push(AliasedColumn {
+                        expr: templates.sort_expr(
+                            templates.quote_identifier(&member_order[0])?,
+                            *asc,
+                            *nulls_first,
+                        )?,
+                        alias: member_order[0].clone(),
+                    });
+                }
+            }
+            // Pagination must occur after the outer NULL ordering, never before it.
+            load_request.order = Some(vec![]);
+            load_request.limit = None;
+            load_request.offset = None;
+            columns
+        } else {
+            vec![]
+        };
+
         // TODO time dimensions, filters, segments
 
         let mut meta_with_user = load_request_meta.as_ref().clone();
@@ -3556,12 +3606,41 @@ impl WrappedSelectNode {
             )
             .await?;
 
+        let mut generated_sql = sql_response.sql;
+        if preserve_null_order {
+            let columns = output_aliases
+                .into_iter()
+                .map(|alias| {
+                    Ok(AliasedColumn {
+                        expr: templates.quote_identifier(&alias)?,
+                        alias,
+                    })
+                })
+                .collect::<result::Result<Vec<_>, CubeError>>()?;
+            let outer_sql = templates.select(
+                generated_sql.sql.clone(),
+                columns,
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                "mssql_null_order".to_string(),
+                None,
+                None,
+                outer_order,
+                result_request.limit.map(|value| value as usize),
+                result_request.offset.map(|value| value as usize),
+                false,
+            )?;
+            generated_sql.replace_sql(outer_sql);
+        }
+
         Ok(SqlGenerationResult {
             data_source: Some(data_source.to_string()),
             from_alias: alias,
-            sql: sql_response.sql,
+            sql: generated_sql,
             column_remapping: next_remapper.into_remapping(),
-            request: load_request.clone(),
+            request: result_request,
         })
     }
 

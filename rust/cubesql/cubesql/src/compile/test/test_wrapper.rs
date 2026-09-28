@@ -20,6 +20,54 @@ use crate::{
 };
 
 #[tokio::test]
+async fn test_mssql_reverse_null_order_stays_in_wrapper() {
+    use crate::compile::DatabaseVariable;
+    use crate::sql::CUBESQL_PENALIZE_POST_PROCESSING_VAR;
+    use datafusion::{logical_plan::LogicalPlan, variable::VarType};
+
+    let context = super::TestContext::with_custom_templates(
+        DatabaseProtocol::PostgreSQL,
+        vec![
+            ("capabilities/mssql_2016_compat".to_string(), "true".to_string()),
+            ("expressions/sort".to_string(),
+             "{{ expr }} {% if asc %}ASC{% else %}DESC{% endif %} NULLS {% if nulls_first %}FIRST{% else %}LAST{% endif %}".to_string()),
+        ],
+    ).await;
+    // Match sql4sql(..., disable_post_processing=true): the general SQL wire
+    // planner may otherwise choose a correct local sort for DISTINCT.
+    context.session.state.set_variables(vec![DatabaseVariable {
+        name: CUBESQL_PENALIZE_POST_PROCESSING_VAR.to_string(),
+        value: ScalarValue::Boolean(Some(true)),
+        var_type: VarType::UserDefined,
+        readonly: false,
+        additional_params: None,
+    }]);
+    for (direction, nulls) in [("ASC", "LAST"), ("DESC", "FIRST")] {
+        let queries = [
+            format!("SELECT customer_gender FROM KibanaSampleDataEcommerce ORDER BY customer_gender {} NULLS {} LIMIT 2 OFFSET 1", direction, nulls),
+            format!("SELECT DISTINCT customer_gender FROM KibanaSampleDataEcommerce ORDER BY customer_gender {} NULLS {}", direction, nulls),
+            format!("SELECT customer_gender, AVG(avgPrice) mp FROM KibanaSampleDataEcommerce GROUP BY customer_gender ORDER BY mp {} NULLS {} LIMIT 2 OFFSET 1", direction, nulls),
+        ];
+        for query in queries {
+            let plan = context.convert_sql_to_cube_query(&query).await.unwrap();
+            // A result-name projection does not change sorting. Require the
+            // ordering itself to be inside SQL, not in a local Sort node.
+            let mut logical = plan.as_logical_plan();
+            while let LogicalPlan::Projection(projection) = &logical {
+                logical = projection.input.as_ref().clone();
+            }
+            assert!(
+                matches!(logical, LogicalPlan::Extension(_)),
+                "{}",
+                plan.print(true).unwrap()
+            );
+            let sql = logical.find_cube_scan_wrapped_sql().wrapped_sql.sql;
+            assert!(sql.contains(&format!("{} NULLS {}", direction, nulls)));
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_simple_wrapper() {
     if !Rewriter::sql_push_down_enabled() {
         return;

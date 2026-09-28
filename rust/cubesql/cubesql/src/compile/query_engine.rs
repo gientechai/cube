@@ -15,7 +15,7 @@ use crate::{
                 wrapper::{CubeScanWrappedSqlNode, CubeScanWrapperNode},
             },
             udf::*,
-            CubeContext,
+            CubeContext, CubeTableProvider, TableName,
         },
         qtrace::Qtrace,
         rewrite::{
@@ -27,7 +27,7 @@ use crate::{
     config::ConfigObj,
     sql::{
         compiler_cache::{CompilerCache, CompilerCacheEntry},
-        statement::SensitiveDataSanitizer,
+        statement::{mssql::validate_function_arguments, SensitiveDataSanitizer},
         SessionManager, SessionState,
     },
     transport::{LoadRequestMeta, MetaContext, SpanId, TransportService},
@@ -46,7 +46,10 @@ use datafusion::{
         utils::from_plan,
     },
     physical_plan::planner::DefaultPhysicalPlanner,
-    sql::{parser::Statement as DFStatement, planner::SqlToRel},
+    sql::{
+        parser::Statement as DFStatement,
+        planner::{ContextProvider, SqlToRel},
+    },
 };
 use uuid::Uuid;
 
@@ -582,6 +585,61 @@ impl QueryEngine for SqlQueryEngine {
         _span_id: Option<Arc<SpanId>>,
         _query_planning_id: Option<Uuid>,
     ) -> Result<(LogicalPlan, Self::PlanMetadataType), DataFusionError> {
+        let is_mssql_source = |source: &str| {
+            cube_ctx
+                .meta
+                .data_source_to_sql_generator
+                .get(source)
+                .and_then(|generator| {
+                    generator
+                        .get_sql_templates()
+                        .templates
+                        .get("capabilities/mssql_2016_compat")
+                        .cloned()
+                })
+                .as_deref()
+                == Some("true")
+        };
+        if cube_ctx
+            .meta
+            .data_source_to_sql_generator
+            .keys()
+            .any(|source| is_mssql_source(source))
+        {
+            validate_function_arguments(stmt, |name| {
+                use datafusion::catalog::TableReference;
+                let reference = match name.0.as_slice() {
+                    [table] => TableReference::Bare {
+                        table: &table.value,
+                    },
+                    [schema, table] => TableReference::Partial {
+                        schema: &schema.value,
+                        table: &table.value,
+                    },
+                    [catalog, schema, table] => TableReference::Full {
+                        catalog: &catalog.value,
+                        schema: &schema.value,
+                        table: &table.value,
+                    },
+                    _ => return false,
+                };
+                let Some(provider) = cube_ctx.get_table_provider(reference) else {
+                    return false;
+                };
+                let Some(cube) = provider.as_any().downcast_ref::<CubeTableProvider>() else {
+                    return false;
+                };
+                let prefix = format!("{}.", cube.table_name());
+                let sources = cube_ctx
+                    .meta
+                    .member_to_data_source
+                    .iter()
+                    .filter(|(member, _)| member.starts_with(&prefix))
+                    .map(|(_, source)| source)
+                    .collect::<Vec<_>>();
+                !sources.is_empty() && sources.iter().all(|source| is_mssql_source(source))
+            })?;
+        }
         let df_query_planner = SqlToRel::new_with_options(cube_ctx, true);
         let plan =
             df_query_planner.statement_to_plan(DFStatement::Statement(Box::new(stmt.clone())))?;
