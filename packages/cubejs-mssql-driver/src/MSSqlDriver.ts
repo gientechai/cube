@@ -5,6 +5,7 @@
  */
 
 import sql, { ConnectionPool, config as MsSQLConfig } from 'mssql';
+import { createRequire } from 'module';
 import {
   getEnv,
   assertDataSource,
@@ -21,6 +22,73 @@ import {
   GenericDataBaseType,
 } from '@cubejs-backend/base-driver';
 import { QueryStream, transformRow } from './QueryStream';
+
+type Metadata = { type: { name: string }; scale: number };
+type ReadValue = (buffer: Buffer, offset: number, metadata: Metadata, options: object) => {
+  value: unknown;
+  offset: number;
+};
+
+const registeredParsers = new WeakMap<object, WeakSet<object>>();
+
+/**
+ * Tedious 18 decodes decimal/numeric through Number before mssql's valueHandler,
+ * so converting the value to a string there is already too late. Keep this
+ * compatibility bridge lazy and scoped to this driver's connection options.
+ * Revalidate the private readValue interface when upgrading mssql/Tedious.
+ */
+function registerConnection(options: object) {
+  // Resolve the parser actually used by mssql, including nested installations.
+  const mssqlRequire = createRequire(require.resolve('mssql'));
+  const tediousRequire = createRequire(mssqlRequire.resolve('tedious'));
+  const parser = tediousRequire('./value-parser') as { readValue: ReadValue };
+  let connections = registeredParsers.get(parser);
+  if (!connections) {
+    if (typeof parser.readValue !== 'function') {
+      throw new Error('Unsupported Tedious decimal parser: readValue is unavailable');
+    }
+    connections = new WeakSet<object>();
+    const enabledConnections = connections;
+    const original = parser.readValue;
+    parser.readValue = (buffer, offset, metadata, parserOptions) => {
+      const result = original(buffer, offset, metadata, parserOptions);
+      if (!enabledConnections.has(parserOptions) || result.value == null ||
+          !['DecimalN', 'NumericN'].includes(metadata.type.name)) {
+        return result;
+      }
+
+      // The original reader checks packet completeness and returns the end of
+      // this token. Decode the exact unsigned little-endian integer only after
+      // those checks pass; preserve its NULL/error/offset behavior.
+      const length = buffer[offset];
+      const { scale } = metadata;
+      if (![5, 9, 13, 17].includes(length) || result.offset !== offset + length + 1 ||
+          !Number.isInteger(scale) || scale < 0 || scale > 38) {
+        throw new Error('Unsupported Tedious decimal token layout');
+      }
+      let magnitude = BigInt(0);
+      for (let i = result.offset - 1; i >= offset + 2; i--) {
+        magnitude = magnitude * BigInt(256) + BigInt(buffer[i]);
+      }
+      const digits = magnitude.toString().padStart(scale + 1, '0');
+      const value = scale ? `${digits.slice(0, -scale)}.${digits.slice(-scale)}` : digits;
+      result.value = `${buffer[offset + 1] === 0 && magnitude !== BigInt(0) ? '-' : ''}${value}`;
+      return result;
+    };
+    registeredParsers.set(parser, connections);
+  }
+  connections.add(options);
+}
+
+export function withExactMssqlDecimals(config: MsSQLConfig): MsSQLConfig {
+  return {
+    ...config,
+    beforeConnect: (connection) => {
+      config.beforeConnect?.(connection);
+      registerConnection(connection.config.options);
+    },
+  };
+}
 
 // ********* Value converters ***************** //
 const numericTypes = [
@@ -139,7 +207,7 @@ export class MSSqlDriver extends BaseDriver implements DriverInterface {
 
     const { readOnly: _, ...poolConfig } = this.config;
 
-    this.pool = new ConnectionPool(poolConfig as MsSQLConfig);
+    this.pool = new ConnectionPool(withExactMssqlDecimals(poolConfig as MsSQLConfig));
     this.initialConnectPromise = this.pool.connect();
   }
 
