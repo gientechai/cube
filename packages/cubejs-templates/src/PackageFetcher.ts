@@ -1,6 +1,5 @@
 import fs from 'fs-extra';
-import decompress from 'decompress';
-import decompressTargz from 'decompress-targz';
+import * as tar from 'tar';
 import path from 'path';
 import { executeCommand } from '@cubejs-backend/shared';
 
@@ -61,9 +60,23 @@ export class PackageFetcher {
   public async downloadPackages() {
     await this.downloadRepo();
 
-    await decompress(this.repoArchivePath, this.tmpFolderPath, {
-      plugins: [decompressTargz()],
+    let unsafeEntry: string | undefined;
+    await tar.x({
+      file: this.repoArchivePath,
+      cwd: this.tmpFolderPath,
+      preserveOwner: false,
+      onwarn: (code, message) => {
+        if (code === 'TAR_ENTRY_ERROR') {
+          unsafeEntry = message;
+        } else {
+          console.warn(`tar skipped an entry (${code}): ${message}`);
+        }
+      },
     });
+
+    if (unsafeEntry) {
+      throw new Error(`Unsafe tar entry: ${unsafeEntry}`);
+    }
 
     const dir = fs.readdirSync(this.tmpFolderPath).find((name) => !name.endsWith('tar.gz'));
 

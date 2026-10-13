@@ -1,4 +1,4 @@
-import decompress from 'decompress';
+import * as tar from 'tar';
 import fetch, { Headers, Request, Response } from 'node-fetch';
 import bytes from 'bytes';
 import { throttle } from 'throttle-debounce';
@@ -101,26 +101,56 @@ export async function downloadAndExtractFile(url: string, { cwd, skipExtract, ds
     });
   });
 
-  if (skipExtract) {
-    if (dstFileName) {
-      fs.copyFileSync(savedFilePath, path.resolve(path.join(cwd, dstFileName)));
-    } else {
-      // We still need some name for a file
-      const tmpFileName = path.basename(savedFilePath);
-      const destPath = path.join(cwd, tmpFileName);
-      fs.copyFileSync(savedFilePath, destPath);
-    }
-  } else {
-    await decompress(savedFilePath, cwd);
-  }
-
   try {
-    fs.unlinkSync(savedFilePath);
-  } catch (e: any) {
-    internalExceptions(e);
-  }
+    if (skipExtract) {
+      if (dstFileName) {
+        fs.copyFileSync(savedFilePath, path.resolve(path.join(cwd, dstFileName)));
+      } else {
+        // We still need some name for a file
+        const tmpFileName = path.basename(savedFilePath);
+        const destPath = path.join(cwd, tmpFileName);
+        fs.copyFileSync(savedFilePath, destPath);
+      }
+    } else {
+      const archive = await fs.promises.open(savedFilePath, 'r');
+      const header = Buffer.alloc(2);
+      try {
+        await archive.read(header, 0, header.length, 0);
+      } finally {
+        await archive.close();
+      }
 
-  bar.stop();
+      if (header[0] !== 0x1f || header[1] !== 0x8b) {
+        throw new Error('Unsupported archive format: expected a gzip-compressed tar archive');
+      }
+
+      let unsafeEntry: string | undefined;
+      await tar.x({
+        file: savedFilePath,
+        cwd,
+        preserveOwner: false,
+        onwarn: (code, message) => {
+          if (code === 'TAR_ENTRY_ERROR') {
+            unsafeEntry = message;
+          } else {
+            console.warn(`tar skipped an entry (${code}): ${message}`);
+          }
+        },
+      });
+
+      if (unsafeEntry) {
+        throw new Error(`Unsafe tar entry: ${unsafeEntry}`);
+      }
+    }
+  } finally {
+    try {
+      fs.unlinkSync(savedFilePath);
+    } catch (e: any) {
+      internalExceptions(e);
+    }
+
+    bar.stop();
+  }
 }
 
 export async function downloadAndGunzip(url: string): Promise<string> {
