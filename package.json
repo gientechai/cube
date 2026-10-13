@@ -21,6 +21,7 @@
     "lint:npm": "yarn npmPkgJsonLint packages/*/package.json rust/package.json",
     "lint": "yarn lint:npm && yarn lerna run lint",
     "lint:fix": "lerna run lint:fix",
+    "test:security": "node --test test/security-dependencies.test.js",
     "prototype:kingbase-placeholder": "node packages/cubejs-kingbase-oracle-driver/__prototype__/placeholder-normalization.js",
     "prototype:kingbase-mysql-transport": "node packages/cubejs-kingbase-pg-driver/__prototype__/kingbase-mysql-transport.js",
     "tsc": "tsc --build",
