@@ -65,6 +65,21 @@ const SecondsDurations = {
 };
 
 /**
+ * to_date rollingWindow 粒度 → moment startOf 单位
+ * （multiStage 链叶子聚合源窗口下界扩展用，见 expandTimeDimensionsToRollingStart）。
+ */
+const ROLLING_TO_DATE_MOMENT_UNIT = {
+  year: 'year',
+  quarter: 'quarter',
+  month: 'month',
+  week: 'isoWeek',
+  day: 'day',
+  hour: 'hour',
+  minute: 'minute',
+  second: 'second'
+};
+
+/**
  * Set of the schema compilers.
  * @typedef {Object} Compilers
  * @property {import('../compiler/DataSchemaCompiler').DataSchemaCompiler} compiler
@@ -1884,6 +1899,18 @@ export class BaseQuery {
       member = this.newDimension(memberPath);
     }
     const memberDef = member.definition();
+    // to_date rollingWindow 的多阶段链：子阶段（聚合源）的时间窗口下界须扩展到滚动粒度
+    // 周期起点（如当年累计的年初）。引擎仅在非 multiStage 的 overTimeSeriesQuery 路径消费
+    // rollingWindow，multiStage 链此前完全忽略它，累计会被查询窗口下界截断。
+    // timeShift 由既有机制在渲染叶子阶段时再对扩展后的 range 平移，二者可组合。
+    if (memberDef && memberDef.rollingWindow && memberDef.rollingWindow.type === 'to_date') {
+      queryContext = {
+        ...queryContext,
+        timeDimensions: this.expandTimeDimensionsToRollingStart(
+          queryContext.timeDimensions, memberDef.rollingWindow.granularity
+        ),
+      };
+    }
     // TODO can addGroupBy replaced by something else?
     if (memberDef.addGroupByReferences) {
       const dims = memberDef.addGroupByReferences.reduce((acc, cur) => {
@@ -1933,6 +1960,32 @@ export class BaseQuery {
       filters: this.keepFilters(queryContext.filters, filterMember => filterMember !== memberPath),
     };
     return queryContext;
+  }
+
+  /**
+   * 将 timeDimensions 的 dateRange 下界截断到滚动粒度周期起点（如 year → 年初 1 月 1 日）。
+   * 供 to_date rollingWindow 的 multiStage 链扩展子阶段聚合源窗口；无 dateRange、
+   * 粒度不受支持或值不可解析时原样返回。
+   * @protected
+   * @param {Array<object>} timeDimensions
+   * @param {string} granularity rollingWindow.granularity
+   * @returns {Array<object>}
+   */
+  expandTimeDimensionsToRollingStart(timeDimensions, granularity) {
+    const unit = granularity && ROLLING_TO_DATE_MOMENT_UNIT[granularity];
+    if (!unit || !timeDimensions) {
+      return timeDimensions;
+    }
+    return timeDimensions.map(td => {
+      if (!td || !Array.isArray(td.dateRange) || td.dateRange.length < 2 || !td.dateRange[0]) {
+        return td;
+      }
+      const from = moment.utc(td.dateRange[0]);
+      if (!from.isValid()) {
+        return td;
+      }
+      return { ...td, dateRange: [from.startOf(unit).format('YYYY-MM-DD'), td.dateRange[1]] };
+    });
   }
 
   selfMultiStageContext(memberPath, queryContext, wouldNodeApplyFilters) {
@@ -2139,13 +2192,74 @@ export class BaseQuery {
       ...renderedReferenceContext,
       renderedReference: effectiveRenderedReference,
     };
+    const stageSql = subQuery.evaluateSymbolSqlWithContext(
+      () => subQuery.buildParamAnnotatedSql(),
+      contextForSubQuery,
+    );
     return {
-      query: subQuery.evaluateSymbolSqlWithContext(
-        () => subQuery.buildParamAnnotatedSql(),
-        contextForSubQuery,
-      ),
+      query: this.wrapToDateRollingStages(stageSql, withQuery, subQuery, stageHasSemiAdditiveMeasure),
       alias: withQuery.alias
     };
+  }
+
+  /**
+   * to_date rollingWindow 的 multiStage 成员阶段输出“周期起点至当期”的累计值：
+   * 叶子聚合源窗口已扩展到滚动粒度周期起点（见 expandTimeDimensionsToRollingStart），
+   * 阶段行是查询时间粒度的普通聚合，这里在外层套一层按滚动粒度分区、按查询时间粒度
+   * 排序的滚动和（running sum），join 轴仍是查询时间粒度。
+   * 非 to_date、无时间粒度轴或半累加阶段不套用。
+   * @protected
+   * @param {string} stageSql 阶段渲染出的 SQL
+   * @param {object} withQuery multiStage CTE 描述
+   * @param {BaseQuery} subQuery 阶段子查询
+   * @param {boolean} stageHasSemiAdditiveMeasure
+   * @returns {string}
+   */
+  wrapToDateRollingStages(stageSql, withQuery, subQuery, stageHasSemiAdditiveMeasure) {
+    if (!stageSql || stageHasSemiAdditiveMeasure) {
+      return stageSql;
+    }
+    const rollingGranularities = (withQuery.measures || []).map(m => {
+      const rollingWindow = this.newMeasure(m).definition().rollingWindow;
+      return rollingWindow && rollingWindow.type === 'to_date' ? rollingWindow.granularity : null;
+    });
+    if (!rollingGranularities.some(g => !!g)) {
+      return stageSql;
+    }
+    const orderTimeDimension = ((withQuery.multiStageTimeDimensions || [])
+      .concat(withQuery.timeDimensions || []))
+      .find(td => td && td.granularity);
+    if (!orderTimeDimension) {
+      // 无时间粒度轴时无法按期间滚动累计，保持原样
+      return stageSql;
+    }
+    const orderColumn = this.newTimeDimension(orderTimeDimension).aliasName();
+    // 并存维度（如机构）参与分区，避免跨维度成员混算；时间列本身由滚动粒度桶表达
+    const partitionColumns = subQuery.dimensionAliasNames().filter(alias => alias !== orderColumn);
+    const selectItems = [];
+    const passedColumns = new Set();
+    for (const alias of subQuery.dimensionAliasNames()) {
+      if (!passedColumns.has(alias)) {
+        passedColumns.add(alias);
+        selectItems.push(alias);
+      }
+    }
+    (withQuery.measures || []).forEach((m, i) => {
+      const alias = this.newMeasure(m).aliasName();
+      const granularity = rollingGranularities[i];
+      if (granularity) {
+        const partitionBy = partitionColumns
+          .concat([this.timeGroupedColumn(granularity, orderColumn)])
+          .join(', ');
+        selectItems.push(
+          `sum(${alias}) OVER (PARTITION BY ${partitionBy} `
+          + `ORDER BY ${orderColumn}) ${alias}`
+        );
+      } else if (!passedColumns.has(alias)) {
+        selectItems.push(alias);
+      }
+    });
+    return `SELECT ${selectItems.join(', ')} FROM (\n${stageSql}\n) ${this.escapeColumnName(`${withQuery.alias}_roll`)}`;
   }
 
   /**
@@ -2771,13 +2885,18 @@ export class BaseQuery {
 
     const inlineWhereConditions = [];
 
+    const subQueryDimensions = this.collectFrom(
+      this.dimensionsForSelect().concat(measures).concat(semiAdditiveMeasuresForCte).concat(this.allFilters),
+      this.collectSubQueryDimensionsFor.bind(this),
+      'collectSubQueryDimensionsFor'
+    );
+    // 分支级 join 裁剪：多分支查询（main + multiplied/multi-stage 分支）中本分支只聚合自身
+    // 度量，FROM 只需本分支成员/过滤实际引用的 cube。沿用整棵查询 join 树会把只服务其他
+    // 分支的关联表带进普通聚合，在一对多基数（hasMany/belongsTo 声明与物理行数不符）下
+    // 放大本分支度量（如主指标关联年度预算表后 sum 被扇出）。
     const baseQuery = this.rewriteInlineWhere(() => this.joinQuery(
-      this.join,
-      this.collectFrom(
-        this.dimensionsForSelect().concat(measures).concat(semiAdditiveMeasuresForCte).concat(this.allFilters),
-        this.collectSubQueryDimensionsFor.bind(this),
-        'collectSubQueryDimensionsFor'
-      )
+      this.branchJoin(measures.concat(semiAdditiveMeasuresForCte)),
+      subQueryDimensions
     ), inlineWhereConditions);
 
     // 如果有半累加指标，构建未聚合的内部查询
@@ -2797,6 +2916,36 @@ export class BaseQuery {
     const groupByClause = !this.safeEvaluateSymbolContext().ungrouped && this.groupByClause() || '';
 
     return `${selectClause} ${fromClause} ${whereClause}${groupByClause}`;
+  }
+
+  /**
+   * 分支级 join 树（regularMeasuresSubQuery 专用）：
+   * 仅当本分支成员/过滤引用的 cube 是查询全体 cube 的真子集时，按分支 cube 集合重建
+   * join 树（连接路径需要途经的中间 cube 由 joinGraph 自动补齐）；否则返回整棵查询
+   * join 树，行为不变。构建失败时同样回退，避免影响原有可执行查询。
+   * @protected
+   * @param {Array<BaseMeasure>} measures 本分支聚合的度量
+   * @returns {import('../compiler/JoinGraph').FinishedJoinTree}
+   */
+  branchJoin(measures) {
+    const queryJoin = this.join;
+    if (!queryJoin || !queryJoin.joins || !queryJoin.joins.length) {
+      return queryJoin;
+    }
+    try {
+      const branchCubes = R.uniq(this.collectFrom(
+        this.dimensionsForSelect().concat(measures).concat(this.allFilters),
+        this.collectCubeNamesFor.bind(this),
+        'collectCubeNamesFor'
+      ));
+      const queryCubes = this.collectCubeNames();
+      if (!branchCubes.length || R.difference(queryCubes, branchCubes).length === 0) {
+        return queryJoin;
+      }
+      return this.joinGraph.buildJoin(branchCubes) || queryJoin;
+    } catch (e) {
+      return queryJoin;
+    }
   }
 
   /**
