@@ -578,7 +578,19 @@ export class JDBCDriver extends BaseDriver {
       const result: any = await (promisify(resultSet.toObjArray.bind(resultSet)))();
 
       for (const [key, row] of Object.entries(result)) {
-        result[key] = transformRow(row);
+        const transformed = transformRow(row);
+        if (this.config.dbType === 'hive' || (this.config.url || '').startsWith('jdbc:hive2')) {
+          // HiveJDBC keeps the outer table alias in labels (q_0.col).
+          // Cube maps results by unqualified alias, so strip a single alias prefix.
+          result[key] = Object.fromEntries(
+            Object.entries(transformed).map(([column, value]) => [
+              column.replace(/^[^.]+\\./, ''),
+              value,
+            ]),
+          );
+        } else {
+          result[key] = transformed;
+        }
       }
 
       return result;
