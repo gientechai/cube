@@ -5,8 +5,18 @@ export type JDBCDriverConfiguration = {
   dbType: string,
   url: string,
   drivername: string,
-  customClassPath?: string,
-  properties: Record<string, any>,
+  /**
+   * Local JDBC jar(s) or a directory already resolved by the caller.
+   * GBase/MySQL paths use an array; a single string is kept for backward compatibility.
+   */
+  customClassPath?: string | string[],
+  properties?: Record<string, any>,
   poolOptions?: PoolOptions;
   prepareConnectionQueries?: string[];
+  /** Hive/TBDS Kerberos settings, normally copied from the Java source config. */
+  enableKerberos?: boolean;
+  principal?: string;
+  keytabPath?: string;
+  krb5ConfPath?: string;
+  kerberosParam?: Record<string, any>;
 };

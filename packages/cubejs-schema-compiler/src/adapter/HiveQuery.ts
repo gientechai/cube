@@ -58,6 +58,21 @@ export class HiveQuery extends BaseQuery {
     return `\`${name}\``;
   }
 
+  /**
+   * Tesseract uses this template object directly, so Hive identifiers must be
+   * quoted with backticks here as well. Without this override the default
+   * Postgres templates emit "test".column, which Hive parses as a string literal.
+   */
+  public sqlTemplates() {
+    const templates = super.sqlTemplates();
+    templates.quotes.identifiers = '`';
+    templates.quotes.escape = '\\`';
+    // Hive doesn't accept Postgres-style positional GROUP BY.
+    // ORDER BY keeps BaseQuery's index form (ORDER BY 1), which Hive supports.
+    templates.statements.group_by_exprs = "{{ group_by | map(attribute='expr') | join(', ') }}";
+    return templates;
+  }
+
   public simpleQuery() {
     const ungrouped = this.evaluateSymbolSqlWithContext(
       () => `${this.commonQuery()} ${this.baseWhere(this.allFilters)}`, {

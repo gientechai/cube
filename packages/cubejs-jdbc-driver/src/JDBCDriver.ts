@@ -20,6 +20,7 @@ import {
 import * as SqlString from 'sqlstring';
 import { promisify } from 'util';
 import path from 'path';
+import fs from 'fs';
 
 import { SupportedDrivers } from './supported-drivers';
 import type { DriverOptionsInterface } from './supported-drivers';
@@ -35,10 +36,78 @@ const jinst = require('@cubejs-backend/jdbc/lib/jinst');
 const mvn = require('@cubejs-backend/node-java-maven');
 
 let mvnPromise: Promise<void> | null = null;
+let kerberosLoginPromise: Promise<void> | null = null;
+let kerberosLoginKey: string | null = null;
+
+function normalizeClassPath(customClassPath: any): string[] {
+  if (!customClassPath) {
+    return [];
+  }
+  return Array.isArray(customClassPath) ? customClassPath : [customClassPath];
+}
+
+function jarsFromDir(dir: string | undefined): string[] {
+  if (!dir) {
+    return [];
+  }
+  try {
+    const resolved = path.resolve(dir);
+    return fs.readdirSync(resolved)
+      .filter((file) => file.toLowerCase().endsWith('.jar'))
+      .sort()
+      .map((file) => path.join(resolved, file));
+  } catch (e) {
+    return [];
+  }
+}
+
+/**
+ * The JVM can only be created with one classpath. Collect the configured
+ * GBase/Hive directories on the first JDBC initialization so a later Hive
+ * source is not missing its jars when GBase happened to initialize the JVM first.
+ */
+function configuredClassPath(): string[] {
+  return [process.env.CUBEJS_JDBC_CUSTOM_CLASSPATH]
+    .flatMap((dir) => jarsFromDir(dir));
+}
+
+function addJvmOptionsFromEnv() {
+  const raw = process.env.CUBEJS_JDBC_JVM_OPTIONS || '';
+  raw
+    .split(/\s+/)
+    .map((option) => option.trim())
+    .filter(Boolean)
+    .forEach((option) => jinst.addOption(option));
+}
 
 const initMvn = (customClassPath: any) => {
   if (!mvnPromise) {
     mvnPromise = new Promise((resolve, reject) => {
+      const setupJvm = (mvnResults: any) => {
+        if (!jinst.isJvmCreated()) {
+          jinst.addOption('-Xrs');
+          jinst.addOption('-Dfile.encoding=UTF8');
+
+          // Workaround for Databricks JDBC driver
+          // Issue when deserializing Apache Arrow data with Java JVMs version 11 or higher, due to compatibility issues.
+          jinst.addOption('--add-opens=java.base/java.nio=ALL-UNNAMED');
+
+          // Java 17 needs --add-exports for Hadoop KerberosUtil.
+          // Keep these in CUBEJS_JDBC_JVM_OPTIONS so JDK 8 deployments are not broken.
+          addJvmOptionsFromEnv();
+
+          const classPath = (mvnResults && mvnResults.classpath || [])
+            .concat(configuredClassPath(), normalizeClassPath(customClassPath));
+          jinst.setupClasspath(Array.from(new Set(classPath)));
+        }
+        resolve();
+      };
+
+      if (process.env.CUBEJS_JDBC_DISABLE_MVN === 'true') {
+        setupJvm(null);
+        return;
+      }
+
       const options = {
         packageJsonPath: `${path.join(__dirname, '../..')}/package.json`,
       };
@@ -46,23 +115,100 @@ const initMvn = (customClassPath: any) => {
         if (err && !err.message.includes('Could not find java property')) {
           reject(err);
         } else {
-          if (!jinst.isJvmCreated()) {
-            jinst.addOption('-Xrs');
-            jinst.addOption('-Dfile.encoding=UTF8');
-
-            // Workaround for Databricks JDBC driver
-            // Issue when deserializing Apache Arrow data with Java JVMs version 11 or higher, due to compatibility issues.
-            jinst.addOption('--add-opens=java.base/java.nio=ALL-UNNAMED');
-
-            const classPath = (mvnResults && mvnResults.classpath || []).concat(customClassPath || []);
-            jinst.setupClasspath(classPath);
-          }
-          resolve();
+          setupJvm(mvnResults);
         }
       });
     });
   }
   return mvnPromise;
+};
+
+/**
+ * Initialize Hadoop UGI from the same krb5.conf/keytab that the Java source stores.
+ * UGI is process-global, so a second Hive source with a different principal/keytab
+ * must currently be isolated in a separate Cube process.
+ */
+const ensureKerberos = (config: JDBCDriverConfiguration): Promise<void> => {
+  if (!config.enableKerberos) {
+    return Promise.resolve();
+  }
+
+  const { principal, keytabPath, krb5ConfPath } = config;
+  if (!principal || !keytabPath || !krb5ConfPath) {
+    return Promise.reject(new Error(
+      'Hive Kerberos requires principal, keytabPath and krb5ConfPath in the JDBC driver config'
+    ));
+  }
+
+  const loginKey = `${principal}|${keytabPath}|${krb5ConfPath}`;
+  if (kerberosLoginPromise) {
+    if (kerberosLoginKey !== loginKey) {
+      return Promise.reject(new Error(
+        `Kerberos is already initialized for ${kerberosLoginKey}; ` +
+        `cannot switch to ${loginKey} in the same JVM. Use a separate Cube process per Kerberos identity.`
+      ));
+    }
+    return kerberosLoginPromise;
+  }
+
+  kerberosLoginKey = loginKey;
+  kerberosLoginPromise = Promise.resolve().then(() => {
+    const java = jinst.getInstance();
+
+    // node-java invokes Java on a JNI-created thread. Ensure Hadoop's resource
+    // lookup sees the JVM system classloader instead of that thread's empty TCCL.
+    const currentThread = java.callStaticMethodSync('java.lang.Thread', 'currentThread');
+    const systemClassLoader = java.callStaticMethodSync('java.lang.ClassLoader', 'getSystemClassLoader');
+    java.callMethodSync(currentThread, 'setContextClassLoader', systemClassLoader);
+
+    java.callStaticMethodSync('java.lang.System', 'setProperty', 'java.security.krb5.conf', krb5ConfPath);
+
+    const Configuration = java.import('org.apache.hadoop.conf.Configuration');
+    const conf = new Configuration();
+    java.callMethodSync(conf, 'set', 'hadoop.security.authentication', 'kerberos');
+
+    java.callStaticMethodSync(
+      'org.apache.hadoop.security.UserGroupInformation',
+      'setConfiguration',
+      conf
+    );
+    java.callStaticMethodSync(
+      'org.apache.hadoop.security.UserGroupInformation',
+      'loginUserFromKeytab',
+      principal,
+      keytabPath
+    );
+
+    // Optional TGT renewal. Disabled by default; set the interval to e.g. 1800000 for long-running services.
+    const reloginInterval = Number(process.env.CUBEJS_JDBC_KERBEROS_RELOGIN_MS || 0);
+    if (reloginInterval > 0) {
+      try {
+        const ugi = java.callStaticMethodSync(
+          'org.apache.hadoop.security.UserGroupInformation',
+          'getLoginUser'
+        );
+        const timer = setInterval(() => {
+          try {
+            ugi.checkTGTAndReloginFromKeytabSync();
+          } catch (e) {
+            // Keep the service alive; the next query will surface the authentication error.
+          }
+        }, reloginInterval);
+        if (typeof timer.unref === 'function') {
+          timer.unref();
+        }
+      } catch (e) {
+        // Older node-java/Hadoop combinations may not expose the sync method; renewal stays external.
+      }
+    }
+  }).catch((e) => {
+    // Allow a later retry if the keytab/KDC was temporarily unavailable.
+    kerberosLoginPromise = null;
+    kerberosLoginKey = null;
+    throw e;
+  });
+
+  return kerberosLoginPromise;
 };
 
 const applyParams = (query: string, params: object | any[]) => SqlString.format(query, params);
@@ -146,6 +292,7 @@ export class JDBCDriver extends BaseDriver {
     this.pool = new Pool(poolName, {
       create: async () => {
         await initMvn(await this.getCustomClassPath());
+        await ensureKerberos(this.config);
 
         if (!this.jdbcProps) {
           /** @protected */
@@ -209,7 +356,7 @@ export class JDBCDriver extends BaseDriver {
     const Properties = java.import('java.util.Properties');
     const properties = new Properties();
 
-    for (const [name, value] of Object.entries(this.config.properties)) {
+    for (const [name, value] of Object.entries(this.config.properties || {})) {
       properties.putSync(name, value);
     }
 
