@@ -10,7 +10,7 @@ export type JDBCDriverConfiguration = {
    * GBase/MySQL paths use an array; a single string is kept for backward compatibility.
    */
   customClassPath?: string | string[],
-  properties?: Record<string, any>,
+  properties: Record<string, any>,
   poolOptions?: PoolOptions;
   prepareConnectionQueries?: string[];
   /** Hive/TBDS Kerberos settings, normally copied from the Java source config. */
