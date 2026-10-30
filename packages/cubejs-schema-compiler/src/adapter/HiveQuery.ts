@@ -89,7 +89,9 @@ export class HiveQuery extends BaseQuery {
   }
 
   public countDistinctApprox(sql: string) {
-    return `approx_count_distinct(${sql})`;
+    // TBDS Hive 3.1 does not expose approx_count_distinct; exact count is
+    // supported and matches the matrix semantic for direct queries.
+    return `count(distinct ${sql})`;
   }
 
   public timeGroupedColumn(granularity, dimension) {
