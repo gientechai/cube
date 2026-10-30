@@ -70,7 +70,51 @@ export class HiveQuery extends BaseQuery {
     // Hive doesn't accept Postgres-style positional GROUP BY.
     // ORDER BY keeps BaseQuery's index form (ORDER BY 1), which Hive supports.
     templates.statements.group_by_exprs = "{{ group_by | map(attribute='expr') | join(', ') }}";
+    // BaseQuery uses Postgres `date_from::timestamp` and a VALUES row constructor.
+    // Hive needs CAST(... AS TIMESTAMP) and a UNION ALL derived table instead.
+    templates.statements.time_series_select =
+      'SELECT CAST(replace(replace(dates.f, \'T\', \' \'), \'Z\', \'\') AS TIMESTAMP) AS date_from, CAST(replace(replace(dates.t, \'T\', \' \'), \'Z\', \'\') AS TIMESTAMP) AS date_to\n' +
+      'FROM (\n' +
+      '{% for time_item in seria %}' +
+      "  SELECT '{{ time_item[0] }}' f, '{{ time_item[1] }}' t\n" +
+      '{% if not loop.last %}  UNION ALL\n{% endif %}' +
+      '{% endfor %}' +
+      ') AS dates';
     return templates;
+  }
+
+
+  /**
+   * Tesseract builds rolling-window bounds as two scalar subqueries:
+   *   (SELECT min(`date_from`) `value` FROM time_series)
+   *   (SELECT max(`date_to`) `value` FROM time_series)
+   * Hive 3 rejects more than one subquery expression in WHERE. For a Hive
+   * query with an explicit time series we can inline the two known bounds.
+   */
+  public buildSqlAndParams(exportAnnotatedSql?: boolean): [string, any[]] {
+    const [sql, params] = super.buildSqlAndParams(exportAnnotatedSql);
+    return [this.inlineTimeSeriesBounds(sql), params];
+  }
+
+  private inlineTimeSeriesBounds(sql: string): string {
+    const minSubquery = /\(SELECT min\(`date_from`\) `value`\s+FROM time_series\)/g;
+    const maxSubquery = /\(SELECT max\(`date_to`\) `value`\s+FROM time_series\)/g;
+    if (!minSubquery.test(sql) || !maxSubquery.test(sql)) {
+      return sql;
+    }
+    // Reset lastIndex after test(), since both regexes are global.
+    minSubquery.lastIndex = 0;
+    maxSubquery.lastIndex = 0;
+
+    const series = [...sql.matchAll(/'([^']+)' f, '([^']+)' t/g)];
+    if (series.length === 0) {
+      return sql;
+    }
+    const castLiteral = (value: string) =>
+      `CAST(replace(replace('${value}', 'T', ' '), 'Z', '') AS TIMESTAMP)`;
+    return sql
+      .replace(minSubquery, castLiteral(series[0][1]))
+      .replace(maxSubquery, castLiteral(series[series.length - 1][2]));
   }
 
   public simpleQuery() {

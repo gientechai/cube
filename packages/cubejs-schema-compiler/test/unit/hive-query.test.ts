@@ -49,6 +49,10 @@ cubes:
     expect(templates.statements.group_by_exprs).not.toContain("attribute='index'");
     // Keep BaseQuery's ORDER BY index form; Hive accepts ORDER BY 1.
     expect(templates.expressions.order_by).toContain('index');
+    // BaseQuery's default time_series_select uses Postgres `::timestamp` and VALUES.
+    expect(templates.statements.time_series_select).toContain("CAST(replace(replace(dates.f, 'T', ' '), 'Z', '') AS TIMESTAMP)");
+    expect(templates.statements.time_series_select).not.toContain('::timestamp');
+    expect(templates.statements.time_series_select).not.toContain('VALUES');
   });
 
   it('generates backtick-quoted identifiers in classic Hive SQL', () => {
