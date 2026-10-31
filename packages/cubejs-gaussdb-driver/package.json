@@ -1,0 +1,47 @@
+{
+  "name": "@cubejs-backend/gaussdb-driver",
+  "description": "Cube.js GaussDB 507 centralized PG-mode JDBC driver",
+  "author": "Cube Dev, Inc.",
+  "version": "1.6.61",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cube-js/cube.git",
+    "directory": "packages/cubejs-gaussdb-driver"
+  },
+  "engines": {
+    "node": ">=17.0.0"
+  },
+  "files": [
+    "dist/src",
+    "index.js"
+  ],
+  "main": "index.js",
+  "typings": "dist/src/index.d.ts",
+  "scripts": {
+    "build": "rm -rf dist && npm run tsc",
+    "tsc": "tsc",
+    "watch": "tsc -w",
+    "lint": "eslint index.js src/* --ext .ts,.js",
+    "lint:fix": "eslint --fix index.js src/* --ext .ts,.js"
+  },
+  "dependencies": {
+    "@cubejs-backend/base-driver": "1.6.61",
+    "@cubejs-backend/jdbc-driver": "1.6.61",
+    "@cubejs-backend/shared": "1.6.61"
+  },
+  "optionalDependencies": {
+    "@cubejs-backend/jdbc": "^0.8.1"
+  },
+  "devDependencies": {
+    "@cubejs-backend/linter": "1.6.61",
+    "@types/node": "^20",
+    "typescript": "~5.2.2"
+  },
+  "eslintConfig": {
+    "extends": "../cubejs-linter"
+  },
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  }
+}
