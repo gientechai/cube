@@ -15,6 +15,7 @@ export * from './CubeStoreQuery';
 // Base queries that can be re-used across different drivers
 export * from './MysqlQuery';
 export * from './PostgresQuery';
+export * from './GaussDBQuery';
 export * from './MssqlQuery';
 export * from './PrestodbQuery';
 

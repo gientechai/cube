@@ -113,6 +113,7 @@ export type DatabaseType =
   | 'mongobi'
   | 'dm'
   | 'gbase'
+  | 'gaussdb'
   | 'mssql'
   | 'mysql'
   | 'starrocks'

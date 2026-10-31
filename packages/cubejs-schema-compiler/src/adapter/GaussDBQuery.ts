@@ -1,0 +1,161 @@
+// Independent copy of PostgresQuery at b1.6.61-3.3.1-yzj.
+// GaussDB changes: JDBC placeholders and expanded parameter bindings.
+import { parseSqlInterval } from '@cubejs-backend/shared';
+import { BaseQuery } from './BaseQuery';
+import { ParamAllocator } from './ParamAllocator';
+
+const GRANULARITY_TO_INTERVAL = {
+  day: 'day',
+  week: 'week',
+  hour: 'hour',
+  minute: 'minute',
+  second: 'second',
+  month: 'month',
+  quarter: 'quarter',
+  year: 'year'
+};
+
+class GaussDBParamAllocator extends ParamAllocator {
+  public paramPlaceHolder(_paramIndex) {
+    return '?';
+  }
+}
+
+export class GaussDBQuery extends BaseQuery {
+  public newParamAllocator(expressionParams) {
+    return new GaussDBParamAllocator(expressionParams);
+  }
+
+  public convertTz(field: string): string {
+    return `(${field}::timestamptz AT TIME ZONE '${this.timezone}')`;
+  }
+
+  public timeGroupedColumn(granularity: string, dimension: string): string {
+    return `date_trunc('${GRANULARITY_TO_INTERVAL[granularity]}', ${dimension})`;
+  }
+
+  /**
+   * Returns sql for source expression floored to timestamps aligned with
+   * intervals relative to origin timestamp point.
+   * Postgres operates with whole intervals as is without measuring them in plain seconds.
+   * This implementation should also work for AWS RedShift.
+   */
+  public dateBin(interval: string, source: string, origin: string): string {
+    const intervalStr = this.intervalString(interval);
+    return `('${origin}'::timestamp + INTERVAL ${intervalStr} *
+      FLOOR(
+        EXTRACT(EPOCH FROM (${source} - '${origin}'::timestamp)) /
+        EXTRACT(EPOCH FROM INTERVAL ${intervalStr})
+      ))`;
+  }
+
+  public override intervalString(interval: string): string {
+    const parsed = parseSqlInterval(interval);
+    if (parsed.quarter) {
+      parsed.month = (parsed.month || 0) + parsed.quarter * 3;
+      delete parsed.quarter;
+    }
+    const normalized = Object.entries(parsed)
+      .map(([unit, value]) => `${value} ${unit}${value !== 1 ? 's' : ''}`)
+      .join(' ');
+    return `'${normalized}'`;
+  }
+
+  public hllInit(sql) {
+    return `hll_add_agg(hll_hash_any(${sql}))`;
+  }
+
+  public hllMerge(sql) {
+    return `round(hll_cardinality(hll_union_agg(${sql})))`;
+  }
+
+  public countDistinctApprox(sql) {
+    return `round(hll_cardinality(hll_add_agg(hll_hash_any(${sql}))))`;
+  }
+
+  public supportGeneratedSeriesForCustomTd() {
+    return true;
+  }
+
+  public sqlTemplates() {
+    const templates = super.sqlTemplates();
+    // eslint-disable-next-line no-template-curly-in-string
+    templates.params.param = '?';
+    templates.functions.DATETRUNC = 'DATE_TRUNC({{ args_concat }})';
+    templates.functions.CONCAT = 'CONCAT({% for arg in args %}CAST({{arg}} AS TEXT){% if not loop.last %},{% endif %}{% endfor %})';
+    templates.functions.DATEPART = 'DATE_PART({{ args_concat }})';
+    templates.functions.CURRENTDATE = 'CURRENT_DATE';
+    templates.functions.LEAST = 'LEAST({{ args_concat }})';
+    templates.functions.GREATEST = 'GREATEST({{ args_concat }})';
+    templates.functions.NOW = 'NOW({{ args_concat }})';
+    // DATEADD is being rewritten to DATE_ADD
+    // templates.functions.DATEADD = '({{ args[2] }} + \'{{ interval }} {{ date_part }}\'::interval)';
+    // TODO: is DATEDIFF expr worth documenting?
+    templates.functions.DATEDIFF = 'CASE WHEN LOWER(\'{{ date_part }}\') IN (\'year\', \'quarter\', \'month\') THEN (EXTRACT(YEAR FROM AGE(DATE_TRUNC(\'{{ date_part }}\', {{ args[2] }}), DATE_TRUNC(\'{{ date_part }}\', {{ args[1] }}))) * 12 + EXTRACT(MONTH FROM AGE(DATE_TRUNC(\'{{ date_part }}\', {{ args[2] }}), DATE_TRUNC(\'{{ date_part }}\', {{ args[1] }})))) / CASE LOWER(\'{{ date_part }}\') WHEN \'year\' THEN 12 WHEN \'quarter\' THEN 3 WHEN \'month\' THEN 1 END ELSE EXTRACT(EPOCH FROM DATE_TRUNC(\'{{ date_part }}\', {{ args[2] }}) - DATE_TRUNC(\'{{ date_part }}\', {{ args[1] }})) / EXTRACT(EPOCH FROM \'1 {{ date_part }}\'::interval) END::bigint';
+    templates.expressions.interval = 'INTERVAL \'{{ interval }}\'';
+    templates.expressions.extract = 'EXTRACT({{ date_part }} FROM {{ expr }})';
+    templates.expressions.timestamp_literal = 'timestamptz \'{{ value }}\'';
+    templates.window_frame_types.groups = 'GROUPS';
+    templates.types.string = 'TEXT';
+    templates.types.tinyint = 'SMALLINT';
+    templates.types.float = 'REAL';
+    templates.types.double = 'DOUBLE PRECISION';
+    templates.types.binary = 'BYTEA';
+    templates.operators.is_not_distinct_from = 'IS NOT DISTINCT FROM';
+    templates.statements.generated_time_series_select = 'SELECT {{ date_from }} AS "date_from",\n' +
+      '{{ date_to }} AS "date_to" \n' +
+      'FROM generate_series({{ start }}::timestamp, {{ end }}:: timestamp, {{ granularity }}::interval) d ';
+    templates.statements.generated_time_series_with_cte_range_source = 'SELECT d AS "date_from",\n' +
+      'd + interval {{ granularity }} - interval \'1 millisecond\' AS "date_to" \n' +
+      'FROM {{ range_source }}, LATERAL generate_series({{ range_source }}.{{ min_name }}, {{ range_source }}.{{ max_name }}, {{ granularity }}::interval) d ';
+    return templates;
+  }
+
+  public get shouldReuseParams() {
+    return false;
+  }
+
+  // ==========================================================================
+  // period_average 方言适配区（PostgreSQL）
+  //
+  // BaseQuery 的 period_average 默认实现本身就是 PostgreSQL 语法，故 PG 仅重写
+  // 「整区间 calendar 快路径」相关方法以提供 day 口径的闭式天数表达式，
+  // 其余方法（日期字面量、now、间隔计数等）直接继承 BaseQuery 默认实现。
+  //
+  // 适配新数据库时：若该库语法接近 PG（如 Redshift），可直接继承 BaseQuery 默认实现，
+  // 仅按需重写 periodAverageClosedFormIntervalBucketUnits / periodAverageDaysIn* 即可。
+  // ==========================================================================
+
+  public periodAverageClosedFormIntervalBucketUnits(avgUnit, interval, groupedBucket) {
+    const constant = super.periodAverageClosedFormIntervalBucketUnits(avgUnit, interval, groupedBucket);
+    if (constant) {
+      return constant;
+    }
+
+    if (avgUnit === 'day') {
+      if (interval === 'month') {
+        return this.periodAverageDaysInMonthBucket(groupedBucket);
+      }
+      if (interval === 'quarter') {
+        return this.periodAverageDaysInQuarterBucket(groupedBucket);
+      }
+      if (interval === 'year') {
+        return this.periodAverageDaysInYearBucket(groupedBucket);
+      }
+    }
+
+    return null;
+  }
+
+  public periodAverageDaysInMonthBucket(bucketColumn) {
+    return `GREATEST(EXTRACT(DAY FROM ((${bucketColumn}) + INTERVAL '1 month' - INTERVAL '1 day'))::int, 0)`;
+  }
+
+  public periodAverageDaysInQuarterBucket(bucketColumn) {
+    return `GREATEST(((${bucketColumn}) + INTERVAL '3 months' - INTERVAL '1 day')::date - (${bucketColumn})::date + 1, 0)`;
+  }
+
+  public periodAverageDaysInYearBucket(bucketColumn) {
+    return `GREATEST(((${bucketColumn}) + INTERVAL '1 year' - INTERVAL '1 day')::date - (${bucketColumn})::date + 1, 0)`;
+  }
+}

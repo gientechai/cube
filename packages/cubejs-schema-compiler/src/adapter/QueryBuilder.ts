@@ -1,4 +1,5 @@
 import { PostgresQuery } from './PostgresQuery';
+import { GaussDBQuery } from './GaussDBQuery';
 import { MysqlQuery } from './MysqlQuery';
 import { StarRocksQuery } from './StarRocksQuery';
 import { GBaseQuery } from './GBaseQuery';
@@ -23,6 +24,7 @@ import { TrinoQuery } from './TrinoQuery';
 
 const ADAPTERS = {
   postgres: PostgresQuery,
+  gaussdb: GaussDBQuery,
   redshift: RedshiftQuery,
   mysql: MysqlQuery,
   gbase: GBaseQuery,
