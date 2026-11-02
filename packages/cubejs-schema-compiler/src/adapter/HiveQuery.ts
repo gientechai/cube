@@ -335,7 +335,12 @@ export class HiveQuery extends BaseQuery {
    */
   public buildSqlAndParams(exportAnnotatedSql?: boolean): [string, any[]] {
     const [sql, params] = super.buildSqlAndParams(exportAnnotatedSql);
-    return [this.inlineTimeSeriesBounds(sql), params];
+    const result = this.inlineTimeSeriesBounds(sql);
+    if (process.env.DBG_HIVE_SQL) {
+      // eslint-disable-next-line no-console
+      console.error('[HIVE SQL]', result);
+    }
+    return [result, params];
   }
 
   private inlineTimeSeriesBounds(sql: string): string {
@@ -358,6 +363,78 @@ export class HiveQuery extends BaseQuery {
       .replace(maxSubquery, castLiteral(series[series.length - 1][2]));
   }
 
+  /**
+   * Hive 只在**投影列/别名**上解析 ORDER BY：`ORDER BY sum(...)` 里引用的源列若不在 SELECT
+   * 中，会报 SemanticException 10002/10004/10025。Tesseract 会直接把“隐藏排序指标”的
+   * 表达式塞进 ORDER BY，因此 Hive 需要回落到 JS 生成器，由下面的
+   * simpleQueryWithHiddenSortMeasures() 先投影再排序。
+   */
+  public shouldFallbackToJsForHiddenSortMeasures() {
+    return true;
+  }
+
+  /** `order` 里引用了、但不在 SELECT measures 中的指标（隐藏排序指标）。 */
+  private hiddenSortMeasures() {
+    const selected = new Set<string>();
+    this.measures.forEach((m: any) => {
+      selected.add(m.measure);
+      if (m.expressionName) {
+        selected.add(m.expressionName);
+      }
+    });
+    const paths = (this.order || [])
+      .map((o: any) => o && o.id)
+      .filter((id: string) => !!id && !selected.has(id));
+
+    const result: any[] = [];
+    paths.forEach((id: string) => {
+      try {
+        // 不是 measure（例如按维度排序）时保持原有位置化顺序。
+        this.cubeEvaluator.measureByPath(id);
+      } catch (e) {
+        return;
+      }
+      result.push(this.newMeasure(id));
+    });
+    return result;
+  }
+
+  /**
+   * 隐藏排序指标：内层把指标聚合出来（不进结果集），外层按别名排序后再裁掉该列。
+   * Hive 允许外层 `SELECT a FROM (SELECT a, b ...) ORDER BY b`，但不允许 ORDER BY 里
+   * 出现未投影的表达式。
+   */
+  private simpleQueryWithHiddenSortMeasures(hiddenSortMeasures: any[]) {
+    const visibleMeasures = this.measures;
+    this.measures = visibleMeasures.concat(hiddenSortMeasures);
+    try {
+      const dims = this.dimensionsForSelect();
+      const dimColumns = R.flatten(dims.map((d: any) => d.selectColumns())).filter((c: any) => !!c);
+      const measureColumns = this.measures.flatMap((m: any) => m.selectColumns()).filter((c: any) => !!c);
+      // 无 granularity 的时间维（只有 dateRange）上 dimensionSql() 会拿 undefined 的
+      // Granularity 调 isNaturalAligned()，这里直接用换时区后的列表达式分组。
+      const groupByExprs = dims.map((d: any) => {
+        if (d.granularityObj) {
+          return d.dimensionSql();
+        }
+        if (typeof d.convertedToTz === 'function') {
+          return d.convertedToTz();
+        }
+        return d.dimensionSql();
+      }).filter((c: any) => !!c);
+
+      const grouped = `SELECT ${dimColumns.concat(measureColumns).join(', ')} FROM ${this.query()} ${this.baseWhere(this.allFilters)}`
+        + (groupByExprs.length ? ` GROUP BY ${groupByExprs.join(', ')}` : '');
+
+      const outerSelect = dims.map((d: any) => d.aliasName())
+        .concat(visibleMeasures.flatMap((m: any) => m.aliasName())).filter((s: any) => !!s);
+      const outer = `SELECT ${outerSelect.join(',')} FROM (${this.baseHaving(grouped, this.measureFilters)}) AS ${this.escapeColumnName('hive_sort_wrapper')}`;
+      return outer + this.orderBy() + this.groupByDimensionLimit();
+    } finally {
+      this.measures = visibleMeasures;
+    }
+  }
+
   public simpleQuery() {
     // BaseQuery.simpleQuery 会把 denominator:data 的 period_average 交给
     // buildPeriodAverageDataQuery（先按 avg_unit 预聚合的 CTE）。HiveQuery 覆盖了
@@ -367,18 +444,31 @@ export class HiveQuery extends BaseQuery {
       return this.buildPeriodAverageDataQuery();
     }
 
+    const hiddenSortMeasures = this.hiddenSortMeasures();
+    if (hiddenSortMeasures.length) {
+      return this.simpleQueryWithHiddenSortMeasures(hiddenSortMeasures);
+    }
+
     const ungrouped = this.evaluateSymbolSqlWithContext(
       () => `${this.commonQuery()} ${this.baseWhere(this.allFilters)}`, {
         ungroupedForWrappingGroupBy: true
       }
     );
-    const select = this.evaluateSymbolSqlWithContext(
-      () => this.dimensionsForSelect().map(
-        d => d.aliasName()
-      ).concat(this.measures.flatMap(m => m.selectColumns())).filter(s => !!s), {
-        ungroupedAliases: R.fromPairs(this.forSelect().map((m: any) => [m.measure || m.dimension, m.aliasName()]))
-      }
+    const groupByAliases = R.fromPairs(this.forSelect().map((m: any) => [m.measure || m.dimension, m.aliasName()]));
+    const dimensionSelect = this.evaluateSymbolSqlWithContext(
+      () => this.dimensionsForSelect().map(d => d.aliasName()).filter(s => !!s),
+      { ungroupedAliases: groupByAliases }
     );
+    const measureSelect = this.evaluateSymbolSqlWithContext(
+      () => this.measures.flatMap(m => m.selectColumns()).filter(s => !!s),
+      { ungroupedAliases: groupByAliases }
+    ).map((column: string) => {
+      // 透传列（如 time_shift 在 CTE 里重新取列）在 GROUP BY 查询里会被 Hive 判为
+      // “Expression not in GROUP BY key”。内层已经按维度分组，一行一键，MAX() 不改变结果。
+      const bare = column.match(/^(`[^`]+`)\s+(`[^`]+`)$/);
+      return bare ? `MAX(${bare[1]}) ${bare[2]}` : column;
+    });
+    const select = dimensionSelect.concat(measureSelect);
     const query = `SELECT ${select} FROM (${ungrouped}) AS ${this.escapeColumnName('hive_wrapper')}
     ${this.groupByClause()}`;
     return this.baseHaving(query, this.measureFilters) + this.orderBy() + this.groupByDimensionLimit();

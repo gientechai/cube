@@ -1005,6 +1005,13 @@ export class BaseQuery {
       if (this.hasPeriodAverageMeasureFilters()) {
         return this.newQueryWithoutNative().buildSqlAndParams(exportAnnotatedSql);
       }
+      // 方言（目前是 Hive）无法在 ORDER BY 里引用未投影的排序指标时，回退到 JS 生成器。
+      if (
+        this.shouldFallbackToJsForHiddenSortMeasures()
+        && this.hiddenSortMeasureIds().length
+      ) {
+        return this.newQueryWithoutNative().buildSqlAndParams(exportAnnotatedSql);
+      }
 
       return this.buildSqlAndParamsRust(exportAnnotatedSql);
     }
@@ -3418,6 +3425,45 @@ export class BaseQuery {
     }
 
     return null;
+  }
+
+  /**
+   * 是否因为 ORDER BY 引用了未投影的排序指标而回退到 JS SQL 生成器。
+   * 默认 false：Tesseract 生成的 ORDER BY 在多数方言下可用；Hive 覆盖为 true。
+   *
+   * @returns {boolean}
+   */
+  shouldFallbackToJsForHiddenSortMeasures() {
+    return false;
+  }
+
+  /**
+   * `order` 中引用了、但没有出现在 SELECT measures 里的指标路径（隐藏排序指标）。
+   *
+   * @returns {string[]}
+   */
+  hiddenSortMeasureIds() {
+    const selected = new Set();
+    this.measures.forEach((m) => {
+      selected.add(m.measure);
+      if (m.expressionName) {
+        selected.add(m.expressionName);
+      }
+    });
+
+    return (this.order || [])
+      .map((o) => o && o.id)
+      .filter((id) => {
+        if (!id || selected.has(id)) {
+          return false;
+        }
+        try {
+          this.cubeEvaluator.measureByPath(id);
+          return true;
+        } catch (e) {
+          return false;
+        }
+      });
   }
 
   /**
