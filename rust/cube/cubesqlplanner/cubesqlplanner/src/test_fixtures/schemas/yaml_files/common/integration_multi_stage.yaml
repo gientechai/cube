@@ -360,6 +360,17 @@ cubes:
                 type: to_date
                 granularity: year
 
+          - name: total_amount_ytd_prev_year
+            type: sum
+            sql: "{CUBE.total_amount}"
+            multi_stage: true
+            rolling_window:
+                type: to_date
+                granularity: year
+            time_shift:
+                - interval: "1 year"
+                  type: prior
+
           # ── filter: directive variants ────────────────────────────────────
           - name: amount_exclude_status
             type: sum

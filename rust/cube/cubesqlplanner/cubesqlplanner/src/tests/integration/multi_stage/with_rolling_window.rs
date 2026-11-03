@@ -55,6 +55,39 @@ async fn test_rolling_and_time_shift() {
     }
 }
 
+/// A to-date rolling window with `time_shift` must read shifted data
+/// (`created_at + interval` in the base CTE filter and bucket projection)
+/// while the time series keeps the query window labels. Without the fix the
+/// shift is silently ignored and the measure degrades to the current-period
+/// to-date value.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_rolling_to_date_with_time_shift() {
+    let ctx = create_context();
+
+    let query = indoc! {r#"
+        measures:
+          - orders.total_amount_ytd_prev_year
+        time_dimensions:
+          - dimension: orders.created_at
+            granularity: month
+            dateRange:
+              - "2024-01-01"
+              - "2024-03-31"
+    "#};
+
+    let sql = ctx.build_sql(query).unwrap();
+    // The base CTE time dimension renders shifted so prior-year rows land on
+    // the current-window buckets.
+    assert!(
+        sql.contains("+ interval '1 year'"),
+        "rolling base SQL must apply the measure time shift:\n{sql}"
+    );
+
+    if let Some(result) = ctx.try_execute_pg(query, SEED).await {
+        insta::assert_snapshot!(result);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_rolling_and_reduce_by() {
     let ctx = create_context();

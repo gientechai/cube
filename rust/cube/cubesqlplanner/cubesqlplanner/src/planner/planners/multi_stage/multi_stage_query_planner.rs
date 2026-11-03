@@ -14,6 +14,7 @@ use crate::planner::filter::FilterItem;
 use crate::planner::filter::FilterOperator;
 use crate::planner::state::State;
 use crate::planner::symbols::AggregationType;
+use crate::planner::symbols::MeasureSymbol;
 use crate::planner::Case;
 use crate::planner::CaseSwitchDefinition;
 use crate::planner::CaseSwitchItem;
@@ -699,8 +700,10 @@ impl MultiStageQueryPlanner {
                 let base_member = MemberSymbol::new_measure(measure.new_unrolling());
 
                 if time_dimensions.is_empty() {
-                    let base_state =
-                        self.replace_date_range_for_rolling_window(&rolling_window, state.clone())?;
+                    let base_state = self.apply_time_shift_to_rolling_base(
+                        &measure,
+                        self.replace_date_range_for_rolling_window(&rolling_window, state.clone())?,
+                    )?;
                     let rolling_base = if !measure.is_multi_stage() {
                         self.add_rolling_window_base(
                             base_member,
@@ -740,6 +743,13 @@ impl MultiStageQueryPlanner {
                     &rolling_window,
                     state.clone(),
                 )?;
+                // A time-shifted rolling window must read shifted data while keeping the
+                // series labels in the query window: the shift is applied to the base CTE
+                // state so its time dimension renders as `time_dimension + interval` in
+                // both the to-date filter and the bucket projection; the time series
+                // itself stays unshifted.
+                let base_rolling_state =
+                    self.apply_time_shift_to_rolling_base(&measure, base_rolling_state)?;
 
                 let time_series =
                     self.add_time_series(time_dimension.clone(), state.clone(), descriptions)?;
@@ -1033,6 +1043,25 @@ impl MultiStageQueryPlanner {
         }
 
         Ok((Rc::new(new_state), new_time_dimension))
+    }
+
+    /// Applies the measure's `time_shift` to a rolling-window base state:
+    /// the base CTE must read shifted data (`time_dimension + interval` in
+    /// filters and bucket projections) while the time series keeps the query
+    /// window labels. Without this, multi-stage rolling SQL silently ignores
+    /// the shift and prior-period rolling measures degrade to current-period
+    /// values.
+    fn apply_time_shift_to_rolling_base(
+        &self,
+        measure: &MeasureSymbol,
+        state: Rc<QueryProperties>,
+    ) -> Result<Rc<QueryProperties>, CubeError> {        if let Some(time_shift) = measure.time_shift() {
+            let mut shifted = state.as_ref().clone();
+            shifted.add_time_shifts(time_shift.clone())?;
+            Ok(Rc::new(shifted))
+        } else {
+            Ok(state)
+        }
     }
 }
 
