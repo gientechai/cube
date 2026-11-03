@@ -2259,7 +2259,23 @@ export class BaseQuery {
         selectItems.push(alias);
       }
     });
-    return `SELECT ${selectItems.join(', ')} FROM (\n${stageSql}\n) ${this.escapeColumnName(`${withQuery.alias}_roll`)}`;
+    let wrapped = `SELECT ${selectItems.join(', ')} FROM (\n${stageSql}\n) ${this.escapeColumnName(`${withQuery.alias}_roll`)}`;
+    // 裁剪回用户请求窗口：滚动和需要滚动周期起点以来的所有月份行参与计算，
+    // 叶子窗口因此被扩展，链输出会包含请求窗口之外的月份（单 multiStage 成员查询
+    // 没有携带查询窗口的主分支兜底）。WHERE 必须套在窗口函数外层——同层 WHERE
+    // 先于窗口函数执行，会把滚动和截成单期。
+    const requestedRange = (withQuery.multiStageTimeDimensions || []).find(td =>
+      td && td.granularity && Array.isArray(td.dateRange) && td.dateRange.length >= 2
+      && td.dateRange[0] != null && td.dateRange[1] != null
+      && td.dimension === orderTimeDimension.dimension
+    );
+    if (requestedRange) {
+      const startParam = this.paramAllocator.allocateParam(requestedRange.dateRange[0]);
+      const endParam = this.paramAllocator.allocateParam(requestedRange.dateRange[1]);
+      wrapped = `SELECT * FROM (${wrapped}) ${this.escapeColumnName(`${withQuery.alias}_roll_clip`)} `
+        + `WHERE ${orderColumn} >= ${startParam} AND ${orderColumn} <= ${endParam}`;
+    }
+    return wrapped;
   }
 
   /**

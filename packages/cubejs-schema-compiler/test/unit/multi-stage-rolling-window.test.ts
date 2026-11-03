@@ -83,6 +83,11 @@ cubes:
         `sum("ledger__ytd") OVER (PARTITION BY date_trunc('year', "ledger__data_dt_month") `
         + `ORDER BY "ledger__data_dt_month") "ledger__ytd"`
       );
+      // the visible stage output is clipped back to the requested window (WHERE sits
+      // OUTSIDE the window function so the running sum still sees all months)
+      expect(sql).toMatch(
+        /\) "cte_\d+_roll"\) "cte_\d+_roll_clip" WHERE "ledger__data_dt_month" >= '2026-03-01' AND "ledger__data_dt_month" <= '2026-03-31'/
+      );
     });
 
     it('keeps coexisting dimensions inside the running-sum partition', async () => {
