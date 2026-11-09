@@ -1,4 +1,4 @@
-FROM node:22.20.0-bookworm-slim AS builder
+FROM node:22.23.4-bookworm-slim AS builder
 
 WORKDIR /cube
 COPY . .
@@ -106,7 +106,7 @@ RUN ARCH=$(uname -m) && \
       echo "No native binaries found and no NPM_PACKAGES_VERSION specified"; \
     fi
 
-FROM node:22.20.0-bookworm-slim
+FROM node:22.23.4-bookworm-slim
 
 ARG IMAGE_VERSION=unknown
 

@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile-upstream:master-experimental
-FROM node:22.20.0-bookworm-slim AS builder
+FROM node:22.23.4-bookworm-slim AS builder
 
 WORKDIR /cube
 COPY . .
@@ -92,7 +92,7 @@ RUN if [ -d "native" ] && [ -f "native/native/index.node" ]; then \
       echo "No native binaries found in native/native/"; \
     fi
 
-FROM node:22.20.0-bookworm-slim
+FROM node:22.23.4-bookworm-slim
 
 ARG IMAGE_VERSION=unknown
 
