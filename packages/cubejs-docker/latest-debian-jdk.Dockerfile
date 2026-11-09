@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile-upstream:master-experimental
-FROM node:22.22.0-bookworm-slim AS builder
+FROM node:22.23.4-bookworm-slim AS builder
 
 WORKDIR /cube
 COPY . .
@@ -96,7 +96,7 @@ RUN set -eu && \
     grep -aq "JsBuffer with columnar" /cube/node_modules/@cubejs-backend/native/native/index.node && \
     echo "Native binary installed and verified for ${NATIVE_ARCH}"
 
-FROM node:22.22.0-bookworm-slim
+FROM node:22.23.4-bookworm-slim
 
 ARG IMAGE_VERSION=unknown
 
